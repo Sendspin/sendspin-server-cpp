@@ -48,7 +48,8 @@ int32_t live_slew_ppm(LiveLowering& lowering, uint64_t frames, uint32_t rate, in
     if (debt <= 0 || write_us == 0) {
         return 0;
     }
-    // The slew never takes out more than is owed, so the lead never falls below `G_next`
+    // Never faster than takes out what is owed, so the lead falls below `G_next` by no more than
+    // the part frame a frame drop carries
     return static_cast<int32_t>(std::min(LOWERING_SLEW_PPM, debt * US_PER_SECOND / write_us));
 }
 

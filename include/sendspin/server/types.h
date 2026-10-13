@@ -558,7 +558,9 @@ enum class OpenInputResult : uint8_t {
 };
 
 struct WriteResult {
-    /// Frames taken from the start of the block
+    /// Frames taken from the start of the block; for a live input playing a raised latency back
+    /// down, the samples it staged for the block, a few fewer than it played them from
+    /// (GroupInput::write())
     size_t frames{0};
     InputState state{InputState::OPEN};
 };
@@ -612,10 +614,10 @@ enum class RouteSourceResult : uint8_t {
     UNKNOWN_GROUP,
     /// SourceRouteOptions::write_jitter_us is out of range
     INVALID_JITTER,
-    /// SourceRouteOptions::min_latency_us is out of range
-    INVALID_LATENCY,
     /// The group holds an input that is neither released nor closed
     GROUP_BUSY,
+    /// SourceRouteOptions::min_latency_us is out of range
+    INVALID_LATENCY,
 };
 
 }  // namespace sendspin::server

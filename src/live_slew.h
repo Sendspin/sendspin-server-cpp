@@ -42,12 +42,16 @@ class LiveSlew {
 public:
     /// @brief Readies the slew for format, ending any in progress: with asrc, micro-resampler's
     /// ASRC at quality, or frame drops where it cannot be made. Allocates all process() uses.
-    /// @return false when an allocation fails; the slew then takes nothing out
-    bool prepare(const InputFormat& format, bool asrc, ResamplerQuality quality);
+    void prepare(const InputFormat& format, bool asrc, ResamplerQuality quality);
 
-    /// @brief prepare() succeeded
+    /// @brief prepare() ran
     bool ready() const {
         return this->bytes_ != nullptr;
+    }
+
+    /// @brief The bytes of one frame of the format
+    size_t frame_bytes() const {
+        return this->frame_bytes_;
     }
 
     /// @brief Ends the slew in progress: the next starts again from frames written as they came

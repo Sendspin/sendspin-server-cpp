@@ -98,8 +98,8 @@ constexpr bool RESAMPLER_Q15 = EMBEDDED;
 
 /// @brief How a routed source's clock is corrected against the server's (LiveSourceSink), and a
 /// live input played fast to lower its latency (LiveSlew): with micro-resampler's ASRC on a host;
-/// on the embedded profile by dropping or repeating single frames, which needs no filter. The ASRC
-/// is meant to replace them on the ESP32-P4 once its cost there is measured.
+/// on the embedded profile by dropping or repeating single frames, which needs no filter and
+/// stands in for the ASRC until its cost on the ESP32-P4 is measured.
 constexpr bool SOURCE_ASRC = !EMBEDDED;
 
 /// @brief Group audio threads: the embedded profile runs one, on the second core; 0 is one per

@@ -26,24 +26,10 @@ namespace sendspin::server {
 static_assert(sched::LOWERING_SLEW_PPM <= static_cast<int64_t>(SOURCE_CLOCK_MAX_PPM),
               "SampleSlip and SourceAsrc clamp a faster slew");
 
-namespace {
-
-/// count elements of T, or null when the heap has no room
-template <class T>
-PlacedArray<T> allocate(size_t count) {
-    return PlacedArray<T>(static_cast<T*>(
-        placed_malloc(count * sizeof(T), new_alignment<T>(), MemoryLocation::PREFER_EXTERNAL)));
-}
-
-}  // namespace
-
-bool LiveSlew::prepare(const InputFormat& format, bool asrc, ResamplerQuality quality) {
+void LiveSlew::prepare(const InputFormat& format, bool asrc, ResamplerQuality quality) {
     this->format_ = format;
     this->frame_bytes_ = sample_bytes(format.sample_format) * format.channels;
     this->asrc_.reset();
-    this->bytes_.reset();
-    this->floats_in_.reset();
-    this->floats_out_.reset();
     this->restart();
     if (asrc) {
         this->asrc_ = SourceAsrc::create(format.sample_rate, format.channels, quality,
@@ -51,17 +37,19 @@ bool LiveSlew::prepare(const InputFormat& format, bool asrc, ResamplerQuality qu
     }
     const size_t output = SourceAsrc::max_output(LIVE_SLEW_BLOCK_FRAMES);
     if (this->asrc_) {
-        this->floats_in_ = allocate<float>(LIVE_SLEW_BLOCK_FRAMES * format.channels);
-        this->floats_out_ = allocate<float>(output * format.channels);
-        if (!this->floats_in_ || !this->floats_out_) {
-            this->asrc_.reset();
-        }
+        this->floats_in_ = make_placed_array<float>(LIVE_SLEW_BLOCK_FRAMES * format.channels,
+                                                    MemoryLocation::PREFER_EXTERNAL);
+        this->floats_out_ =
+            make_placed_array<float>(output * format.channels, MemoryLocation::PREFER_EXTERNAL);
+    } else {
+        this->floats_in_.reset();
+        this->floats_out_.reset();
     }
     // Dropped frames write no more than they take; the ASRC's output keeps back what a call's
     // capacity does not take
     this->output_frames_ = this->asrc_ ? 2 * output : LIVE_SLEW_BLOCK_FRAMES;
-    this->bytes_ = allocate<uint8_t>(this->output_frames_ * this->frame_bytes_);
-    return this->ready();
+    this->bytes_ = make_placed_array<uint8_t>(this->output_frames_ * this->frame_bytes_,
+                                              MemoryLocation::PREFER_EXTERNAL);
 }
 
 void LiveSlew::restart() {
@@ -100,7 +88,7 @@ void LiveSlew::start(size_t frames) {
         return;
     }
     this->taken_ = processed->consumed;
-    this->skip_ = frames - processed->written;
+    this->skip_ = frames > processed->written ? frames - processed->written : 0;
 }
 
 LiveSlew::Block LiveSlew::process(const uint8_t* in, size_t frames, int32_t ppm, size_t capacity) {

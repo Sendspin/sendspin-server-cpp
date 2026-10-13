@@ -227,12 +227,12 @@ Bytes tone_pcm(uint64_t from, uint64_t count) {
 // stages fewer positions and reports those taken, and `G_eff` follows its lead down by the time
 // taken out, never below `G_next` nor the input's least lead, against which what is owed is also
 // measured. A window of writes is seeded behind the input, and each row's write closes none; the
-// anchor's 100 ms keeps the excess far above any row's debt however late the thread runs.
+// anchor's half second keeps the excess above any row's debt unless the thread runs that late.
 TEST_F(HostViewTest, PlaysALiveInputFastWhileItOwesLatency) {
     using sendspin::server::sched::LOWERING_SLEW_PPM;
     constexpr uint64_t WRITE = 2 * RATE;
     constexpr int64_t WRITE_US = 2000000;
-    constexpr uint64_t ANCHOR = RATE / 10;
+    constexpr uint64_t ANCHOR = RATE / 2;
     struct Row {
         const char* name;
         /// How far the group lead falls after the anchor, the input's least lead, the debt seeded
@@ -252,6 +252,9 @@ TEST_F(HostViewTest, PlaysALiveInputFastWhileItOwesLatency) {
         {"G_eff stops at G_next", 50, 0, 1000000, ANCHOR, WRITE_US * LOWERING_SLEW_PPM / 1000000},
         {"G_eff stops at the least lead", 200000, LEAD_US - 50, 1000000, ANCHOR,
          WRITE_US * LOWERING_SLEW_PPM / 1000000},
+        // Twenty frames staged, fewer than the ASRC's filter spans
+        {"A short history starts the slew from what there is", 200000, 0, 1000000, 20,
+         WRITE_US * LOWERING_SLEW_PPM / 1000000},
         // A frame's anchor and a millisecond's wait: its first sample lands under the least lead,
         // however late the thread, and 200 ms past G_next
         {"What is owed is measured against the least lead", 200000, LEAD_US, 1000000, 1, 0},
@@ -260,13 +263,13 @@ TEST_F(HostViewTest, PlaysALiveInputFastWhileItOwesLatency) {
         SCOPED_TRACE(row.name);
         HostView& view = this->make_slewing(row.min_lead_us);
         const Bytes anchor = tone_pcm(0, row.anchor_frames);
+        const Bytes pcm = tone_pcm(row.anchor_frames, WRITE);
         ASSERT_EQ(view.write(anchor.data(), row.anchor_frames).frames, row.anchor_frames);
         if (row.anchor_frames == 1) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         view.set_group_params({LEAD_US - row.fall_us, 0, SLEW_AHEAD_US});
         view.lowering_ = {now_us(), std::numeric_limits<int64_t>::max(), 0, row.debt_us};
-        const Bytes pcm = tone_pcm(row.anchor_frames, WRITE);
         const WriteResult result = view.write(pcm.data(), WRITE);
         // Admission admits the whole write, so all it lacks is what the slew took out; the
         // positions staged are what it reports taken
@@ -314,6 +317,79 @@ TEST_F(HostViewTest, PlaysALiveInputFastWhileItOwesLatency) {
     }
 }
 
+/// Frames [from, from + count) of the tone, float stereo
+Bytes tone_floats(uint64_t from, uint64_t count) {
+    Bytes pcm(count * 8);
+    for (uint64_t k = 0; k < count; ++k) {
+        const auto sample = static_cast<float>(tone_at(static_cast<double>(from + k)) / 32768.0);
+        std::memcpy(&pcm[(k * 8)], &sample, 4);
+        std::memcpy(&pcm[(k * 8) + 4], &sample, 4);
+    }
+    return pcm;
+}
+
+// A format set while a live input slews starts a new segment, and the slew starts over in it, in
+// the new format, from the segment's first frame: the next write's staged audio is the tone at the
+// slew's rate from where that write began, in floats, with none of the old segment's frames
+TEST_F(HostViewTest, StartsTheSlewOverInANewFormat) {
+    using sendspin::server::sched::LOWERING_SLEW_PPM;
+    constexpr uint64_t ANCHOR = RATE / 2;
+    HostView& view = this->make_slewing(0);
+    const Bytes anchor = tone_pcm(0, ANCHOR);
+    const Bytes before = tone_pcm(ANCHOR, RATE);
+    // From a peak of the tone, as the slew's first frame primes it
+    const Bytes after = tone_floats(ANCHOR + RATE, RATE);
+    ASSERT_EQ(view.write(anchor.data(), ANCHOR).frames, ANCHOR);
+    view.set_group_params({LEAD_US - 200000, 0, SLEW_AHEAD_US});
+    view.lowering_ = {now_us(), std::numeric_limits<int64_t>::max(), 0, 1000000};
+    ASSERT_LT(view.write(before.data(), RATE).frames, RATE);
+    const uint64_t segment = view.job_view().head;
+    ASSERT_TRUE(view.set_format({RATE, 2, SampleFormat::F32}));
+    const WriteResult result = view.write(after.data(), RATE);
+    ASSERT_EQ(result.state, InputState::OPEN);
+    ASSERT_LT(result.frames, RATE);
+    const sendspin::server::JobView job = view.job_view();
+    ASSERT_EQ(job.head, segment + result.frames);
+    Bytes staged;
+    ASSERT_TRUE(view.read(job.run.epoch, segment, result.frames, staged));
+    const double ratio = 1.0 + (static_cast<double>(LOWERING_SLEW_PPM) * 1e-6);
+    for (uint64_t j = 0; j < result.frames; ++j) {
+        float sample = 0.0F;
+        std::memcpy(&sample, &staged[j * 8], 4);
+        const double at = static_cast<double>(ANCHOR + RATE) + (j * ratio);
+        if (sendspin::server::profile::SOURCE_ASRC) {
+            ASSERT_NEAR(sample * 32768.0, tone_at(at), 70) << j;
+        } else {
+            const auto low = static_cast<uint64_t>(at);
+            const auto exact = [&](uint64_t k) {
+                return sample == static_cast<float>(tone_at(static_cast<double>(k)) / 32768.0);
+            };
+            ASSERT_TRUE(exact(low) || exact(low + 1)) << j;
+        }
+    }
+}
+
+// A write runs through the slew with the mutex released, so it takes up the slew in one step and
+// stages its blocks in others: a write made in between takes nothing, and a flush in between ends
+// the staging, so none of the old epoch's audio lands in the new one; the next write takes the
+// slew up again
+TEST_F(HostViewTest, StagesNothingOfASlewedWriteAFlushOverran) {
+    constexpr uint64_t ANCHOR = RATE / 2;
+    HostView& view = this->make_slewing(0);
+    const Bytes anchor = tone_pcm(0, ANCHOR);
+    const Bytes pcm = tone_pcm(ANCHOR, RATE);
+    ASSERT_EQ(view.write(anchor.data(), ANCHOR).frames, ANCHOR);
+    const HostView::SlewedWrite slewed = view.begin_slewed(RATE, 300, InputState::OPEN);
+    EXPECT_EQ(view.write(pcm.data(), RATE).frames, 0U);
+    view.flush();
+    EXPECT_EQ(view.write_slewed(pcm.data(), slewed).frames, 0U);
+    EXPECT_EQ(view.job_view().head, 0U);
+    // The flush's epoch anchors with the next write, and the one after takes the slew up again
+    ASSERT_EQ(view.write(anchor.data(), ANCHOR).frames, ANCHOR);
+    EXPECT_EQ(view.write(pcm.data(), RATE).frames, RATE);
+    EXPECT_EQ(view.job_view().head, ANCHOR + RATE);
+}
+
 // A live input with a least lead above the group's anchors there, takes that lead for its
 // provisional times before then, and keeps a raised lead above it as any
 TEST_F(HostViewTest, AnchorsALiveInputAtItsLeastLead) {
@@ -331,28 +407,39 @@ TEST_F(HostViewTest, AnchorsALiveInputAtItsLeastLead) {
     EXPECT_EQ(view.job_view().group_lead_eff_us, LEAST_US + 200000);
 }
 
-// What a live epoch owes ends with it, and so does its slew: the epoch a flush begins, and its
-// writes, owe nothing of the one before and stage their audio as it came, bit for bit. Owed a
-// second, the old epoch's debt would slew the new epoch's 2 s write, and an ASRC left running would
-// resample it, starting with the frames it held from the old epoch.
+// What a live epoch owes ends with it, and so does its slew: the epoch a flush, or a pause and
+// resume, begins, and its writes, owe nothing of the one before and stage their audio as it came,
+// bit for bit. Owed a second, the old epoch's debt would slew the new epoch's 1 s write, and an
+// ASRC left running would resample it, starting with the frames it held from the old epoch.
 TEST_F(HostViewTest, EndsALiveInputsSlewWithItsEpoch) {
     constexpr uint64_t ANCHOR = RATE / 10;
-    HostView& view = this->make_slewing(0);
-    ASSERT_EQ(this->write(ANCHOR).frames, ANCHOR);
-    view.set_group_params({LEAD_US - 200000, 0, SLEW_AHEAD_US});
-    view.lowering_ = {now_us(), std::numeric_limits<int64_t>::max(), 0, 1000000};
-    ASSERT_LT(this->write(RATE).frames, RATE);
-    view.lowering_.debt_us = 1000000;
-    view.flush();
-    ASSERT_EQ(this->write(ANCHOR).frames, ANCHOR);
-    const Bytes pcm = tone_pcm(ANCHOR, 2 * RATE);
-    ASSERT_EQ(view.write(pcm.data(), 2 * RATE).frames, 2 * RATE);
-    const sendspin::server::JobView job = view.job_view();
-    EXPECT_EQ(job.head, ANCHOR + (2 * RATE));
-    EXPECT_EQ(job.group_lead_eff_us, LEAD_US - 200000);
-    Bytes staged;
-    ASSERT_TRUE(view.read(job.run.epoch, ANCHOR, 2 * RATE, staged));
-    EXPECT_EQ(staged, pcm);
+    for (const bool flush : {true, false}) {
+        SCOPED_TRACE(flush ? "a flush" : "a pause and resume");
+        HostView& view = this->make_slewing(0);
+        ASSERT_EQ(this->write(ANCHOR).frames, ANCHOR);
+        view.set_group_params({LEAD_US - 200000, 0, SLEW_AHEAD_US});
+        view.lowering_ = {now_us(), std::numeric_limits<int64_t>::max(), 0, 1000000};
+        ASSERT_LT(this->write(RATE).frames, RATE);
+        view.lowering_.debt_us = 1000000;
+        if (flush) {
+            view.flush();
+            // The new epoch's first write anchors it
+            ASSERT_EQ(this->write(ANCHOR).frames, ANCHOR);
+        } else {
+            (void)view.pause();
+            ASSERT_EQ(this->write(ANCHOR).frames, ANCHOR);
+            view.resume();
+        }
+        const uint64_t from = view.job_view().head;
+        const Bytes pcm = tone_pcm(ANCHOR, RATE);
+        ASSERT_EQ(view.write(pcm.data(), RATE).frames, RATE);
+        const sendspin::server::JobView job = view.job_view();
+        EXPECT_EQ(job.head, from + RATE);
+        EXPECT_EQ(job.group_lead_eff_us, LEAD_US - 200000);
+        Bytes staged;
+        ASSERT_TRUE(view.read(job.run.epoch, from, RATE, staged));
+        EXPECT_EQ(staged, pcm);
+    }
 }
 
 // MAX_ANCHOR_SHIFTS: releasing the ring folds the shifts below the cell it then holds first into

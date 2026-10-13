@@ -213,11 +213,12 @@ public:
     /// real-time safe. Takes as many as the input admits, up to about the group's lead plus its
     /// write-ahead past the time now playing; state says why it took fewer. A new input admits
     /// nothing (InputState::FULL) until the server has attached it to its group. A live input's
-    /// writer drops what write() refuses and never resends what a stall held back. A live input
-    /// bringing a raised latency back down plays its samples slightly fast (InputKind::LIVE), so
-    /// write() may report a few fewer taken with InputState::OPEN: the samples staged, which the
-    /// input's positions count. Its writer drops the rest the same way; they play within those
-    /// staged.
+    /// writer drops what write() refuses and never resends what a stall held back. Once a live
+    /// input has played a raised latency back down (InputKind::LIVE), it resamples each write until
+    /// its run's epoch ends (on a host; on ESP-IDF only while it plays the latency down), so
+    /// write() may report up to a few fewer samples taken than given with InputState::OPEN: those
+    /// it staged, which the input's positions count. Its writer drops the rest the same way; they
+    /// play within those staged.
     WriteResult write(const void* pcm, size_t frames);
 
     /// @brief The input's state now: what write() would report for a cell (20 ms) of samples.

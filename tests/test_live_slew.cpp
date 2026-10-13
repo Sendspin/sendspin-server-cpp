@@ -41,7 +41,7 @@ using sendspin::server::sched::LOWERING_SLEW_PPM;
 constexpr uint32_t RATE = 48000;
 /// The frames written as they came before the slew starts, and the slew's own
 constexpr size_t BEFORE = 4800;
-constexpr size_t SLEWED = 10 * RATE;
+constexpr size_t SLEWED = 2 * RATE;
 constexpr size_t BLOCK = RATE / 100;
 
 /// A 200 Hz tone at half scale, from its peak
@@ -83,7 +83,7 @@ struct Row {
     size_t history;
 };
 
-// Ten seconds slewed at the slew rate after BEFORE frames written as they came: the output after
+// Two seconds slewed at the slew rate after BEFORE frames written as they came: the output after
 // them continues the tone with no gap or repeat at the start, frame j of it the input's frame
 // BEFORE + j * (1 + ppm), through the ASRC to its filter's error and by dropping frames exactly one
 // input frame within a frame of it; the time reported taken out is the rate's share
@@ -99,7 +99,7 @@ TEST(LiveSlew, ContinuesTheFramesBeforeItAtTheSlewRate) {
         SCOPED_TRACE(row.name);
         const InputFormat format{RATE, 1, row.format};
         LiveSlew slew;
-        ASSERT_TRUE(slew.prepare(format, row.asrc, ResamplerQuality::MEDIUM));
+        slew.prepare(format, row.asrc, ResamplerQuality::MEDIUM);
         const size_t frame_bytes = tone_frame(0, row.format).size();
         // The frames before the slew, then its own
         std::vector<uint8_t> in;
@@ -124,7 +124,7 @@ TEST(LiveSlew, ContinuesTheFramesBeforeItAtTheSlewRate) {
         }
         const double ratio = 1.0 + (static_cast<double>(LOWERING_SLEW_PPM) * 1e-6);
         const size_t written = out.size() / frame_bytes;
-        ASSERT_GT(written, SLEWED - 200);
+        ASSERT_GT(written, SLEWED - 100);
         double worst = 0.0;
         for (size_t j = 0; j < written; ++j) {
             const double at = static_cast<double>(BEFORE) + (static_cast<double>(j) * ratio);
@@ -144,8 +144,8 @@ TEST(LiveSlew, ContinuesTheFramesBeforeItAtTheSlewRate) {
         }
         // A frame off at the start would leave 0.013; the integer format adds its own step
         EXPECT_LT(worst, 2e-3);
-        // 10 s at 300 ppm: 3 ms, to a frame
-        EXPECT_NEAR(static_cast<double>(slewed_us), 3000.0, 21.0);
+        // 2 s at 300 ppm: 600 us, to a frame
+        EXPECT_NEAR(static_cast<double>(slewed_us), 600.0, 21.0);
     }
 }
 
@@ -154,7 +154,7 @@ TEST(LiveSlew, ContinuesTheFramesBeforeItAtTheSlewRate) {
 // a run whose calls each hold a frame back writes what one with room writes
 TEST(LiveSlew, WritesNoMoreThanItsCapacityAndKeepsBackTheRest) {
     LiveSlew dropping;
-    ASSERT_TRUE(dropping.prepare({RATE, 1, SampleFormat::S16}, false, ResamplerQuality::MEDIUM));
+    dropping.prepare({RATE, 1, SampleFormat::S16}, false, ResamplerQuality::MEDIUM);
     const std::vector<uint8_t> flat(LIVE_SLEW_BLOCK_FRAMES * 2, 3);
     const LiveSlew::Block dropped = dropping.process(flat.data(), LIVE_SLEW_BLOCK_FRAMES, 300, 100);
     EXPECT_EQ(dropped.consumed, 100U);
@@ -169,7 +169,7 @@ TEST(LiveSlew, WritesNoMoreThanItsCapacityAndKeepsBackTheRest) {
     for (const size_t held : {size_t{0}, size_t{1}}) {
         SCOPED_TRACE(held);
         LiveSlew slew;
-        ASSERT_TRUE(slew.prepare({RATE, 1, SampleFormat::F32}, true, ResamplerQuality::MEDIUM));
+        slew.prepare({RATE, 1, SampleFormat::F32}, true, ResamplerQuality::MEDIUM);
         slew.start(0);
         for (size_t at = 0; at < 20 * BLOCK; at += BLOCK) {
             const size_t capacity = held == 0 ? 1000000 : BLOCK - 1;

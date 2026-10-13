@@ -15,7 +15,8 @@
 /// @file host_view.h
 /// @brief A group input's host view: the staged PCM, the run, the current epoch's anchor and the
 /// group parameters, shared under one mutex by the host's calls, the group's pipelines and core.
-/// Each GroupInput call is one step under the mutex. The mutex is a leaf: what a step signals or
+/// Each GroupInput call is one step under the mutex, but for a live write through the slew, which
+/// resamples between its steps (HostView::write()). The mutex is a leaf: what a step signals or
 /// posts happens after it is released.
 
 #pragma once
@@ -166,8 +167,10 @@ public:
     // ------------------------------------------------------------------------------
 
     /// @brief Admits up to `P_max` and anchors a run or pending epoch it begins. A playing live
-    /// input owing latency plays its frames fast (sched::live_slew_ppm(), LiveSlew) and reports
-    /// the positions they took. No allocation: the copy goes into the preallocated staging ring.
+    /// input owing latency plays its frames fast (sched::live_slew_ppm(), LiveSlew), with the
+    /// mutex released between the steps that stage each block, and reports the positions they
+    /// took; a write made meanwhile takes nothing. No allocation: the copy goes into the
+    /// preallocated staging ring.
     WriteResult write(const void* pcm, size_t frames);
     InputState state() const;
     InputState wait_writable(int64_t timeout_us);
@@ -284,10 +287,26 @@ private:
     sched::AdmissionInput admission_input() const;
     /// `G_next` as this input takes it: the group's, or the input's least lead where higher
     int64_t lead_next() const;
-    /// Writes frames of a playing live input through the slew at ppm, starting it from the
-    /// staged frames before the head where it waits; at most frames positions
-    /// @return the positions written, which write() reports as taken
-    uint64_t write_slewed(const uint8_t* pcm, uint64_t frames, int32_t ppm);
+    /// What a write through the slew takes from its first step under the mutex to the rest
+    struct SlewedWrite {
+        /// The frames admitted, which bound the positions staged; nullopt when not slewed
+        std::optional<uint64_t> frames;
+        int32_t ppm{0};
+        InputState state{InputState::OPEN};
+        /// slew_generation_ as the write began
+        uint64_t generation{0};
+        /// The staged frames before the head copied into the slew's history, where it waits for
+        /// start()
+        std::optional<size_t> history;
+    };
+    /// Takes up a slew the format or epoch replaced, from set_format()'s or restarted
+    void adopt_slew();
+    /// Under the mutex: claims the slew for one write of frames at ppm, copying its history
+    SlewedWrite begin_slewed(uint64_t frames, int32_t ppm, InputState state);
+    /// Without the mutex: runs the write through the slew a block at a time, staging each block's
+    /// output under the mutex unless a flush, stop, drain, close, epoch or format came since
+    /// @return the positions staged, which the host is told were taken
+    WriteResult write_slewed(const uint8_t* pcm, const SlewedWrite& slewed);
     /// `R_min`: one cell of input samples
     uint64_t ready_samples() const;
     /// Anchors the current epoch at p0_ with `T0 = now + G_next` (lead_next()), reusing the
@@ -351,9 +370,17 @@ private:
     GroupParams params_;
     /// `G_eff` of the anchored epoch
     int64_t group_lead_eff_us_{0};
-    /// A live input's latency lowering in the current epoch, and the slew that plays it out
+    /// A live input's latency lowering in the current epoch
     sched::LiveLowering lowering_;
+    /// The slew that plays it out. A write runs it with the mutex released while slewing_, and
+    /// no other call touches it: one that replaces it bumps slew_generation_, and the next write
+    /// takes set_format()'s next_slew_ or restarts it (adopt_slew()).
     LiveSlew slew_;
+    bool slewing_{false};
+    uint64_t slew_generation_{0};
+    uint64_t slew_seen_{0};
+    LiveSlew next_slew_;
+    bool slew_pending_{false};
     /// `k*` the pipelines published for the current epoch, and the `L_p` its rebase decides with
     std::optional<int64_t> shift_index_;
     int64_t rebase_latency_us_{0};

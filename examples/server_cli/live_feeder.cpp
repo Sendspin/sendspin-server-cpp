@@ -219,8 +219,10 @@ std::optional<LiveFeeder::Event> LiveFeeder::write_locked(const uint8_t* pcm, si
         return std::nullopt;
     }
     const WriteResult result = this->input_->write(pcm, frames);
-    this->written_ += result.frames;
-    this->dropped_ += frames - result.frames;
+    // Short with OPEN, the input played its latency down: the rest plays within what it staged
+    const size_t taken = result.state == InputState::OPEN ? frames : result.frames;
+    this->written_ += taken;
+    this->dropped_ += frames - taken;
     if (result.state == InputState::STOP_LATCHED) {
         // Acknowledged; the next run waits for resume()
         this->input_->stop();
