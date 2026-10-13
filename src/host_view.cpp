@@ -104,11 +104,13 @@ bool is_valid_input(const InputFormat& format) {
 
 HostView::HostView(GroupId group, InputId id, const InputOptions& options,
                    const GroupParams& initial, std::shared_ptr<Dispatcher> dispatcher,
-                   ServerListener* listener)
+                   ServerListener* listener, const LiveOptions& live)
     : group_(group),
       id_(id),
       kind_(options.kind),
       write_jitter_us_(options.kind == InputKind::LIVE ? options.write_jitter_us : 0),
+      min_lead_us_(options.kind == InputKind::LIVE ? live.min_lead_us : 0),
+      quality_(live.quality),
       dispatcher_(std::move(dispatcher)),
       listener_(listener),
       format_(options.format),
@@ -122,6 +124,9 @@ HostView::HostView(GroupId group, InputId id, const InputOptions& options,
     this->segments_.reserve(MAX_STAGED_SEGMENTS);
     this->segments_.push_back({0, options.format, 0});
     this->ring_ = RingStorage::allocate(ring_bytes_for(options.format));
+    if (this->kind_ == InputKind::LIVE) {
+        this->slew_.prepare(options.format, profile::SOURCE_ASRC, this->quality_);
+    }
 }
 
 HostView::FormatState HostView::format() const {
@@ -136,6 +141,9 @@ HostView::FormatState HostView::format() const {
 WriteResult HostView::write(const void* pcm, size_t frames) {
     AfterUnlock after;
     WriteResult result;
+    SlewedWrite slewed;
+    // A slew the format replaced, freed once the mutex is released
+    LiveSlew retired;
     {
         const std::lock_guard<std::mutex> lock(this->mutex_);
         if (this->closed_ || this->released_) {
@@ -145,7 +153,27 @@ WriteResult HostView::write(const void* pcm, size_t frames) {
         this->host_calls_seen_ = this->host_calls_;
         const sched::WriteDecision decision =
             sched::decide_write(this->admission_input(), this->anchor_, frames, now);
-        if (decision.frames > 0) {
+        uint64_t taken = decision.frames;
+        const bool live_playing =
+            this->kind_ == InputKind::LIVE && this->run_.run == sched::RunState::PLAYING;
+        int32_t ppm = 0;
+        const bool busy = this->slewing_;
+        if (busy) {
+            // The slew belongs to a write still running through it, which may stage up to the
+            // room admission gave it: this one takes nothing
+            this->writable_wanted_ = true;
+            this->signal(after);
+            result = {0, InputState::FULL};
+        } else if (live_playing) {
+            this->adopt_slew(retired);
+            if (this->slew_.ready()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): set while playing
+                const int64_t head_us = *decision.head_us;
+                ppm = sched::live_slew_ppm(this->lowering_, taken, this->format_.sample_rate,
+                                           head_us, now, this->lead_next());
+            }
+        }
+        if (taken > 0 && !busy) {
             // The write that begins a run or a pending epoch anchors it
             if (this->run_.run == sched::RunState::NONE) {
                 sched::view_anchor_write(this->run_, new_run_id(), new_epoch_id());
@@ -154,20 +182,29 @@ WriteResult HostView::write(const void* pcm, size_t frames) {
                 sched::view_anchor_write(this->run_, {}, {});
                 this->anchor_at(now);
             }
-            copy_in(this->ring_.span(), this->byte_of(this->head_),
-                    static_cast<const uint8_t*>(pcm),
-                    static_cast<size_t>(decision.frames) * frame_bytes_of(this->format_));
-            this->head_ += decision.frames;
+            if (live_playing && (ppm > 0 || this->slew_.engaged())) {
+                slewed = this->begin_slewed(taken, ppm, decision.state);
+            } else {
+                copy_in(this->ring_.span(), this->byte_of(this->head_),
+                        static_cast<const uint8_t*>(pcm),
+                        static_cast<size_t>(taken) * frame_bytes_of(this->format_));
+                this->head_ += taken;
+            }
         }
-        if (decision.state == InputState::FULL) {
-            this->writable_wanted_ = true;
+        if (!slewed.frames && !busy) {
+            if (decision.state == InputState::FULL) {
+                this->writable_wanted_ = true;
+            }
+            if (taken > 0 || decision.state == InputState::FULL) {
+                this->signal(after);
+            }
+            result = {static_cast<size_t>(taken), decision.state};
         }
-        if (decision.frames > 0 || decision.state == InputState::FULL) {
-            this->signal(after);
-        }
-        result = {static_cast<size_t>(decision.frames), decision.state};
     }
     this->run_after(after);
+    if (slewed.frames) {
+        return this->write_slewed(static_cast<const uint8_t*>(pcm), slewed);
+    }
     return result;
 }
 
@@ -191,8 +228,11 @@ InputState HostView::wait_writable(int64_t timeout_us) {
             this->host_calls_seen_ = this->host_calls_;
             return state;
         }
-        const int64_t ready = sched::readiness_time(this->admission_input(), this->anchor_,
-                                                    this->ready_samples(), now);
+        // A write running through the slew wakes the wait as it ends
+        const int64_t ready = this->slewing_
+                                  ? sched::NEVER
+                                  : sched::readiness_time(this->admission_input(), this->anchor_,
+                                                          this->ready_samples(), now);
         // Within what a steady_clock duration holds; the loop waits again after a longer one
         const int64_t wait_us = std::min({deadline, ready, now + MAX_WAIT_US}) - now;
         this->changed_.wait_for(lock, std::chrono::microseconds(wait_us));
@@ -256,6 +296,8 @@ uint64_t HostView::pause() {
         if (!sched::view_pause(this->run_)) {
             return run == sched::RunState::PAUSED ? this->p_pause_ : 0;
         }
+        // A write running through the slew stages nothing more
+        ++this->slew_generation_;
         // The timeline position at now, the same for every player
         this->p_pause_ = sched::pause_position(this->anchor_, this->p0_, this->head_,
                                                run == sched::RunState::PENDING, now_us());
@@ -311,6 +353,11 @@ bool HostView::set_format(const InputFormat& format) {
     // it; the ring it replaces is freed after the unlock too
     RingStorage storage;
     RingStorage replaced;
+    // So is a live input's slew for the format, which takes over at the new segment
+    LiveSlew slew;
+    if (this->kind_ == InputKind::LIVE && is_valid_input(format)) {
+        slew.prepare(format, profile::SOURCE_ASRC, this->quality_);
+    }
     size_t wanted = 0;
     while (true) {
         if (storage.size != wanted) {
@@ -365,6 +412,12 @@ bool HostView::set_format(const InputFormat& format) {
         if (needed != this->ring_.size) {
             replaced = std::exchange(this->ring_, std::move(storage));
         }
+        if (this->kind_ == InputKind::LIVE) {
+            // The next write takes it, as one may be running through the slew now
+            std::swap(this->next_slew_, slew);
+            this->slew_pending_ = true;
+            ++this->slew_generation_;
+        }
         ++this->format_generation_;
         this->signal(after);
         break;
@@ -396,7 +449,7 @@ int64_t HostView::time_of_locked(uint64_t position, int64_t now) const {
             break;
     }
     // Provisional: as if anchored now, through the staged segments
-    this->build_anchor(this->provisional_, now + this->params_.group_lead_us, from);
+    this->build_anchor(this->provisional_, now + this->lead_next(), from);
     return sched::time_of(this->provisional_, position);
 }
 
@@ -526,7 +579,8 @@ int64_t HostView::poll_writable(int64_t now_us) {
     AfterUnlock after;
     {
         const std::lock_guard<std::mutex> lock(this->mutex_);
-        if (!this->writable_wanted_ || this->closed_ || this->released_) {
+        // A write running through the slew signals core as it ends
+        if (!this->writable_wanted_ || this->closed_ || this->released_ || this->slewing_) {
             return sched::NEVER;
         }
         const int64_t ready = sched::readiness_time(this->admission_input(), this->anchor_,
@@ -650,6 +704,10 @@ InputState HostView::state_locked(int64_t now_us) const {
     if (this->run_.drain) {
         return InputState::DRAINING;
     }
+    // A write running through the slew holds the room admission gave it until it ends
+    if (this->slewing_) {
+        return InputState::FULL;
+    }
     return sched::admitted_past_head(this->admission_input(), this->anchor_, now_us) >=
                    this->ready_samples()
                ? InputState::OPEN
@@ -683,8 +741,8 @@ sched::AdmissionInput HostView::admission_input() const {
     in.p0 = this->p0_;
     in.p_pause = this->p_pause_;
     in.head_rate = this->format_.sample_rate;
-    in.group_lead_us = this->run_.run == sched::RunState::PLAYING ? this->group_lead_eff_us_
-                                                                  : this->params_.group_lead_us;
+    in.group_lead_us =
+        this->run_.run == sched::RunState::PLAYING ? this->group_lead_eff_us_ : this->lead_next();
     in.write_ahead_us = this->params_.write_ahead_us;
     // What the ring has room for past the head, in the head's format
     const uint64_t used = this->byte_of(this->head_) - this->byte_of(this->retain_from_);
@@ -704,12 +762,99 @@ uint64_t HostView::ready_samples() const {
         sched::ceil_div(this->format_.sample_rate, sched::CELLS_PER_SECOND));
 }
 
+int64_t HostView::lead_next() const {
+    return std::max(this->params_.group_lead_us, this->min_lead_us_);
+}
+
+void HostView::adopt_slew(LiveSlew& retired) {
+    if (this->slew_seen_ == this->slew_generation_) {
+        return;
+    }
+    if (this->slew_pending_) {
+        std::swap(this->slew_, this->next_slew_);
+        std::swap(this->next_slew_, retired);
+        this->slew_pending_ = false;
+    }
+    this->slew_.restart();
+    this->slew_seen_ = this->slew_generation_;
+}
+
+HostView::SlewedWrite HostView::begin_slewed(uint64_t frames, int32_t ppm, InputState state) {
+    SlewedWrite slewed{frames, ppm, state, this->slew_generation_, std::nullopt};
+    if (this->slew_.awaits_start()) {
+        // The frames of this segment just before the head, which the ASRC's output continues
+        const uint64_t first = std::max(this->segments_.back().position, this->retain_from_);
+        const auto history =
+            static_cast<size_t>(std::min<uint64_t>(this->head_ - first, LIVE_SLEW_BLOCK_FRAMES));
+        copy_out(this->ring_.span(), this->byte_of(this->head_ - history),
+                 this->slew_.history().data(), history * frame_bytes_of(this->format_));
+        slewed.history = history;
+    }
+    this->slewing_ = true;
+    return slewed;
+}
+
+WriteResult HostView::write_slewed(const uint8_t* pcm, const SlewedWrite& slewed) {
+    // The slew runs with the mutex released; slewing_ keeps every other call off it
+    if (slewed.history) {
+        this->slew_.start(*slewed.history);
+    }
+    const size_t frame_bytes = this->slew_.frame_bytes();
+    const uint64_t frames = slewed.frames.value_or(0);
+    uint64_t taken = 0;
+    uint64_t written = 0;
+    bool staging = true;
+    bool ended = false;
+    while (staging && taken < frames) {
+        const auto block =
+            static_cast<size_t>(std::min<uint64_t>(frames - taken, LIVE_SLEW_BLOCK_FRAMES));
+        // Admission's frames bound the positions written, whatever the input it took for them
+        const LiveSlew::Block out = this->slew_.process(
+            pcm + (taken * frame_bytes), block, slewed.ppm, static_cast<size_t>(frames - written));
+        const int64_t slewed_us = this->slew_.take_slewed_us();
+        const std::lock_guard<std::mutex> lock(this->mutex_);
+        // A flush, stop, pause, close, release, server stop, new epoch or format bumps the
+        // generation; a drain stages nothing more. Either ends the write here.
+        ended = slewed.generation != this->slew_generation_ || this->run_.drain.has_value();
+        if (ended) {
+            break;
+        }
+        copy_in(this->ring_.span(), this->byte_of(this->head_), this->slew_.output(),
+                out.written * frame_bytes);
+        this->head_ += out.written;
+        this->group_lead_eff_us_ = sched::record_slew(this->lowering_, slewed_us, this->lead_next(),
+                                                      this->group_lead_eff_us_);
+        written += out.written;
+        taken += out.consumed;
+        staging = out.consumed == block;
+    }
+    AfterUnlock after;
+    InputState state = slewed.state;
+    {
+        const std::lock_guard<std::mutex> lock(this->mutex_);
+        this->slewing_ = false;
+        if (ended) {
+            state = this->state_locked(now_us());
+        }
+        if (state == InputState::FULL) {
+            this->writable_wanted_ = true;
+        }
+        this->signal(after);
+        this->changed_.notify_all();
+    }
+    this->run_after(after);
+    // The host counts positions by what it is told was taken
+    return {static_cast<size_t>(written), state};
+}
+
 void HostView::anchor_at(int64_t now_us) {
-    this->build_anchor(this->anchor_, now_us + this->params_.group_lead_us, this->p0_);
+    this->build_anchor(this->anchor_, now_us + this->lead_next(), this->p0_);
     this->anchor_valid_ = true;
-    this->group_lead_eff_us_ = this->params_.group_lead_us;
+    this->group_lead_eff_us_ = this->lead_next();
     this->shift_index_.reset();
     this->rebase_latency_us_ = 0;
+    this->lowering_ = {};
+    ++this->slew_generation_;
 }
 
 void HostView::resolve_empty_drain(AfterUnlock& after) {
@@ -772,6 +917,7 @@ void HostView::prune_segments() {
 }
 
 void HostView::restart_positions() {
+    ++this->slew_generation_;
     this->segments_.clear();
     this->segments_.push_back({0, this->format_, 0});
     this->head_ = 0;

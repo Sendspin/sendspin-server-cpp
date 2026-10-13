@@ -189,7 +189,8 @@ struct RoutedSource {
 /// Threading: every method may be called from any thread (on ESP-IDF any task, a pthread or not),
 /// including from a listener call, and returns without waiting, except wait_writable(). Each call
 /// updates the input's state at once, in call order, so time_of(), latency_us(), state() and
-/// pause() reflect every earlier call.
+/// pause() reflect every earlier call; a live input's write through its slew (write()) stages its
+/// samples block by block instead.
 ///
 /// Releasing the input (destroying the last reference) and then opening another on the same group
 /// at once is supported: the released input no longer holds the group.
@@ -214,6 +215,15 @@ public:
     /// write-ahead past the time now playing; state says why it took fewer. A new input admits
     /// nothing (InputState::FULL) until the server has attached it to its group. A live input's
     /// writer drops what write() refuses and never resends what a stall held back.
+    ///
+    /// Once a live input starts playing a raised latency back down (InputKind::LIVE), its writes
+    /// go through a slew: on a host until its epoch ends, its format changes or it pauses, on
+    /// ESP-IDF only while it plays the latency down. Such a write reports the samples it staged, up
+    /// to a few fewer than given, with InputState::OPEN; the input's positions count those, and its
+    /// writer drops the rest the same way, as they play within those staged. It stages block by
+    /// block: a flush(), pause(), stop(), drain() or set_format(), or the server stopping or
+    /// closing the input, meanwhile ends it early with the state that call left, and another
+    /// write() meanwhile takes nothing (InputState::FULL).
     WriteResult write(const void* pcm, size_t frames);
 
     /// @brief The input's state now: what write() would report for a cell (20 ms) of samples.
@@ -389,12 +399,15 @@ public:
     /// moving with it; into the group its input holds, it returns GROUP_BUSY until that input is
     /// released.
     ///
-    /// The group's timeline is the server's, as for any live input: the source's capture times
-    /// drop a chunk that arrives later than the write jitter allows, the backlog of a stall, and
-    /// end the input's run at a gap of a second or more, and at the end of the source's stream,
-    /// so its next audio starts a new run (docs/internals.md "Known limitations"). A device that
-    /// is a player too plays only what its group streams it, its own input included (spec
-    /// roles/source/v1.md).
+    /// The source's audio plays a fixed latency after its capture: the group's lead past its
+    /// arrival when its run starts, or options' least latency where higher, held there by
+    /// correcting the source's clock against the server's once the two measurably drift (for a
+    /// source clock within 500 ppm of the server's), and raised or lowered as for any live input,
+    /// never below that least latency. Its
+    /// capture times also drop a chunk that arrives later than the write jitter allows, the
+    /// backlog of a stall, and end the input's run at a gap of a second or more, and at the end
+    /// of the source's stream, so its next audio starts a new run. A device that is a player too
+    /// plays only what its group streams it, its own input included (spec roles/source/v1.md).
     /// @param client_id need not be connected
     RoutedSource route_source(std::string_view client_id, GroupId group,
                               const SourceRouteOptions& options = {});

@@ -13,9 +13,9 @@ Early development. The public API changes between releases without deprecation, 
 - `SendspinServer` (`include/sendspin/server/server.h`): advertises itself and browses for clients over mDNS, accepts clients and dials them by URL, keeps every client time-synced and reconnects the ones that drop
 - Mandatory Noise KKpsk2 encryption on every connection; pairing by Pairing PSK token, static code or the code a client shows (CPace), and operator approval of clients with unpaired access
 - Groups the host creates, renames and moves clients between, each playing its own input
-- Host PCM input, buffered (a file or decoder) or live (a capture device), streamed to each player as PCM, FLAC or Opus (off by default, `ServerConfig::enable_opus`) in its chosen format, resampled and channel-mixed per player, with in-place format switches
+- Host PCM input, buffered (a file or decoder) or live (a capture device, whose raised latency comes back down inaudibly), streamed to each player as PCM, FLAC or Opus (off by default, `ServerConfig::enable_opus`) in its chosen format, resampled and channel-mixed per player, with in-place format switches
 - Controller, metadata, artwork (JPEG or PNG, fitted to each channel), color and visualizer roles
-- Source role: a client's captured audio routed into a group's live input
+- Source role: a client's captured audio routed into a group's live input, played a fixed latency after its capture, the source's clock drift corrected (ASRC on a host, single frames dropped or repeated on ESP-IDF)
 - `examples/server_cli`: a command-line and browser-controlled host on the public API
 
 ## Documentation

@@ -14,14 +14,17 @@
 
 /// @file source_sink.h
 /// @brief The seam between a routed source's decoder and the group it plays in: SourcePcmSink
-/// takes the decoded PCM with each block's capture time. LiveSourceSink writes it into an
-/// ordinary live input of the group, on the timeline the server chooses, and uses the capture
-/// times only to drop a stall's backlog and to start a new run after a long gap
-/// (judge_source_chunk()).
+/// takes the decoded PCM with each block's capture time. LiveSourceSink writes it into a live input
+/// of the group, dropping a stall's backlog and starting a new run after a long gap
+/// (judge_source_chunk()), and corrects the source's clock against the server's (SourceClock), so
+/// every sample plays a fixed latency after its capture.
 
 #pragma once
 
 #include "host_view.h"
+#include "memory.h"
+#include "sendspin/server/config.h"
+#include "source_clock.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +32,10 @@
 #include <optional>
 
 namespace sendspin::server {
+
+/// @brief The longest chunk a source may send (roles/source/v1.md "Source Audio Chunks
+/// (Binary)")
+constexpr int64_t MAX_SOURCE_CHUNK_US = 150000;
 
 /// @brief A gap in a source's capture times this long or longer ends the input's run, so its next
 /// audio starts a new run with a fresh lead rather than playing late behind one long gap
@@ -47,7 +54,8 @@ public:
 
     /// @brief One chunk's whole audio, however many codec frames it decoded from, so the chunk is
     /// judged as one
-    /// @param pcm frames frames in begin()'s format, at least one
+    /// @param pcm frames frames in begin()'s format: at least one, at most MAX_SOURCE_CHUNK_US of
+    /// them
     /// @param capture_us the server-clock time the first frame was captured (roles/source/v1.md
     /// "Source Audio Chunks (Binary)"), within MAX_SOURCE_TIMESTAMP_US of 0
     /// @param rx_us the receive stamp of the chunk
@@ -86,12 +94,16 @@ SourceChunkAction judge_source_chunk(SourceTiming& timing, int64_t capture_us, i
                                      int64_t rx_us, int64_t jitter_us);
 
 /// @brief Writes a source's audio into a live input (InputKind::LIVE). The input's own rules apply:
-/// a write it refuses is dropped, a late write moves its timeline forward in one gap, and a stop by
-/// the server holds until the host acknowledges it.
+/// a write it refuses is dropped, a late write moves its timeline forward in one gap, a latency
+/// above what its players need comes back down, and a stop by the server holds until the host
+/// acknowledges it. Once the source's clock drifts from the server's, its audio is corrected:
+/// with micro-resampler's ASRC where profile::SOURCE_ASRC (the input then takes floats), else by
+/// dropping or repeating single frames.
 class LiveSourceSink : public SourcePcmSink {
 public:
     /// @param jitter_us the input's write jitter, the staleness bound judge_source_chunk() uses
-    LiveSourceSink(std::shared_ptr<HostView> view, int64_t jitter_us);
+    /// @param quality the ASRC's
+    LiveSourceSink(std::shared_ptr<HostView> view, int64_t jitter_us, ResamplerQuality quality);
 
     bool begin(const InputFormat& format) override;
     void write(const uint8_t* pcm, size_t frames, int64_t capture_us, int64_t rx_us) override;
@@ -101,11 +113,28 @@ public:
 private:
     /// The run ends unless a stop by the server holds it or the input closed
     void stop_run();
+    /// The corrected positions start over, for a new run
+    void restart_correction();
+    /// Corrects one chunk's frames and writes them
+    void correct(const uint8_t* pcm, size_t frames, int64_t capture_us);
 
     std::shared_ptr<HostView> view_;
     int64_t jitter_us_;
-    uint32_t sample_rate_{0};
+    ResamplerQuality quality_;
+    /// The decoded format, begin()'s
+    InputFormat format_;
     SourceTiming timing_;
+    SourceClock clock_;
+    /// The corrected frames written since the corrected positions started
+    uint64_t written_{0};
+    SampleSlip slip_;
+    /// With profile::SOURCE_ASRC: runs from the stream's start, its output written once the
+    /// correction starts, from the position the unaltered frames reached
+    std::unique_ptr<SourceAsrc> asrc_;
+    /// A chunk as floats, then corrected (profile::SOURCE_ASRC), or slipped; in PSRAM where there
+    /// is one
+    PlacedArray<uint8_t> input_;
+    PlacedArray<uint8_t> output_;
 };
 
 }  // namespace sendspin::server

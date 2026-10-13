@@ -45,6 +45,8 @@ set(SENDSPIN_SERVER_SOURCES
     # A connection's message held for the inbound ring, for a transport whose receive task reads
     # for several connections
     src/inbound_hold.cpp
+    # A live input played fast while its latency comes down
+    src/live_slew.cpp
     src/log.cpp
     src/messages.cpp
     src/metadata.cpp
@@ -62,6 +64,7 @@ set(SENDSPIN_SERVER_SOURCES
     src/sched/leads.cpp
     src/sched/ledger.cpp
     src/sched/lifecycle.cpp
+    src/sched/lowering.cpp
     src/sched/run_view.cpp
     src/sched/selection.cpp
     src/sched/timeline.cpp
@@ -73,7 +76,9 @@ set(SENDSPIN_SERVER_SOURCES
     src/session.cpp
     src/session_driver.cpp
     # The source role: a session's commands and input stream, the feed to a routed source's
-    # decoder on the group audio threads, and the sink that writes its PCM into a group's input
+    # decoder on the group audio threads, and the sink that corrects its clock and writes its PCM
+    # into a group's input
+    src/source_clock.cpp
     src/source_decoder.cpp
     src/source_feed.cpp
     src/source_sink.cpp

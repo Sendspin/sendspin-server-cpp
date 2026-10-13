@@ -21,6 +21,7 @@
 #include "opus_reader.h"
 #include "player_sink.h"
 #include "resampler_reference.h"
+#include "sched/constants.h"
 #include "test_ports.h"
 #include "test_recorder.h"
 #include <ArduinoJson.h>
@@ -1831,9 +1832,12 @@ constexpr int64_t LIVE_AHEAD_US = 200000;
 /// resume
 /// @param stop ends the writes early once set
 /// @param fed set to the samples written so far
+/// @param short_by when set, the input may report a block taken short with InputState::OPEN, as a
+/// live input playing its latency down does, and this adds up the samples it did not report
 void feed_live(GroupInput& input, const Signal& signal, const Segment& segment,
                const std::function<void(uint32_t)>& before = {},
-               const std::atomic<bool>* stop = nullptr, uint32_t* fed = nullptr) {
+               const std::atomic<bool>* stop = nullptr, uint32_t* fed = nullptr,
+               uint32_t* short_by = nullptr) {
     using Clock = std::chrono::steady_clock;
     constexpr auto BLOCK_TIME = std::chrono::milliseconds(10);
     ASSERT_EQ(input.wait_writable(std::numeric_limits<int64_t>::max()), InputState::OPEN);
@@ -1849,8 +1853,14 @@ void feed_live(GroupInput& input, const Signal& signal, const Segment& segment,
             signal.put(&block[i * signal.frame_bytes()], segment.first + written + i);
         }
         const WriteResult result = input.write(block.data(), n);
-        // A live writer on time is never cut short, paused or not
-        EXPECT_EQ(result.frames, n) << static_cast<int>(result.state);
+        // A live writer on time is never cut short, paused or not, but where its latency comes
+        // down
+        if (short_by != nullptr) {
+            EXPECT_EQ(result.state, InputState::OPEN);
+            *short_by += n - static_cast<uint32_t>(result.frames);
+        } else {
+            EXPECT_EQ(result.frames, n) << static_cast<int>(result.state);
+        }
         written += n;
         if (fed != nullptr) {
             *fed = written;
@@ -2014,6 +2024,71 @@ TEST(ServerPlayersLive, RaiseTheGroupLeadForAJoinerWithOneShift) {
     EXPECT_GT(expect_same_timestamps(first_chunks, joiner_chunks), 0U);
     expect_heard(decode(signal, first.sink().played()), first_chunks, {segment});
     expect_heard(decode(signal, joiner.sink().played()), joiner_chunks, {segment});
+}
+
+// The joiner of the test above leaves once its join raised the lead: the group lead falls back to
+// 200 ms, and once a window of writes landed that much later than a fresh anchor would place them,
+// the input plays them slightly fast, staging and reporting a few fewer samples than it was given.
+// The player streaming throughout keeps its stream, its timeline never running back; what the
+// input took out is more than nothing and within the slew's rate over the input, with what the
+// ASRC's filter holds at the drain where it runs. The chunks are not decoded to positions: the ASRC
+// resamples the signal. Played in real time, so the join and the leave land mid-stream: the host
+// writes until a second past the first short report, a window or two after the leave, then drains.
+TEST(ServerPlayersLive, SlewTheGroupLeadDownOnceAHighLeadJoinerLeaves) {
+    const Signal signal(24);
+    Rig s(signal, RATE, false);
+    const std::vector<sendspin::AudioSupportedFormatObject> formats = {{Codec::PCM, 2, RATE, 24}};
+    const Player& first = s.add(formats);
+    const std::shared_ptr<GroupInput> input = s.open_live();
+    ASSERT_TRUE(input);
+    // Enough for the join, the leave, two windows and a second of slew; a slew that never comes
+    // ends the feed and fails the test below
+    const Segment segment{0, 15 * RATE};
+    uint32_t short_by = 0;
+    uint32_t fed = 0;
+    std::optional<uint32_t> slewing_at;
+    std::atomic<bool> stop{false};
+    std::thread host([&] {
+        feed_live(
+            *input, signal, segment,
+            [&](uint32_t written) {
+                if (short_by > 0 && !slewing_at) {
+                    slewing_at = written;
+                }
+                if (slewing_at && written >= *slewing_at + RATE) {
+                    stop.store(true);
+                }
+            },
+            &stop, &fed, &short_by);
+        input->drain();
+    });
+    run_until(s.players, [&] { return first.sink().audible() > RATE / 2; });
+    const Player& joiner = s.add(formats, RATE, 2, 400);
+    run_until(s.players, [&] { return s.has_chunks(joiner); });
+    s.players.pop_back();
+    run_until(s.players, [&] { return !s.recorder.disconnects().empty(); });
+    const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
+    s.run_until_drained({drained});
+    host.join();
+
+    const std::lock_guard<std::mutex> lock(s.trace.mutex);
+    EXPECT_FALSE(s.trace.failed);
+    const std::vector<ChunkInfo>& chunks = s.trace.chunks[s.client_id(first)];
+    ASSERT_FALSE(chunks.empty());
+    for (size_t i = 1; i < chunks.size(); ++i) {
+        const ChunkInfo& before = chunks[i - 1];
+        const ChunkInfo& chunk = chunks[i];
+        ASSERT_EQ(chunk.stream, before.stream);
+        const int64_t ended = before.ts + (int64_t{before.samples} * 1000000 / before.rate);
+        EXPECT_GE(chunk.ts, ended) << "the timeline ran back";
+    }
+    // What the ASRC's filter holds at the drain is under half its length, 320 frames at the
+    // highest quality, and a frame a call keeps back
+    constexpr uint32_t HELD = 161;
+    const auto rate_share =
+        static_cast<uint32_t>(fed * sendspin::server::sched::LOWERING_SLEW_PPM / 1000000);
+    EXPECT_GT(short_by, 0U);
+    EXPECT_LE(short_by, rate_share + HELD) << short_by;
 }
 
 // The host stalls for half a second. When its writes resume, the next frame's lead is far under

@@ -77,7 +77,9 @@ void ServerCore::route_source(const std::string& client_id, const std::shared_pt
     route->faults = std::make_unique<Wakeup>(
         this->loop_, [this, client_id] { this->on_source_faults(client_id); });
     auto decoder = std::make_shared<SourceDecoder>(
-        route->feed, std::make_unique<LiveSourceSink>(view, jitter_us), route->faults->handle());
+        route->feed,
+        std::make_unique<LiveSourceSink>(view, jitter_us, this->settings_.resampler_quality),
+        route->faults->handle());
     route->task = this->workers_.add([decoder] { return decoder->run(); });
     route->feed->attach(route->task);
     this->routes_.emplace(client_id, std::move(route));

@@ -31,6 +31,7 @@ add_executable(sendspin_server_cpp_tests
     test_inbound_hold.cpp
     test_inbound_ring.cpp
     test_live_feeder.cpp
+    test_live_slew.cpp
     test_messages.cpp
     test_memory.cpp
     test_metadata.cpp
@@ -53,6 +54,7 @@ add_executable(sendspin_server_cpp_tests
     test_sched_leads.cpp
     test_sched_ledger.cpp
     test_sched_lifecycle.cpp
+    test_sched_lowering.cpp
     test_sched_property.cpp
     test_sched_selection.cpp
     test_sched_timeline.cpp
@@ -75,6 +77,7 @@ add_executable(sendspin_server_cpp_tests
     test_server_visualizer.cpp
     test_session.cpp
     test_session_driver.cpp
+    test_source_clock.cpp
     test_source_decoder.cpp
     test_source_sink.cpp
     test_source_stream.cpp
@@ -128,7 +131,11 @@ set_source_files_properties(test_noise_initiator.cpp PROPERTIES COMPILE_OPTIONS 
 # public_share_ to reach the known answers, since start() samples the scalar from the CSPRNG.
 set_source_files_properties(test_pairing_crypto.cpp PROPERTIES COMPILE_OPTIONS -fno-access-control)
 # White-box: test_host_view.cpp leaves the outbox as a host call does between deciding a callback and posting
-# it, so that close() racing that host call can be checked without a race.
+# it, so that close() racing that host call can be checked without a race. It sets
+# HostView::lowering_ to a window of live writes already behind the input, so a latency slew is
+# checked without waiting out the window in real time (under HostView::mutex_ where a writer
+# thread runs), and runs a slewed write's steps (HostView::begin_slewed(), write_slewed()) apart,
+# so a call between them is checked without a race.
 set_source_files_properties(test_host_view.cpp PROPERTIES COMPILE_OPTIONS -fno-access-control)
 # White-box: test_group_audio.cpp swaps an instance's encoder (GroupAudio::instances_) for one that
 # refuses, the only way to show a pipeline failure: no format the server selects makes an encoder

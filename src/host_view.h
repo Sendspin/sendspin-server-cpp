@@ -15,17 +15,20 @@
 /// @file host_view.h
 /// @brief A group input's host view: the staged PCM, the run, the current epoch's anchor and the
 /// group parameters, shared under one mutex by the host's calls, the group's pipelines and core.
-/// Each GroupInput call is one step under the mutex. The mutex is a leaf: what a step signals or
+/// Each GroupInput call is one step under the mutex, but for a live write through the slew, which
+/// resamples between its steps (HostView::write()). The mutex is a leaf: what a step signals or
 /// posts happens after it is released.
 
 #pragma once
 
 #include "audio_workers.h"
 #include "dispatcher.h"
+#include "live_slew.h"
 #include "memory.h"
 #include "profile.h"
 #include "ring.h"
 #include "sched/admission.h"
+#include "sched/lowering.h"
 #include "sched/run_view.h"
 #include "sched/timeline.h"
 #include "sendspin/server/server.h"
@@ -76,6 +79,15 @@ struct GroupParams {
     bool operator==(const GroupParams&) const = default;
 };
 
+/// @brief What a live input takes beyond its InputOptions
+struct LiveOptions {
+    /// The least lead its anchor and its lowering keep, whatever `G_next` is
+    /// (SourceRouteOptions::min_latency_us)
+    int64_t min_lead_us{0};
+    /// The quality of the ASRC its slew runs through (LiveSlew)
+    ResamplerQuality quality{ResamplerQuality::MEDIUM};
+};
+
 /// @brief A stretch of staged input in one format, from position on
 struct StagedSegment {
     uint64_t position{0};
@@ -118,8 +130,10 @@ public:
     /// decided them; a task posted after the dispatcher finished is dropped. Construct with
     /// std::make_shared: a view posts a reference to itself.
     /// @param listener nullptr for none
+    /// @param live ignored for a buffered input
     HostView(GroupId group, InputId id, const InputOptions& options, const GroupParams& initial,
-             std::shared_ptr<Dispatcher> dispatcher, ServerListener* listener);
+             std::shared_ptr<Dispatcher> dispatcher, ServerListener* listener,
+             const LiveOptions& live = {});
     HostView(const HostView&) = delete;
     HostView& operator=(const HostView&) = delete;
 
@@ -152,8 +166,11 @@ public:
     // Host calls (GroupInput)
     // ------------------------------------------------------------------------------
 
-    /// @brief Admits up to `P_max` and anchors a run or pending epoch it begins. No allocation: the
-    /// copy goes into the preallocated staging ring.
+    /// @brief Admits up to `P_max` and anchors a run or pending epoch it begins. A playing live
+    /// input owing latency plays its frames fast (sched::live_slew_ppm(), LiveSlew), with the
+    /// mutex released between the steps that stage each block, and reports the positions they
+    /// took; a write made meanwhile takes nothing. No allocation: the copy goes into the
+    /// preallocated staging ring.
     WriteResult write(const void* pcm, size_t frames);
     InputState state() const;
     InputState wait_writable(int64_t timeout_us);
@@ -268,9 +285,35 @@ private:
     /// closed_ or released_ became true
     void mark_gone();
     sched::AdmissionInput admission_input() const;
+    /// `G_next` as this input takes it: the group's, or the input's least lead where higher
+    int64_t lead_next() const;
+    /// What a write through the slew takes from its first step under the mutex to the rest
+    struct SlewedWrite {
+        /// The frames admitted, which bound the positions staged; nullopt when not slewed
+        std::optional<uint64_t> frames;
+        int32_t ppm{0};
+        InputState state{InputState::OPEN};
+        /// slew_generation_ as the write began
+        uint64_t generation{0};
+        /// The staged frames before the head copied into the slew's history, where it waits for
+        /// start()
+        std::optional<size_t> history;
+    };
+    /// Takes up a slew the format or epoch replaced, from set_format()'s or restarted; the one
+    /// set_format()'s replaces goes to retired, to be freed with the mutex released
+    void adopt_slew(LiveSlew& retired);
+    /// Under the mutex: claims the slew for one write of frames at ppm, copying its history
+    SlewedWrite begin_slewed(uint64_t frames, int32_t ppm, InputState state);
+    /// Without the mutex: runs the write through the slew a block at a time, staging each block's
+    /// output under the mutex, and `G_eff` following the time it took out, unless a call that
+    /// bumps slew_generation_ or a drain came since
+    /// @return the positions staged, which the host is told were taken; the input's state where a
+    /// call ended the write early
+    WriteResult write_slewed(const uint8_t* pcm, const SlewedWrite& slewed);
     /// `R_min`: one cell of input samples
     uint64_t ready_samples() const;
-    /// Anchors the current epoch at p0_ with `T0 = now + G_next`, reusing the anchor's storage
+    /// Anchors the current epoch at p0_ with `T0 = now + G_next` (lead_next()), reusing the
+    /// anchor's storage
     void anchor_at(int64_t now_us);
     /// Fills anchor with T0 at t0_us, from p0 through the staged segments
     void build_anchor(sched::Anchor& anchor, int64_t t0_us, uint64_t p0) const;
@@ -291,6 +334,8 @@ private:
     InputId id_;
     InputKind kind_;
     int64_t write_jitter_us_;
+    int64_t min_lead_us_;
+    ResamplerQuality quality_;
     std::shared_ptr<Dispatcher> dispatcher_;
     ServerListener* listener_;
 
@@ -328,6 +373,24 @@ private:
     GroupParams params_;
     /// `G_eff` of the anchored epoch
     int64_t group_lead_eff_us_{0};
+    /// A live input's latency lowering in the current epoch
+    sched::LiveLowering lowering_;
+    /// The slew that plays it out: write() alone touches it, under the mutex or, while slewing_,
+    /// without it (write_slewed())
+    LiveSlew slew_;
+    /// A write runs through slew_ with the mutex released; every other write takes nothing.
+    /// Set and cleared by write() under the mutex.
+    bool slewing_{false};
+    /// Bumped under the mutex by every call that ends the staged audio's continuity (a new epoch
+    /// or format, a pause, restart_positions()); a write running through the slew reads it to
+    /// stop staging
+    uint64_t slew_generation_{0};
+    /// slew_generation_ as slew_ was last taken up (adopt_slew()); read and written by write()
+    uint64_t slew_seen_{0};
+    /// The slew set_format() made for its format, which the next write takes up while
+    /// slew_pending_; both written by set_format() and read by write(), under the mutex
+    LiveSlew next_slew_;
+    bool slew_pending_{false};
     /// `k*` the pipelines published for the current epoch, and the `L_p` its rebase decides with
     std::optional<int64_t> shift_index_;
     int64_t rebase_latency_us_{0};

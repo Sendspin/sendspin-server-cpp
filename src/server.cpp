@@ -407,7 +407,8 @@ public:
         return running ? std::optional<GroupId>(running->default_group) : std::nullopt;
     }
 
-    OpenedInput open_input(GroupId group, const InputOptions& options) {
+    /// @param min_lead_us a live input's least lead (LiveOptions)
+    OpenedInput open_input(GroupId group, const InputOptions& options, int64_t min_lead_us = 0) {
         const std::shared_ptr<Running> running = this->running();
         if (!running) {
             return {OpenInputResult::NOT_RUNNING, nullptr};
@@ -432,8 +433,9 @@ public:
         // first write anchors with the group's own lead
         const sched::SchedTiming defaults;
         const GroupParams initial{defaults.group_default_us, 0, 0};
-        auto view = std::make_shared<HostView>(group, InputId{next_input_id.fetch_add(1)}, options,
-                                               initial, running->dispatcher, running->listener);
+        auto view = std::make_shared<HostView>(
+            group, InputId{next_input_id.fetch_add(1)}, options, initial, running->dispatcher,
+            running->listener, LiveOptions{min_lead_us, running->settings.resampler_quality});
         if (!running->group_inputs.claim(group, view)) {
             return {OpenInputResult::GROUP_BUSY, nullptr};
         }
@@ -457,11 +459,14 @@ public:
         if (options.write_jitter_us < 0 || options.write_jitter_us > MAX_WRITE_JITTER_US) {
             return {RouteSourceResult::INVALID_JITTER, nullptr};
         }
+        if (options.min_latency_us < 0 || options.min_latency_us > MAX_SOURCE_MIN_LATENCY_US) {
+            return {RouteSourceResult::INVALID_LATENCY, nullptr};
+        }
         InputOptions input;
         input.format = ROUTED_SOURCE_FORMAT;
         input.kind = InputKind::LIVE;
         input.write_jitter_us = options.write_jitter_us;
-        OpenedInput opened = this->open_input(group, input);
+        OpenedInput opened = this->open_input(group, input, options.min_latency_us);
         switch (opened.result) {
             case OpenInputResult::OK:
                 break;

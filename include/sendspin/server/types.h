@@ -501,6 +501,14 @@ enum class InputKind : uint8_t {
     /// refuses instead of waiting (GroupInput::write()). A silence keeps the run, and the next
     /// write moves the timeline forward by it in one gap; a host whose source can go silent for
     /// longer than a gap should call GroupInput::stop() and start a new run with its next samples.
+    /// A latency raised by a joiner who has left, a stall or a source running fast comes back
+    /// down: the input checks its writes in consecutive two-second windows from the first write
+    /// after its epoch began, and once a window's writes all landed at least 40 ms later than a new
+    /// run would place them, it plays its audio 300 ppm fast until the least of those excesses is
+    /// gone, too little to hear (resampled on a host, one frame in 3,333 dropped on the embedded
+    /// profile): 100 ms comes off in about five and a half minutes. Nothing corrects the clock of
+    /// a host's live input against the server's; one running fast by more than that gains latency
+    /// until write() refuses its excess.
     LIVE,
 };
 
@@ -550,7 +558,9 @@ enum class OpenInputResult : uint8_t {
 };
 
 struct WriteResult {
-    /// Frames taken from the start of the block
+    /// Frames taken from the start of the block; for a live input's write through its slew, the
+    /// samples it staged, up to a few fewer than given, or many fewer where another call ended it
+    /// early (GroupInput::write())
     size_t frames{0};
     InputState state{InputState::OPEN};
 };
@@ -577,12 +587,20 @@ enum class SourceSignal : uint8_t { PRESENT, ABSENT };
 /// @brief The write jitter a routed source's input declares when the host gives none
 constexpr int64_t DEFAULT_SOURCE_WRITE_JITTER_US = 60000;
 
+/// @brief The largest SourceRouteOptions::min_latency_us
+constexpr int64_t MAX_SOURCE_MIN_LATENCY_US = 1000000;
+
 /// @brief How SendspinServer::route_source() feeds the group
 struct SourceRouteOptions {
     /// The input's write jitter (InputOptions::write_jitter_us), from 0 to MAX_WRITE_JITTER_US:
     /// how late a chunk of the source's audio may arrive and still play, which the group's lead
     /// grows by. A chunk later than it is dropped as the backlog of a stall.
     int64_t write_jitter_us{DEFAULT_SOURCE_WRITE_JITTER_US};
+    /// The least latency the source plays at, from 0 to MAX_SOURCE_MIN_LATENCY_US: its audio plays
+    /// at least this long after it reaches the group, so at least this long after its capture,
+    /// even where every player could play it sooner, and a raised latency comes down no further.
+    /// The default, 0, leaves the latency to what the group's players need.
+    int64_t min_latency_us{0};
 };
 
 /// @brief The outcome of SendspinServer::route_source()
@@ -598,6 +616,8 @@ enum class RouteSourceResult : uint8_t {
     INVALID_JITTER,
     /// The group holds an input that is neither released nor closed
     GROUP_BUSY,
+    /// SourceRouteOptions::min_latency_us is out of range
+    INVALID_LATENCY,
 };
 
 }  // namespace sendspin::server
