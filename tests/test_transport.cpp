@@ -465,6 +465,7 @@ TEST(TransportUrl, ParsesWebSocketUrls) {
         {"ws://speaker.local", true, "speaker.local", 80, "/"},
         {"ws://[fe80::1]:9000/a/b?x=1", true, "fe80::1", 9000, "/a/b?x=1"},
         {"ws://[::1]/p", true, "::1", 80, "/p"},
+        {"ws://[::ffff:192.0.2.1]/p", true, "::ffff:192.0.2.1", 80, "/p"},
         {"wss://host/p", false, "", 0, ""},
         {"http://host/p", false, "", 0, ""},
         {"ws://", false, "", 0, ""},
@@ -494,10 +495,12 @@ TEST(TransportUrl, ParsesWebSocketUrls) {
         {"ws://[fe80::1%en 0]/p", false, "", 0, ""},
         {"ws://[fe80::1%en\x01]/p", false, "", 0, ""},
         {"ws://[fe80::1%en0\r\n]/p", false, "", 0, ""},
+        // A zone holding '%', before or after decoding
         {"ws://[fe%80::1%en0]/p", false, "", 0, ""},
-        {"ws://[%en0]/p", false, "", 0, ""},
         {"ws://[fe80::1%25en%250]/p", false, "", 0, ""},
         {"ws://[fe80::1%%en0]/p", false, "", 0, ""},
+        // An address that is empty or holds a character besides hex digits, ':' and '.'
+        {"ws://[%en0]/p", false, "", 0, ""},
         {"ws://[fe80::g]/p", false, "", 0, ""},
         {"ws://host/a\r\nX-Injected: 1", false, "", 0, ""},
         {"ws://host/a\nb", false, "", 0, ""},
