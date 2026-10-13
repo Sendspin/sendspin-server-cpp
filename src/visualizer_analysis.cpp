@@ -190,9 +190,8 @@ void AWeightingFilter::set_rate(uint32_t rate) {
     std::array<std::array<double, 5>, 2> sections{
         high_pass(two_pi * A_POLE_2_HZ, two_pi * A_POLE_3_HZ),
     };
-    // The pole pair at A_POLE_4_HZ matched, `z = e^(s / fs)`, over `1 + c z^-1`, c the root within
-    // [-1, 1] of `|1 + c z^-1|^2 = T (1 + c)^2`, which gives the analog section's gain at the fit
-    // frequency
+    // The pole pair at A_POLE_4_HZ matched in z, over one zero chosen so the section has the analog
+    // section's gain at fit_hz
     const double pole = std::exp(-two_pi * A_POLE_4_HZ / fs);
     const double fit_hz = std::min(A_FIT_NYQUIST_FRACTION * fs / 2.0, A_FIT_MAX_HZ);
     const double omega = two_pi * fit_hz / fs;
