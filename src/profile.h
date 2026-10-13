@@ -96,9 +96,10 @@ constexpr uint8_t FLAC_RICE_PARTITION_ORDER = EMBEDDED ? 0 : 6;
 /// floats on a host
 constexpr bool RESAMPLER_Q15 = EMBEDDED;
 
-/// @brief How a routed source's clock is corrected against the server's (LiveSourceSink): with
-/// micro-resampler's ASRC on a host; on the embedded profile by dropping or repeating single
-/// frames, which needs no filter
+/// @brief How a routed source's clock is corrected against the server's (LiveSourceSink), and a
+/// live input played fast to lower its latency (LiveSlew): with micro-resampler's ASRC on a host;
+/// on the embedded profile by dropping or repeating single frames, which needs no filter. The ASRC
+/// is meant to replace them on the ESP32-P4 once its cost there is measured.
 constexpr bool SOURCE_ASRC = !EMBEDDED;
 
 /// @brief Group audio threads: the embedded profile runs one, on the second core; 0 is one per

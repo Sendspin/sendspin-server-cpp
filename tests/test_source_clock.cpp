@@ -178,8 +178,8 @@ void expect_lock(double drift_ppm, bool asrc) {
         const double position = asrc ? resampler->next_position() : slip_position;
         const double ppm = clock.observe(capture, position, rate, chunk);
         if (asrc) {
-            ASSERT_TRUE(
-                resampler->process(in.data(), chunk, clock.engaged() ? ppm : 0.0, out.data()));
+            ASSERT_TRUE(resampler->process(in.data(), chunk, clock.engaged() ? ppm : 0.0,
+                                           out.data(), out.size()));
         } else {
             slip_position += static_cast<double>(slip.slip(
                 pcm.data(), chunk, 2, clock.engaged() ? static_cast<int32_t>(std::lround(ppm)) : 0,
@@ -295,9 +295,12 @@ TEST(SourceAsrc, LinesUpWithItsInputAtUnity) {
             in[i] = static_cast<float>(0.5 * std::cos(2.0 * std::numbers::pi * 200.0 * t));
         }
         tone.insert(tone.end(), in.begin(), in.end());
-        const std::optional<size_t> count = asrc->process(in.data(), CHUNK, 0.0, block.data());
-        ASSERT_TRUE(count);
-        out.insert(out.end(), block.begin(), block.begin() + static_cast<std::ptrdiff_t>(*count));
+        const std::optional<SourceAsrc::Processed> processed =
+            asrc->process(in.data(), CHUNK, 0.0, block.data(), block.size());
+        ASSERT_TRUE(processed);
+        EXPECT_EQ(processed->consumed, CHUNK);
+        out.insert(out.end(), block.begin(),
+                   block.begin() + static_cast<std::ptrdiff_t>(processed->written));
         EXPECT_EQ(asrc->next_position(), static_cast<double>((chunk + 1) * CHUNK));
     }
     ASSERT_GT(out.size(), CHUNK);
@@ -321,7 +324,7 @@ TEST(SourceAsrc, WritesByTheRatioAndTracksWhereInputLands) {
         std::vector<float> out(SourceAsrc::max_output(CHUNK) * 2);
         constexpr size_t CHUNKS = 250;
         for (size_t chunk = 0; chunk < CHUNKS; ++chunk) {
-            ASSERT_TRUE(asrc->process(in.data(), CHUNK, ppm, out.data()));
+            ASSERT_TRUE(asrc->process(in.data(), CHUNK, ppm, out.data(), out.size() / 2));
         }
         // 5 s at the ratio: 120 frames fewer, or more
         const double expected = CHUNKS * CHUNK / (1.0 + (ppm * 1e-6));
@@ -329,7 +332,7 @@ TEST(SourceAsrc, WritesByTheRatioAndTracksWhereInputLands) {
         EXPECT_NEAR(static_cast<double>(asrc->produced()), expected, 64.0);
         asrc->reset();
         EXPECT_EQ(asrc->next_position(), 0.0);
-        ASSERT_TRUE(asrc->process(in.data(), CHUNK, 0.0, out.data()));
+        ASSERT_TRUE(asrc->process(in.data(), CHUNK, 0.0, out.data(), out.size() / 2));
         EXPECT_EQ(asrc->next_position(), static_cast<double>(CHUNK));
     }
 }

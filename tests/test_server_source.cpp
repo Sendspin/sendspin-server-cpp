@@ -618,6 +618,49 @@ TEST(ServerSources, ActivateTheSourceRoleOnlyWithItsApproval) {
     raw.close();
 }
 
+// A route's least latency holds its source's audio back at least that long after its capture,
+// however little the group's players need (about 300 ms here): the first sample of a chunk
+// captured now plays a second or more from now. A least latency out of range refuses the route.
+TEST(ServerSources, PlayARoutedSourceNoSoonerThanItsLeastLatency) {
+    const Signal signal(16);
+    Rig s(signal);
+    struct Row {
+        const char* name;
+        int64_t min_latency_us;
+        RouteSourceResult result;
+    };
+    const Row rows[] = {
+        {"Below 0", -1, RouteSourceResult::INVALID_LATENCY},
+        {"Past the largest", sendspin::server::MAX_SOURCE_MIN_LATENCY_US + 1,
+         RouteSourceResult::INVALID_LATENCY},
+        {"Control: the largest", sendspin::server::MAX_SOURCE_MIN_LATENCY_US,
+         RouteSourceResult::OK},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        RawClient raw;
+        const std::string id = raw.noise.identity().peer_id();
+        sendspin::server::SourceRouteOptions options;
+        options.min_latency_us = row.min_latency_us;
+        const sendspin::server::RoutedSource routed = s.server.route_source(id, s.group(), options);
+        ASSERT_EQ(routed.result, row.result);
+        if (row.result != RouteSourceResult::OK) {
+            EXPECT_EQ(routed.input, nullptr);
+            continue;
+        }
+        ASSERT_NO_FATAL_FAILURE(connect_raw_source(s, raw));
+        EXPECT_NE(raw.receive_until("server/command").find("start"), std::string::npos);
+        raw.send_json(
+            R"({"type":"client-stream/start","payload":{"source":{"codec":"pcm","channels":2,)"
+            R"("sample_rate":48000,"bit_depth":16}}})");
+        const int64_t captured = sendspin::server::now_us();
+        send_chunk(raw, captured, Bytes(size_t{CHUNK} * 4, 1));
+        s.recorder.wait_for("group " + std::to_string(s.group().value) + " playing");
+        EXPECT_GE(routed.input->time_of(0) - captured, row.min_latency_us);
+        raw.close();
+    }
+}
+
 // roles/source/v1.md "Default streaming behavior", "Codec framing" and "Source Audio Chunks
 // (Binary)": the server closes the connection of a source that opens a stream it was not asked
 // for, sends a chunk longer than 150 ms, or a chunk its codec does not frame; a chunk of exactly

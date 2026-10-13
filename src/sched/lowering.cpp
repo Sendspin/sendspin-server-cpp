@@ -19,15 +19,15 @@
 namespace sendspin::server::sched {
 
 int64_t observe_live_write(LiveLowering& lowering, int64_t excess_us, int64_t now_us) {
-    // As if no cut had been made, so the cuts during a window do not lower its least
-    const int64_t counted = excess_us + lowering.cut_us;
+    // As if nothing had been slewed, so the slew during a window does not lower its least
+    const int64_t counted = excess_us + lowering.slewed_us;
     if (!lowering.window_start_us) {
         lowering.window_start_us = now_us;
         lowering.window_least_us = counted;
     }
     lowering.window_least_us = std::min(lowering.window_least_us, counted);
     if (now_us - *lowering.window_start_us >= LOWERING_WINDOW_US) {
-        const int64_t remaining = lowering.window_least_us - lowering.cut_us;
+        const int64_t remaining = lowering.window_least_us - lowering.slewed_us;
         // A debt never outgrows what the window measured; one still owed below the minimum is
         // finished
         lowering.debt_us = remaining >= LOWERING_MIN_US
@@ -40,25 +40,23 @@ int64_t observe_live_write(LiveLowering& lowering, int64_t excess_us, int64_t no
     return lowering.debt_us;
 }
 
-LoweredWrite lower_live_write(LiveLowering& lowering, uint64_t frames, uint32_t rate,
-                              int64_t head_us, int64_t now_us, int64_t group_lead_next_us,
-                              int64_t group_lead_eff_us) {
-    const int64_t excess = head_us - now_us - group_lead_next_us;
-    const int64_t debt = observe_live_write(lowering, excess, now_us);
-    const auto cut = std::min<uint64_t>(
-        frames, static_cast<uint64_t>(std::max<int64_t>(debt, 0) * rate / US_PER_SECOND));
-    if (cut == 0) {
-        return {frames, group_lead_eff_us};
+int32_t live_slew_ppm(LiveLowering& lowering, uint64_t frames, uint32_t rate, int64_t head_us,
+                      int64_t now_us, int64_t group_lead_next_us) {
+    const int64_t debt =
+        observe_live_write(lowering, head_us - now_us - group_lead_next_us, now_us);
+    const auto write_us = static_cast<int64_t>(frames) * US_PER_SECOND / rate;
+    if (debt <= 0 || write_us == 0) {
+        return 0;
     }
-    const auto cut_us = static_cast<int64_t>(cut) * US_PER_SECOND / rate;
-    record_cut(lowering, cut_us);
-    // The debt never passes the excess, so neither does the cut: never below `G_next`
-    return {frames - cut, std::min(group_lead_eff_us, group_lead_next_us + excess - cut_us)};
+    // The slew never takes out more than is owed, so the lead never falls below `G_next`
+    return static_cast<int32_t>(std::min(LOWERING_SLEW_PPM, debt * US_PER_SECOND / write_us));
 }
 
-void record_cut(LiveLowering& lowering, int64_t cut_us) {
-    lowering.cut_us += cut_us;
-    lowering.debt_us = std::max<int64_t>(lowering.debt_us - cut_us, 0);
+int64_t record_slew(LiveLowering& lowering, int64_t slewed_us, int64_t group_lead_next_us,
+                    int64_t group_lead_eff_us) {
+    lowering.slewed_us += slewed_us;
+    lowering.debt_us = std::max<int64_t>(lowering.debt_us - slewed_us, 0);
+    return std::max(group_lead_next_us, group_lead_eff_us - slewed_us);
 }
 
 }  // namespace sendspin::server::sched

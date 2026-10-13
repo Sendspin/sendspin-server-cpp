@@ -157,16 +157,16 @@ void LiveSourceSink::correct(const uint8_t* pcm, size_t frames, int64_t capture_
     const bool engaged = this->clock_.engaged();
     auto* corrected = reinterpret_cast<float*>(this->output_.get());
     const uint64_t first = this->asrc_->produced();
-    const std::optional<size_t> count =
-        this->asrc_->process(floats, frames, engaged ? ppm : 0.0, corrected);
-    if (!engaged || !count) {
+    const std::optional<SourceAsrc::Processed> processed = this->asrc_->process(
+        floats, frames, engaged ? ppm : 0.0, corrected, SourceAsrc::max_output(frames));
+    if (!engaged || !processed) {
         (void)this->view_->write(floats, frames);
         this->written_ += frames;
         return;
     }
     // From the position the unaltered frames reached on, which the ASRC's output overlaps at the
     // correction's start
-    const uint64_t end = first + *count;
+    const uint64_t end = first + processed->written;
     if (end > this->written_) {
         const uint64_t from = std::max(first, this->written_);
         (void)this->view_->write(corrected + ((from - first) * channels),

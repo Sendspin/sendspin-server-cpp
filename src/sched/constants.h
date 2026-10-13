@@ -57,10 +57,14 @@ constexpr uint8_t MAX_FLAC_BIT_DEPTH = 24;
 constexpr int64_t SWITCH_PREP_CELLS = 2;
 
 /// @brief A live input's latency lowering (lowering.h): how long every write's excess must stay at
-/// or above LOWERING_MIN_US before a cut. A hundred 20 ms writes, so a transient excess is not cut
+/// or above LOWERING_MIN_US before it is owed. A hundred 20 ms writes, so a transient excess is not
 constexpr int64_t LOWERING_WINDOW_US = 2000000;
-/// @brief The least excess cut, two cells; a smaller one stays in the timeline
+/// @brief The least excess owed, two cells; a smaller one stays in the timeline
 constexpr int64_t LOWERING_MIN_US = 2 * CELL_US;
+/// @brief How much faster than real time a live input plays while it owes latency, in ppm: about
+/// half a cent of pitch (a cent is 578 ppm), or one dropped frame in 3,333, which no listener
+/// hears; 100 ms comes off in about five and a half minutes
+constexpr int64_t LOWERING_SLEW_PPM = 300;
 
 namespace timing_defaults {
 constexpr int64_t PUMP_MARGIN_US = 10000;

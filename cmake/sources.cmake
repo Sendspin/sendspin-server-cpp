@@ -45,6 +45,8 @@ set(SENDSPIN_SERVER_SOURCES
     # A connection's message held for the inbound ring, for a transport whose receive task reads
     # for several connections
     src/inbound_hold.cpp
+    # A live input played fast while its latency comes down
+    src/live_slew.cpp
     src/log.cpp
     src/messages.cpp
     src/metadata.cpp

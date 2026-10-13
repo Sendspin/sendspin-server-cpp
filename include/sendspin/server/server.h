@@ -214,8 +214,10 @@ public:
     /// write-ahead past the time now playing; state says why it took fewer. A new input admits
     /// nothing (InputState::FULL) until the server has attached it to its group. A live input's
     /// writer drops what write() refuses and never resends what a stall held back. A live input
-    /// may also take fewer with InputState::OPEN, cutting audio to bring a raised latency back
-    /// down (InputKind::LIVE); its writer drops the rest the same way.
+    /// bringing a raised latency back down plays its samples slightly fast (InputKind::LIVE), so
+    /// write() may report a few fewer taken with InputState::OPEN: the samples staged, which the
+    /// input's positions count. Its writer drops the rest the same way; they play within those
+    /// staged.
     WriteResult write(const void* pcm, size_t frames);
 
     /// @brief The input's state now: what write() would report for a cell (20 ms) of samples.
@@ -392,8 +394,9 @@ public:
     /// released.
     ///
     /// The source's audio plays a fixed latency after its capture: the group's lead past its
-    /// arrival when its run starts, held there by correcting the source's clock against the
-    /// server's once the two measurably drift, and raised or lowered as for any live input. Its
+    /// arrival when its run starts, or options' least latency where higher, held there by
+    /// correcting the source's clock against the server's once the two measurably drift, and
+    /// raised or lowered as for any live input, never below that least latency. Its
     /// capture times also drop a chunk that arrives later than the write jitter allows, the
     /// backlog of a stall, and end the input's run at a gap of a second or more, and at the end
     /// of the source's stream, so its next audio starts a new run. A device that is a player too

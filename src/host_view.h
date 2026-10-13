@@ -22,6 +22,7 @@
 
 #include "audio_workers.h"
 #include "dispatcher.h"
+#include "live_slew.h"
 #include "memory.h"
 #include "profile.h"
 #include "ring.h"
@@ -77,6 +78,15 @@ struct GroupParams {
     bool operator==(const GroupParams&) const = default;
 };
 
+/// @brief What a live input takes beyond its InputOptions
+struct LiveOptions {
+    /// The least lead its anchor and its lowering keep, whatever `G_next` is
+    /// (SourceRouteOptions::min_latency_us)
+    int64_t min_lead_us{0};
+    /// The quality of the ASRC its slew runs through (LiveSlew)
+    ResamplerQuality quality{ResamplerQuality::MEDIUM};
+};
+
 /// @brief A stretch of staged input in one format, from position on
 struct StagedSegment {
     uint64_t position{0};
@@ -119,8 +129,10 @@ public:
     /// decided them; a task posted after the dispatcher finished is dropped. Construct with
     /// std::make_shared: a view posts a reference to itself.
     /// @param listener nullptr for none
+    /// @param live ignored for a buffered input
     HostView(GroupId group, InputId id, const InputOptions& options, const GroupParams& initial,
-             std::shared_ptr<Dispatcher> dispatcher, ServerListener* listener);
+             std::shared_ptr<Dispatcher> dispatcher, ServerListener* listener,
+             const LiveOptions& live = {});
     HostView(const HostView&) = delete;
     HostView& operator=(const HostView&) = delete;
 
@@ -153,8 +165,9 @@ public:
     // Host calls (GroupInput)
     // ------------------------------------------------------------------------------
 
-    /// @brief Admits up to `P_max` and anchors a run or pending epoch it begins. No allocation: the
-    /// copy goes into the preallocated staging ring.
+    /// @brief Admits up to `P_max` and anchors a run or pending epoch it begins. A playing live
+    /// input owing latency plays its frames fast (sched::live_slew_ppm(), LiveSlew) and reports
+    /// the positions they took. No allocation: the copy goes into the preallocated staging ring.
     WriteResult write(const void* pcm, size_t frames);
     InputState state() const;
     InputState wait_writable(int64_t timeout_us);
@@ -269,9 +282,16 @@ private:
     /// closed_ or released_ became true
     void mark_gone();
     sched::AdmissionInput admission_input() const;
+    /// `G_next` as this input takes it: the group's, or the input's least lead where higher
+    int64_t lead_next() const;
+    /// Writes frames of a playing live input through the slew at ppm, starting it from the
+    /// staged frames before the head where it waits; at most frames positions
+    /// @return the positions written, which write() reports as taken
+    uint64_t write_slewed(const uint8_t* pcm, uint64_t frames, int32_t ppm);
     /// `R_min`: one cell of input samples
     uint64_t ready_samples() const;
-    /// Anchors the current epoch at p0_ with `T0 = now + G_next`, reusing the anchor's storage
+    /// Anchors the current epoch at p0_ with `T0 = now + G_next` (lead_next()), reusing the
+    /// anchor's storage
     void anchor_at(int64_t now_us);
     /// Fills anchor with T0 at t0_us, from p0 through the staged segments
     void build_anchor(sched::Anchor& anchor, int64_t t0_us, uint64_t p0) const;
@@ -292,6 +312,8 @@ private:
     InputId id_;
     InputKind kind_;
     int64_t write_jitter_us_;
+    int64_t min_lead_us_;
+    ResamplerQuality quality_;
     std::shared_ptr<Dispatcher> dispatcher_;
     ServerListener* listener_;
 
@@ -329,8 +351,9 @@ private:
     GroupParams params_;
     /// `G_eff` of the anchored epoch
     int64_t group_lead_eff_us_{0};
-    /// A live input's latency lowering in the current epoch
+    /// A live input's latency lowering in the current epoch, and the slew that plays it out
     sched::LiveLowering lowering_;
+    LiveSlew slew_;
     /// `k*` the pipelines published for the current epoch, and the `L_p` its rebase decides with
     std::optional<int64_t> shift_index_;
     int64_t rebase_latency_us_{0};

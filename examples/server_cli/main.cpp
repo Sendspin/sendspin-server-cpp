@@ -521,6 +521,8 @@ const char* to_string(sendspin::server::RouteSourceResult result) {
             return "no such group";
         case RouteSourceResult::INVALID_JITTER:
             return "a write jitter the server does not take";
+        case RouteSourceResult::INVALID_LATENCY:
+            return "a least latency the server does not take";
         case RouteSourceResult::GROUP_BUSY:
             return "the group holds another input";
     }

@@ -134,10 +134,18 @@ public:
     /// @brief The most frames process() writes for frames in
     static size_t max_output(size_t frames);
 
-    /// @brief Resamples frames frames at a ratio of 1 + ppm * 10^-6 input frames per output frame
-    /// @param out room for max_output(frames) frames
-    /// @return the frames written, or nullopt when micro-resampler refused
-    std::optional<size_t> process(const float* in, size_t frames, double ppm, float* out);
+    /// @brief What one process() call took and wrote
+    struct Processed {
+        size_t consumed{0};
+        size_t written{0};
+    };
+
+    /// @brief Resamples frames frames at a ratio of 1 + ppm * 10^-6 input frames per output frame,
+    /// writing at most capacity frames; it takes every frame unless capacity runs out first
+    /// @param out room for capacity frames; max_output(frames) of them take every frame
+    /// @return nullopt when micro-resampler refused
+    std::optional<Processed> process(const float* in, size_t frames, double ppm, float* out,
+                                     size_t capacity);
 
     /// @brief Starts a new stream: empty history, primed again by the next block, positions from 0
     void reset();

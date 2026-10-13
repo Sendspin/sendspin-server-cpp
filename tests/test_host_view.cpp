@@ -25,10 +25,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <numbers>
 #include <thread>
 #include <vector>
 
@@ -53,6 +56,9 @@ constexpr int64_t LEAD_US = 300000;
 constexpr int64_t AHEAD_US = 1000000;
 constexpr uint64_t AHEAD_FRAMES = RATE;
 constexpr int64_t LIVE_AHEAD_US = 200000;
+/// W_live widened to 3 s, so that one write holds 2 s, which the slew takes enough frames out of
+/// to count
+constexpr int64_t SLEW_AHEAD_US = 3000000;
 /// A cell of frames
 constexpr uint64_t CELL = RATE / 50;
 
@@ -79,6 +85,16 @@ protected:
         this->view = std::make_shared<HostView>(GroupId{1}, InputId{2}, options,
                                                 GroupParams{LEAD_US, 0, LIVE_AHEAD_US},
                                                 this->dispatcher, &this->recorder);
+        return *this->view;
+    }
+
+    /// A live input with SLEW_AHEAD_US and a least lead
+    HostView& make_slewing(int64_t min_lead_us) {
+        InputOptions options{{RATE, 2, SampleFormat::S16}};
+        options.kind = sendspin::server::InputKind::LIVE;
+        this->view = std::make_shared<HostView>(
+            GroupId{1}, InputId{2}, options, GroupParams{LEAD_US, 0, SLEW_AHEAD_US},
+            this->dispatcher, &this->recorder, sendspin::server::LiveOptions{min_lead_us});
         return *this->view;
     }
 
@@ -186,97 +202,157 @@ TEST_F(HostViewTest, AdmitsAStalledLiveInputAsIfRebased) {
     EXPECT_EQ(result.state, InputState::FULL);
 }
 
-/// How far the live group lead falls once the run is anchored
-constexpr int64_t FALL_US = 200000;
+/// A frame's time at 48 kHz, rounded up
+constexpr int64_t FRAME_US = (1000000 + RATE - 1) / RATE;
 
-struct Lowered {
-    int64_t cut_frames;
-    int64_t lead_eff_us;
-};
-
-/// A live input anchored with a lead of LEAD_US and anchor_us of input, its lead then fallen by
-/// FALL_US, and a write of write_us e_us after the anchor that closes a window whose least excess,
-/// net of cuts, was least_us: the frames cut from the write, and `G_eff` after it, `G_next` plus
-/// the write's excess less the cut (LEAD_US when nothing is cut)
-Lowered lowered(int64_t anchor_us, int64_t write_us, int64_t e_us, int64_t least_us) {
-    const int64_t next = LEAD_US - FALL_US;
-    const int64_t excess = anchor_us + FALL_US - e_us;
-    // The window's least, the closing write's included, is cut once it reaches the minimum
-    const int64_t least = std::min(least_us, excess);
-    const int64_t debt = least >= sendspin::server::sched::LOWERING_MIN_US ? least : 0;
-    const auto frames = std::min<int64_t>(write_us * RATE / 1000000, debt * RATE / 1000000);
-    if (frames == 0) {
-        return {0, LEAD_US};
-    }
-    const int64_t cut_us = frames * 1000000 / RATE;
-    return {frames, std::min(LEAD_US, next + excess - cut_us)};
+/// A 200 Hz tone at half scale at frame k, from its peak, as a 16-bit sample
+int16_t tone_at(double frame) {
+    return static_cast<int16_t>(
+        std::lround(16384.0 * std::cos(2.0 * std::numbers::pi * 200.0 * frame / RATE)));
 }
 
-// A live input whose group lead fell lands every write later than a fresh anchor would place it.
-// Once a window of writes kept that excess, the write that closes it is cut from its end, up to the
-// window's least excess, and the effective lead falls to where the cut leaves the writes that
-// follow: never above where it was. Positions count only what was taken. The write-ahead is
-// W_live's, which takes each whole write; the bounds take the thread's time between the anchor and
-// the write from the clock, however late it ran.
-TEST_F(HostViewTest, LowersALiveInputsLatencyOnceItsLeadFalls) {
-    // A frame's rounding of the cut, at 48 kHz
-    constexpr int64_t ROUNDING_US = (1000000 + RATE - 1) / RATE + 1;
+/// Frames [from, from + count) of the tone, 16-bit stereo
+Bytes tone_pcm(uint64_t from, uint64_t count) {
+    Bytes pcm(count * 4);
+    for (uint64_t k = 0; k < count; ++k) {
+        const int16_t sample = tone_at(static_cast<double>(from + k));
+        std::memcpy(&pcm[(k * 4)], &sample, 2);
+        std::memcpy(&pcm[(k * 4) + 2], &sample, 2);
+    }
+    return pcm;
+}
+
+// A live input whose group lead fell owes the excess its writes land past a fresh anchor; a write
+// that owes it plays LOWERING_SLEW_PPM fast, or as much slower as plays out only what it owes: it
+// stages fewer positions and reports those taken, and `G_eff` follows its lead down by the time
+// taken out, never below `G_next` nor the input's least lead, against which what is owed is also
+// measured. A window of writes is seeded behind the input, and each row's write closes none; the
+// anchor's 100 ms keeps the excess far above any row's debt however late the thread runs.
+TEST_F(HostViewTest, PlaysALiveInputFastWhileItOwesLatency) {
+    using sendspin::server::sched::LOWERING_SLEW_PPM;
+    constexpr uint64_t WRITE = 2 * RATE;
+    constexpr int64_t WRITE_US = 2000000;
+    constexpr uint64_t ANCHOR = RATE / 10;
     struct Row {
         const char* name;
-        int64_t anchor_us;
-        int64_t write_us;
-        int64_t least_us;
+        /// How far the group lead falls after the anchor, the input's least lead, the debt seeded
+        /// and the frames the anchoring write holds
+        int64_t fall_us;
+        int64_t min_lead_us;
+        int64_t debt_us;
+        uint64_t anchor_frames;
+        /// The time the slew takes out of the write
+        int64_t slewed_us;
     };
     const Row rows[] = {
-        // The whole 140 ms write is cut, and G_eff falls to G_next plus the 120 ms owed past it,
-        // less the thread's delay; falling by the cut would leave 160 ms
-        {"The window owes the whole excess", 60000, 140000, std::numeric_limits<int64_t>::max()},
-        // A 20 ms cut leaves this write about 360 ms past G_next, far above G_eff's 200 ms past it:
-        // G_eff stays at 300 ms unless the thread runs 160 ms late; falling by the cut would leave
-        // 280 ms
-        {"The window owes less than this write's excess", 180000, 20000,
-         sendspin::server::sched::LOWERING_MIN_US},
+        {"Control: nothing owed stages the write as it came", 200000, 0, 0, ANCHOR, 0},
+        {"Owing more than the write's share plays at the slew rate", 200000, 0, 1000000, ANCHOR,
+         WRITE_US * LOWERING_SLEW_PPM / 1000000},
+        {"Owing less plays only that out", 200000, 0, 100, ANCHOR, 100},
+        {"G_eff stops at G_next", 50, 0, 1000000, ANCHOR, WRITE_US * LOWERING_SLEW_PPM / 1000000},
+        {"G_eff stops at the least lead", 200000, LEAD_US - 50, 1000000, ANCHOR,
+         WRITE_US * LOWERING_SLEW_PPM / 1000000},
+        // A frame's anchor and a millisecond's wait: its first sample lands under the least lead,
+        // however late the thread, and 200 ms past G_next
+        {"What is owed is measured against the least lead", 200000, LEAD_US, 1000000, 1, 0},
     };
     for (const Row& row : rows) {
         SCOPED_TRACE(row.name);
-        HostView& view = this->make_live();
-        const auto anchor_frames = static_cast<uint64_t>(row.anchor_us * RATE / 1000000);
-        const auto write_frames = static_cast<uint64_t>(row.write_us * RATE / 1000000);
-        ASSERT_EQ(this->write(anchor_frames).frames, anchor_frames);
-        const int64_t anchored = view.time_of(0) - LEAD_US;
-        view.set_group_params({LEAD_US - FALL_US, 0, LIVE_AHEAD_US});
-        // A window of writes is behind the input, its least excess, counted net of cuts, the row's
-        view.lowering_ = {now_us() - sendspin::server::sched::LOWERING_WINDOW_US, row.least_us, 0,
-                          0};
-        const int64_t before = now_us();
-        const WriteResult result = this->write(write_frames);
-        const int64_t after = now_us();
-        // Admission took the whole write, so what it lacks is the cut
+        HostView& view = this->make_slewing(row.min_lead_us);
+        const Bytes anchor = tone_pcm(0, row.anchor_frames);
+        ASSERT_EQ(view.write(anchor.data(), row.anchor_frames).frames, row.anchor_frames);
+        if (row.anchor_frames == 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        view.set_group_params({LEAD_US - row.fall_us, 0, SLEW_AHEAD_US});
+        view.lowering_ = {now_us(), std::numeric_limits<int64_t>::max(), 0, row.debt_us};
+        const Bytes pcm = tone_pcm(row.anchor_frames, WRITE);
+        const WriteResult result = view.write(pcm.data(), WRITE);
+        // Admission admits the whole write, so all it lacks is what the slew took out; the
+        // positions staged are what it reports taken
         EXPECT_EQ(result.state, InputState::OPEN);
-        // The later the write, the less it owes: what it cut and G_eff after it lie between their
-        // values at the clock's readings around it
-        const Lowered late = lowered(row.anchor_us, row.write_us, after - anchored, row.least_us);
-        const Lowered early = lowered(row.anchor_us, row.write_us, before - anchored, row.least_us);
-        const auto cut = static_cast<int64_t>(write_frames - result.frames);
-        EXPECT_GE(cut, late.cut_frames - 1);
-        EXPECT_LE(cut, early.cut_frames + 1);
-        const int64_t lead_eff = view.job_view().group_lead_eff_us;
-        EXPECT_GE(lead_eff, late.lead_eff_us - ROUNDING_US);
-        EXPECT_LE(lead_eff, early.lead_eff_us + ROUNDING_US);
-        EXPECT_EQ(view.job_view().head, anchor_frames + result.frames);
+        const sendspin::server::JobView job = view.job_view();
+        EXPECT_EQ(job.head, row.anchor_frames + result.frames);
+        const auto missing = static_cast<int64_t>(WRITE - result.frames);
+        const int64_t least_lead = std::max(LEAD_US - row.fall_us, row.min_lead_us);
+        if (row.slewed_us == 0) {
+            EXPECT_EQ(missing, 0);
+            EXPECT_EQ(job.group_lead_eff_us, LEAD_US);
+            Bytes staged;
+            ASSERT_TRUE(view.read(job.run.epoch, row.anchor_frames, WRITE, staged));
+            EXPECT_EQ(staged, pcm);
+            continue;
+        }
+        // A frame's rounding either way, and what the ASRC's filter holds where it runs
+        EXPECT_GE(missing, (row.slewed_us / FRAME_US) - 1) << missing;
+        EXPECT_LE(missing, (row.slewed_us * RATE / 1000000) + 2 +
+                               static_cast<int64_t>(sendspin::server::LIVE_SLEW_BLOCK_FRAMES))
+            << missing;
+        EXPECT_GE(job.group_lead_eff_us,
+                  std::max(least_lead, LEAD_US - row.slewed_us - FRAME_US - 1));
+        EXPECT_LE(job.group_lead_eff_us,
+                  std::max(least_lead, LEAD_US - row.slewed_us + (2 * FRAME_US) + 1));
+        // Staged frame j is the input's frame at anchor + j times the rate, the slew starting
+        // where the anchor's frames ended: through the ASRC to its filter's error and a 16-bit
+        // step, by dropped frames one input frame as it came within a frame of it
+        Bytes staged;
+        ASSERT_TRUE(view.read(job.run.epoch, row.anchor_frames, result.frames, staged));
+        const double ratio = 1.0 + (static_cast<double>(row.slewed_us) / WRITE_US);
+        for (uint64_t j = 0; j < result.frames; ++j) {
+            int16_t sample = 0;
+            std::memcpy(&sample, &staged[j * 4], 2);
+            const double at = static_cast<double>(row.anchor_frames) + (j * ratio);
+            if (sendspin::server::profile::SOURCE_ASRC) {
+                ASSERT_NEAR(sample, tone_at(at), 70) << j;
+            } else {
+                const auto low = static_cast<uint64_t>(at);
+                ASSERT_TRUE(sample == tone_at(static_cast<double>(low)) ||
+                            sample == tone_at(static_cast<double>(low + 1)))
+                    << j;
+            }
+        }
     }
 }
 
-// What a live epoch owes ends with it: the epoch a flush begins, and its writes, owe nothing of
-// the one before. Owed a second, the old epoch's debt would cut the new epoch's writes up to their
-// excess.
-TEST_F(HostViewTest, EndsALiveInputsLoweringWithItsEpoch) {
-    HostView& view = this->make_live();
+// A live input with a least lead above the group's anchors there, takes that lead for its
+// provisional times before then, and keeps a raised lead above it as any
+TEST_F(HostViewTest, AnchorsALiveInputAtItsLeastLead) {
+    constexpr int64_t LEAST_US = LEAD_US + 100000;
+    HostView& view = this->make_slewing(LEAST_US);
+    const int64_t provisional = now_us();
+    EXPECT_GE(view.time_of(0), provisional + LEAST_US);
+    const int64_t before = now_us();
     ASSERT_EQ(this->write(CELL).frames, CELL);
+    const int64_t after = now_us();
+    EXPECT_GE(view.time_of(0), before + LEAST_US);
+    EXPECT_LE(view.time_of(0), after + LEAST_US);
+    EXPECT_EQ(view.job_view().group_lead_eff_us, LEAST_US);
+    view.set_group_params({LEAST_US + 200000, 0, SLEW_AHEAD_US});
+    EXPECT_EQ(view.job_view().group_lead_eff_us, LEAST_US + 200000);
+}
+
+// What a live epoch owes ends with it, and so does its slew: the epoch a flush begins, and its
+// writes, owe nothing of the one before and stage their audio as it came, bit for bit. Owed a
+// second, the old epoch's debt would slew the new epoch's 2 s write, and an ASRC left running would
+// resample it, starting with the frames it held from the old epoch.
+TEST_F(HostViewTest, EndsALiveInputsSlewWithItsEpoch) {
+    constexpr uint64_t ANCHOR = RATE / 10;
+    HostView& view = this->make_slewing(0);
+    ASSERT_EQ(this->write(ANCHOR).frames, ANCHOR);
+    view.set_group_params({LEAD_US - 200000, 0, SLEW_AHEAD_US});
+    view.lowering_ = {now_us(), std::numeric_limits<int64_t>::max(), 0, 1000000};
+    ASSERT_LT(this->write(RATE).frames, RATE);
     view.lowering_.debt_us = 1000000;
     view.flush();
-    ASSERT_EQ(this->write(CELL).frames, CELL);
-    EXPECT_EQ(this->write(CELL).frames, CELL);
+    ASSERT_EQ(this->write(ANCHOR).frames, ANCHOR);
+    const Bytes pcm = tone_pcm(ANCHOR, 2 * RATE);
+    ASSERT_EQ(view.write(pcm.data(), 2 * RATE).frames, 2 * RATE);
+    const sendspin::server::JobView job = view.job_view();
+    EXPECT_EQ(job.head, ANCHOR + (2 * RATE));
+    EXPECT_EQ(job.group_lead_eff_us, LEAD_US - 200000);
+    Bytes staged;
+    ASSERT_TRUE(view.read(job.run.epoch, ANCHOR, 2 * RATE, staged));
+    EXPECT_EQ(staged, pcm);
 }
 
 // MAX_ANCHOR_SHIFTS: releasing the ring folds the shifts below the cell it then holds first into

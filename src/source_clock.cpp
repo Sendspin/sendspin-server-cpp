@@ -191,7 +191,8 @@ size_t SourceAsrc::max_output(size_t frames) {
     return frames + (frames / (PPM_UNIT / static_cast<int64_t>(SOURCE_CLOCK_MAX_PPM))) + 2;
 }
 
-std::optional<size_t> SourceAsrc::process(const float* in, size_t frames, double ppm, float* out) {
+std::optional<SourceAsrc::Processed> SourceAsrc::process(const float* in, size_t frames, double ppm,
+                                                         float* out, size_t capacity) {
     const double clamped = std::clamp(ppm, -SOURCE_CLOCK_MAX_PPM, SOURCE_CLOCK_MAX_PPM);
     // The ratio is set at once: at a correction's size the step in pitch is inaudible, and a
     // steady ratio within a call keeps held_ exact
@@ -204,9 +205,9 @@ std::optional<size_t> SourceAsrc::process(const float* in, size_t frames, double
         }
         this->primed_ = true;
     }
-    const size_t capacity = max_output(frames);
     size_t written = 0;
-    while (frames > 0) {
+    size_t taken = 0;
+    while (frames > 0 && written < capacity) {
         size_t consumed = 0;
         size_t generated = 0;
         if (!this->resampler_->process_block_raw(in, std::min(frames, this->max_block_),
@@ -221,11 +222,12 @@ std::optional<size_t> SourceAsrc::process(const float* in, size_t frames, double
         this->held_ += (static_cast<int64_t>(consumed) << RATIO_BITS) -
                        (static_cast<int64_t>(generated) * this->ratio_);
         written += generated;
+        taken += consumed;
         frames -= consumed;
         in += consumed * this->channels_;
     }
     this->produced_ += written;
-    return written;
+    return Processed{taken, written};
 }
 
 void SourceAsrc::reset() {

@@ -104,11 +104,13 @@ bool is_valid_input(const InputFormat& format) {
 
 HostView::HostView(GroupId group, InputId id, const InputOptions& options,
                    const GroupParams& initial, std::shared_ptr<Dispatcher> dispatcher,
-                   ServerListener* listener)
+                   ServerListener* listener, const LiveOptions& live)
     : group_(group),
       id_(id),
       kind_(options.kind),
       write_jitter_us_(options.kind == InputKind::LIVE ? options.write_jitter_us : 0),
+      min_lead_us_(options.kind == InputKind::LIVE ? live.min_lead_us : 0),
+      quality_(live.quality),
       dispatcher_(std::move(dispatcher)),
       listener_(listener),
       format_(options.format),
@@ -122,6 +124,9 @@ HostView::HostView(GroupId group, InputId id, const InputOptions& options,
     this->segments_.reserve(MAX_STAGED_SEGMENTS);
     this->segments_.push_back({0, options.format, 0});
     this->ring_ = RingStorage::allocate(ring_bytes_for(options.format));
+    if (this->kind_ == InputKind::LIVE) {
+        (void)this->slew_.prepare(options.format, profile::SOURCE_ASRC, this->quality_);
+    }
 }
 
 HostView::FormatState HostView::format() const {
@@ -146,13 +151,14 @@ WriteResult HostView::write(const void* pcm, size_t frames) {
         const sched::WriteDecision decision =
             sched::decide_write(this->admission_input(), this->anchor_, frames, now);
         uint64_t taken = decision.frames;
-        if (this->kind_ == InputKind::LIVE && this->run_.run == sched::RunState::PLAYING) {
-            const sched::LoweredWrite lowered = sched::lower_live_write(
-                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): set while playing
-                this->lowering_, taken, this->format_.sample_rate, *decision.head_us, now,
-                this->params_.group_lead_us, this->group_lead_eff_us_);
-            taken = lowered.taken;
-            this->group_lead_eff_us_ = lowered.group_lead_eff_us;
+        const bool live_playing =
+            this->kind_ == InputKind::LIVE && this->run_.run == sched::RunState::PLAYING;
+        int32_t ppm = 0;
+        if (live_playing && this->slew_.ready()) {
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): set while playing
+            const int64_t head_us = *decision.head_us;
+            ppm = sched::live_slew_ppm(this->lowering_, taken, this->format_.sample_rate, head_us,
+                                       now, this->lead_next());
         }
         if (taken > 0) {
             // The write that begins a run or a pending epoch anchors it
@@ -163,10 +169,18 @@ WriteResult HostView::write(const void* pcm, size_t frames) {
                 sched::view_anchor_write(this->run_, {}, {});
                 this->anchor_at(now);
             }
-            copy_in(this->ring_.span(), this->byte_of(this->head_),
-                    static_cast<const uint8_t*>(pcm),
-                    static_cast<size_t>(taken) * frame_bytes_of(this->format_));
-            this->head_ += taken;
+            if (live_playing && (ppm > 0 || this->slew_.engaged())) {
+                // The host counts positions by what it is told was taken
+                taken = this->write_slewed(static_cast<const uint8_t*>(pcm), taken, ppm);
+                this->group_lead_eff_us_ =
+                    sched::record_slew(this->lowering_, this->slew_.take_slewed_us(),
+                                       this->lead_next(), this->group_lead_eff_us_);
+            } else {
+                copy_in(this->ring_.span(), this->byte_of(this->head_),
+                        static_cast<const uint8_t*>(pcm),
+                        static_cast<size_t>(taken) * frame_bytes_of(this->format_));
+                this->head_ += taken;
+            }
         }
         if (decision.state == InputState::FULL) {
             this->writable_wanted_ = true;
@@ -320,6 +334,11 @@ bool HostView::set_format(const InputFormat& format) {
     // it; the ring it replaces is freed after the unlock too
     RingStorage storage;
     RingStorage replaced;
+    // So is a live input's slew for the format, which takes over at the new segment
+    LiveSlew slew;
+    if (this->kind_ == InputKind::LIVE && is_valid_input(format)) {
+        (void)slew.prepare(format, profile::SOURCE_ASRC, this->quality_);
+    }
     size_t wanted = 0;
     while (true) {
         if (storage.size != wanted) {
@@ -374,6 +393,9 @@ bool HostView::set_format(const InputFormat& format) {
         if (needed != this->ring_.size) {
             replaced = std::exchange(this->ring_, std::move(storage));
         }
+        if (this->kind_ == InputKind::LIVE) {
+            std::swap(this->slew_, slew);
+        }
         ++this->format_generation_;
         this->signal(after);
         break;
@@ -405,7 +427,7 @@ int64_t HostView::time_of_locked(uint64_t position, int64_t now) const {
             break;
     }
     // Provisional: as if anchored now, through the staged segments
-    this->build_anchor(this->provisional_, now + this->params_.group_lead_us, from);
+    this->build_anchor(this->provisional_, now + this->lead_next(), from);
     return sched::time_of(this->provisional_, position);
 }
 
@@ -692,8 +714,8 @@ sched::AdmissionInput HostView::admission_input() const {
     in.p0 = this->p0_;
     in.p_pause = this->p_pause_;
     in.head_rate = this->format_.sample_rate;
-    in.group_lead_us = this->run_.run == sched::RunState::PLAYING ? this->group_lead_eff_us_
-                                                                  : this->params_.group_lead_us;
+    in.group_lead_us =
+        this->run_.run == sched::RunState::PLAYING ? this->group_lead_eff_us_ : this->lead_next();
     in.write_ahead_us = this->params_.write_ahead_us;
     // What the ring has room for past the head, in the head's format
     const uint64_t used = this->byte_of(this->head_) - this->byte_of(this->retain_from_);
@@ -713,13 +735,49 @@ uint64_t HostView::ready_samples() const {
         sched::ceil_div(this->format_.sample_rate, sched::CELLS_PER_SECOND));
 }
 
+int64_t HostView::lead_next() const {
+    return std::max(this->params_.group_lead_us, this->min_lead_us_);
+}
+
+uint64_t HostView::write_slewed(const uint8_t* pcm, uint64_t frames, int32_t ppm) {
+    const size_t frame_bytes = frame_bytes_of(this->format_);
+    if (this->slew_.awaits_start()) {
+        // The frames of this segment just before the head, which the ASRC's output continues
+        const uint64_t first = std::max(this->segments_.back().position, this->retain_from_);
+        const auto history =
+            static_cast<size_t>(std::min<uint64_t>(this->head_ - first, LIVE_SLEW_BLOCK_FRAMES));
+        copy_out(this->ring_.span(), this->byte_of(this->head_ - history),
+                 this->slew_.history().data(), history * frame_bytes);
+        this->slew_.start(history);
+    }
+    uint64_t taken = 0;
+    uint64_t written = 0;
+    while (taken < frames) {
+        const auto block =
+            static_cast<size_t>(std::min<uint64_t>(frames - taken, LIVE_SLEW_BLOCK_FRAMES));
+        // Admission's frames bound the positions written, whatever the input it took for them
+        const LiveSlew::Block out = this->slew_.process(pcm + (taken * frame_bytes), block, ppm,
+                                                        static_cast<size_t>(frames - written));
+        copy_in(this->ring_.span(), this->byte_of(this->head_), this->slew_.output(),
+                out.written * frame_bytes);
+        this->head_ += out.written;
+        written += out.written;
+        taken += out.consumed;
+        if (out.consumed < block) {
+            break;
+        }
+    }
+    return written;
+}
+
 void HostView::anchor_at(int64_t now_us) {
-    this->build_anchor(this->anchor_, now_us + this->params_.group_lead_us, this->p0_);
+    this->build_anchor(this->anchor_, now_us + this->lead_next(), this->p0_);
     this->anchor_valid_ = true;
-    this->group_lead_eff_us_ = this->params_.group_lead_us;
+    this->group_lead_eff_us_ = this->lead_next();
     this->shift_index_.reset();
     this->rebase_latency_us_ = 0;
     this->lowering_ = {};
+    this->slew_.restart();
 }
 
 void HostView::resolve_empty_drain(AfterUnlock& after) {
