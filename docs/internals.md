@@ -79,7 +79,7 @@ At `client/init` the session asks which PSK message 1 references (`select_handsh
 ## A group's playback
 
 1. `open_input()` creates the input's `HostView` on the host thread and posts its attachment to core. Attached, the group hands its `GroupAudio` to the group audio threads and writes its parameters (group lead, write-ahead) into the view as its members change them.
-2. `write()` copies into the view's staging ring; the write that begins a run anchors it. `set_format()` starts an input segment at the head, so the timeline continues at the new rate.
+2. `write()` copies into the view's staging ring; the write that begins a run anchors it. `set_format()` starts an input segment at the head, so the timeline continues at the new rate. A live input's write also measures how much later its first sample lands than a fresh anchor would place it; once every write of a window kept such an excess, the view cuts it from the writes that follow and lowers `G_eff` with it (`sched/lowering.h`), so a latency a joiner, a stall or a fast clock raised comes back down within the epoch.
 3. A `GroupAudio` job reads the view, posts the epoch events, shifts the timeline when a frame's lead falls too low (a rebase), produces at most one frame per pipeline instance and lets the view drop staged PCM no instance needs. Core's FIFO handler appends frames to the frame rings and pumps the members.
 4. Each member's `PlayerStream` reads the group's frames through a cursor, packs chunks within its ledger, and emits `stream/start`, `stream/clear` and `stream/end` from markers at the head of its control FIFO. A `VisualizerStream` runs beside it on the same markers.
 5. A drain completes once no member's stream is active; core ends the run before the view releases `on_drained`.
@@ -117,6 +117,7 @@ Send: after every event the driver runs its pump. With a message to send and no 
 | `chunk.h` | The chunk header and `send_ahead`, producibility, format selection and `pack_chunk()` |
 | `admission.h` | Write admission and readiness |
 | `lifecycle.h` | Desired state, markers and the drain predicates |
+| `lowering.h` | Bringing a live input's raised latency back down within an epoch |
 | `run_view.h` | The host view's run, stop latch and staged drain |
 | `selection.h` | The pump's `select_next()`, `item_ready()`, `next_wake()` and the drain watch |
 
@@ -127,7 +128,7 @@ On ESP-IDF the library is a component (`cmake/esp_idf.cmake`, sources from `cmak
 ## Known limitations
 
 - **A routed source plays on the server's timeline.** Its audio goes into an ordinary live input and plays the group's lead after it arrives; its capture times are used only to drop a stall's backlog and to end the run at a long gap, and nothing corrects the source's clock against the server's.
-- **A live epoch's latency never falls.** Within one epoch the timeline only moves forward: after a high-lead joiner leaves, after a backlog, or under a source clock faster than the server's, the input keeps its raised latency until a pause, flush or stop starts a new epoch.
+- **A live input's latency falls in one cut.** The audio it drops is heard as a skip, as a rise is heard as a gap.
 - **A live input's silence is one gap in its run.** A live input that receives no writes keeps its run, and its next write moves the timeline forward by the silence; a host whose source can go silent should call `GroupInput::stop()` and let its next samples start a new run.
 - **An Opus stream starts with silence**, the encoder's lookahead at each new Opus instance.
 - **A group's fifth visualizer configuration gets no stream.** Past `MAX_GROUP_ANALYSES`, a configuration fails for the rest of the run.

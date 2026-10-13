@@ -62,6 +62,7 @@ set(SENDSPIN_SERVER_SOURCES
     src/sched/leads.cpp
     src/sched/ledger.cpp
     src/sched/lifecycle.cpp
+    src/sched/lowering.cpp
     src/sched/run_view.cpp
     src/sched/selection.cpp
     src/sched/timeline.cpp

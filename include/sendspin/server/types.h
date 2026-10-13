@@ -501,6 +501,10 @@ enum class InputKind : uint8_t {
     /// refuses instead of waiting (GroupInput::write()). A silence keeps the run, and the next
     /// write moves the timeline forward by it in one gap; a host whose source can go silent for
     /// longer than a gap should call GroupInput::stop() and start a new run with its next samples.
+    /// A latency raised by a joiner who has left, a stall or a source running fast comes back
+    /// down once two seconds of writes all landed at least 40 ms later than a new run would place
+    /// them: the input cuts the least of those excesses from the writes that follow, an audible
+    /// skip (GroupInput::write()).
     LIVE,
 };
 

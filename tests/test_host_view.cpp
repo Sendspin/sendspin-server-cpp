@@ -184,6 +184,62 @@ TEST_F(HostViewTest, AdmitsAStalledLiveInputAsIfRebased) {
     EXPECT_EQ(result.state, InputState::FULL);
 }
 
+// A live input whose group lead falls once its run is anchored lands every write that much later
+// than a fresh anchor would place it. Once a whole sched::LOWERING_WINDOW_US of writes kept that
+// excess, the input refuses the writes that follow until it has cut it, never more than the
+// excess, and the effective lead falls with it toward the lead its players need, so the next frame
+// is not rebased back up. Positions count only what was taken. Takes about 2.6 s: one cell written
+// on each cell's deadline, as a capture device delivers, past a window of real time.
+TEST_F(HostViewTest, LowersALiveInputsLatencyOnceItsLeadFalls) {
+    constexpr uint64_t CELL = RATE / 50;
+    constexpr int64_t FALL_US = 200000;
+    HostView& view = this->make_live();
+    const int64_t start = now_us();
+    ASSERT_EQ(this->write(CELL).frames, CELL);
+    view.set_group_params({LEAD_US - FALL_US, 0, LIVE_AHEAD_US});
+    uint64_t head = CELL;
+    uint64_t refused = 0;
+    constexpr int64_t CELLS = (sendspin::server::sched::LOWERING_WINDOW_US / 20000) + 30;
+    for (int64_t k = 1; k < CELLS; ++k) {
+        std::this_thread::sleep_until(std::chrono::steady_clock::now() +
+                                      std::chrono::microseconds(start + (k * 20000) - now_us()));
+        const WriteResult result = this->write(CELL);
+        EXPECT_EQ(result.state, InputState::OPEN);
+        head += result.frames;
+        refused += CELL - result.frames;
+    }
+    // However late the writes came, the cut is at most the excess; it is most of it unless one
+    // came more than 100 ms late
+    const auto cut_us = static_cast<int64_t>(refused * 1000000 / RATE);
+    EXPECT_GT(cut_us, FALL_US / 2);
+    EXPECT_LE(cut_us, FALL_US);
+    const int64_t lead_eff = view.job_view().group_lead_eff_us;
+    EXPECT_LE(lead_eff, LEAD_US - cut_us + 1);
+    EXPECT_GE(lead_eff, LEAD_US - FALL_US);
+    EXPECT_EQ(view.job_view().head, head);
+}
+
+// What a live epoch owes ends with it: the input refuses one write to lower its latency, then a
+// flush begins a new epoch at a fresh lead, whose writes it takes whole. Takes about 2 s, as the
+// test above.
+TEST_F(HostViewTest, EndsALiveInputsLoweringWithItsEpoch) {
+    constexpr uint64_t CELL = RATE / 50;
+    HostView& view = this->make_live();
+    const int64_t start = now_us();
+    ASSERT_EQ(this->write(CELL).frames, CELL);
+    view.set_group_params({LEAD_US - 200000, 0, LIVE_AHEAD_US});
+    for (int64_t k = 1;; ++k) {
+        std::this_thread::sleep_until(std::chrono::steady_clock::now() +
+                                      std::chrono::microseconds(start + (k * 20000) - now_us()));
+        if (this->write(CELL).frames < CELL) {
+            break;
+        }
+    }
+    view.flush();
+    ASSERT_EQ(this->write(CELL).frames, CELL);
+    EXPECT_EQ(this->write(CELL).frames, CELL);
+}
+
 // MAX_ANCHOR_SHIFTS: releasing the ring folds the shifts below the cell it then holds first into
 // S_base, so an epoch takes a shift a cell for longer than the cap, and every time from the cell
 // kept on reads as before the fold. 8 kHz mono: 160 frames a cell.

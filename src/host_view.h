@@ -26,6 +26,7 @@
 #include "profile.h"
 #include "ring.h"
 #include "sched/admission.h"
+#include "sched/lowering.h"
 #include "sched/run_view.h"
 #include "sched/timeline.h"
 #include "sendspin/server/server.h"
@@ -272,6 +273,11 @@ private:
     uint64_t ready_samples() const;
     /// Anchors the current epoch at p0_ with `T0 = now + G_next`, reusing the anchor's storage
     void anchor_at(int64_t now_us);
+    /// A playing live input's write of frames admitted frames: observes its excess
+    /// (sched::observe_live_write()) and cuts what the epoch owes from the write's end, lowering
+    /// `G_eff` with it
+    /// @return the frames to take
+    uint64_t lower_latency(uint64_t frames, int64_t now_us);
     /// Fills anchor with T0 at t0_us, from p0 through the staged segments
     void build_anchor(sched::Anchor& anchor, int64_t t0_us, uint64_t p0) const;
     /// The staged segment holding position: the last starting at or before it
@@ -328,6 +334,8 @@ private:
     GroupParams params_;
     /// `G_eff` of the anchored epoch
     int64_t group_lead_eff_us_{0};
+    /// A live input's latency lowering in the current epoch
+    sched::LiveLowering lowering_;
     /// `k*` the pipelines published for the current epoch, and the `L_p` its rebase decides with
     std::optional<int64_t> shift_index_;
     int64_t rebase_latency_us_{0};

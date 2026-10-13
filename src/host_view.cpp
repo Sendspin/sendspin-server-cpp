@@ -145,7 +145,11 @@ WriteResult HostView::write(const void* pcm, size_t frames) {
         this->host_calls_seen_ = this->host_calls_;
         const sched::WriteDecision decision =
             sched::decide_write(this->admission_input(), this->anchor_, frames, now);
-        if (decision.frames > 0) {
+        uint64_t taken = decision.frames;
+        if (this->kind_ == InputKind::LIVE && this->run_.run == sched::RunState::PLAYING) {
+            taken = this->lower_latency(taken, now);
+        }
+        if (taken > 0) {
             // The write that begins a run or a pending epoch anchors it
             if (this->run_.run == sched::RunState::NONE) {
                 sched::view_anchor_write(this->run_, new_run_id(), new_epoch_id());
@@ -156,16 +160,16 @@ WriteResult HostView::write(const void* pcm, size_t frames) {
             }
             copy_in(this->ring_.span(), this->byte_of(this->head_),
                     static_cast<const uint8_t*>(pcm),
-                    static_cast<size_t>(decision.frames) * frame_bytes_of(this->format_));
-            this->head_ += decision.frames;
+                    static_cast<size_t>(taken) * frame_bytes_of(this->format_));
+            this->head_ += taken;
         }
         if (decision.state == InputState::FULL) {
             this->writable_wanted_ = true;
         }
-        if (decision.frames > 0 || decision.state == InputState::FULL) {
+        if (taken > 0 || decision.state == InputState::FULL) {
             this->signal(after);
         }
-        result = {static_cast<size_t>(decision.frames), decision.state};
+        result = {static_cast<size_t>(taken), decision.state};
     }
     this->run_after(after);
     return result;
@@ -710,6 +714,26 @@ void HostView::anchor_at(int64_t now_us) {
     this->group_lead_eff_us_ = this->params_.group_lead_us;
     this->shift_index_.reset();
     this->rebase_latency_us_ = 0;
+    this->lowering_ = {};
+}
+
+uint64_t HostView::lower_latency(uint64_t frames, int64_t now_us) {
+    const int64_t excess =
+        sched::time_of(this->anchor_, this->head_) - now_us - this->params_.group_lead_us;
+    const int64_t debt = sched::observe_live_write(this->lowering_, excess, now_us);
+    const uint32_t rate = this->format_.sample_rate;
+    const auto cut = std::min<uint64_t>(
+        frames, static_cast<uint64_t>(std::max<int64_t>(debt, 0) * rate / sched::US_PER_SECOND));
+    if (cut == 0) {
+        return frames;
+    }
+    const auto cut_us = static_cast<int64_t>(cut) * sched::US_PER_SECOND / rate;
+    sched::record_cut(this->lowering_, cut_us);
+    // The rebase threshold falls with the latency, down to the lead every player needs, so the
+    // next frame does not shift the timeline back up
+    this->group_lead_eff_us_ =
+        std::max(this->params_.group_lead_us, this->group_lead_eff_us_ - cut_us);
+    return frames - cut;
 }
 
 void HostView::resolve_empty_drain(AfterUnlock& after) {

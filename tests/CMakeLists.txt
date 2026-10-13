@@ -53,6 +53,7 @@ add_executable(sendspin_server_cpp_tests
     test_sched_leads.cpp
     test_sched_ledger.cpp
     test_sched_lifecycle.cpp
+    test_sched_lowering.cpp
     test_sched_property.cpp
     test_sched_selection.cpp
     test_sched_timeline.cpp

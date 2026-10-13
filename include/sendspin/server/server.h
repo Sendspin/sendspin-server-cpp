@@ -213,7 +213,9 @@ public:
     /// real-time safe. Takes as many as the input admits, up to about the group's lead plus its
     /// write-ahead past the time now playing; state says why it took fewer. A new input admits
     /// nothing (InputState::FULL) until the server has attached it to its group. A live input's
-    /// writer drops what write() refuses and never resends what a stall held back.
+    /// writer drops what write() refuses and never resends what a stall held back. A live input
+    /// may also take fewer with InputState::OPEN, cutting audio to bring a raised latency back
+    /// down (InputKind::LIVE); its writer drops the rest the same way.
     WriteResult write(const void* pcm, size_t frames);
 
     /// @brief The input's state now: what write() would report for a cell (20 ms) of samples.

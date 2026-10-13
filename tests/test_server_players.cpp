@@ -1808,8 +1808,9 @@ constexpr int64_t LIVE_AHEAD_US = 200000;
 /// that far behind rather than catching up at once. Waits for the server to attach the input first.
 /// @param before called with the samples written so far before each block; it may stall, pause or
 /// resume
+/// @param lowers whether the input may take less of a block to lower its latency
 void feed_live(GroupInput& input, const Signal& signal, const Segment& segment,
-               const std::function<void(uint32_t)>& before = {}) {
+               const std::function<void(uint32_t)>& before = {}, bool lowers = false) {
     using Clock = std::chrono::steady_clock;
     constexpr auto BLOCK_TIME = std::chrono::milliseconds(10);
     ASSERT_EQ(input.wait_writable(std::numeric_limits<int64_t>::max()), InputState::OPEN);
@@ -1825,8 +1826,12 @@ void feed_live(GroupInput& input, const Signal& signal, const Segment& segment,
             signal.put(&block[i * signal.frame_bytes()], segment.first + written + i);
         }
         const WriteResult result = input.write(block.data(), n);
-        // A live writer on time is never cut short, paused or not
-        EXPECT_EQ(result.frames, n) << static_cast<int>(result.state);
+        // A live writer on time is never cut short, paused or not, but to lower the latency
+        if (lowers) {
+            EXPECT_EQ(result.state, InputState::OPEN);
+        } else {
+            EXPECT_EQ(result.frames, n) << static_cast<int>(result.state);
+        }
         written += n;
         due += BLOCK_TIME;
         if (Clock::now() - due > 2 * BLOCK_TIME) {
@@ -1975,6 +1980,61 @@ TEST(ServerPlayersLive, RaiseTheGroupLeadForAJoinerWithOneShift) {
     EXPECT_GT(expect_same_timestamps(first_chunks, joiner_chunks), 0U);
     expect_heard(decode(signal, first.sink().played()), first_chunks, {segment});
     expect_heard(decode(signal, joiner.sink().played()), joiner_chunks, {segment});
+}
+
+// The joiner of the test above leaves once its join raised the lead: the group lead falls back to
+// 200 ms, and once a whole window of writes landed that much later than a fresh anchor would
+// place them, the input cuts the excess from the writes that follow. The player streaming
+// throughout hears the cut as a skip in the audio while its timeline runs on unbroken, the skip at
+// most the shift the join made and most of it, and the timeline is not shifted back up.
+// Eight seconds of input, played in real time, so the join and the leave land mid-stream and a
+// window of real time passes after them.
+TEST(ServerPlayersLive, LowerTheGroupLeadOnceAHighLeadJoinerLeaves) {
+    const Signal signal(24);
+    Rig s(signal);
+    const std::vector<sendspin::AudioSupportedFormatObject> formats = {{Codec::PCM, 2, RATE, 24}};
+    const Player& first = s.add(formats);
+    const std::shared_ptr<GroupInput> input = s.open_live();
+    ASSERT_TRUE(input);
+    const Segment segment{0, 8 * RATE};
+    std::thread host([&] {
+        feed_live(*input, signal, segment, {}, true);
+        input->drain();
+    });
+    run_until(s.players, [&] { return first.sink().audible() > RATE / 2; });
+    const Player& joiner = s.add(formats, RATE, 2, 400);
+    run_until(s.players, [&] { return s.has_chunks(joiner); });
+    s.players.pop_back();
+    run_until(s.players, [&] { return !s.recorder.disconnects().empty(); });
+    const int64_t left_us = s.server.now_us();
+    const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
+    s.run_until_drained({drained});
+    host.join();
+
+    const std::lock_guard<std::mutex> lock(s.trace.mutex);
+    EXPECT_FALSE(s.trace.failed);
+    const std::vector<ChunkInfo>& chunks = s.trace.chunks[s.client_id(first)];
+    // The timeline's shifts before the leave and after it, and the audio cut after it
+    int64_t raised_us = 0;
+    int64_t shifted_us = 0;
+    int64_t cut_us = 0;
+    for (size_t i = 1; i < chunks.size(); ++i) {
+        const ChunkInfo& before = chunks[i - 1];
+        const ChunkInfo& chunk = chunks[i];
+        ASSERT_EQ(chunk.stream, before.stream);
+        const int64_t ended = before.ts + (int64_t{before.samples} * 1000000 / before.rate);
+        EXPECT_GE(chunk.ts, ended) << "the timeline ran back";
+        if (chunk.stamp_us < left_us) {
+            raised_us += chunk.ts - ended;
+            continue;
+        }
+        shifted_us += chunk.ts - ended;
+        cut_us += int64_t{chunk.position - (before.position + before.samples)} * 1000000 / RATE;
+    }
+    EXPECT_GT(cut_us, raised_us / 2) << "of " << raised_us;
+    EXPECT_LE(cut_us, raised_us) << "of " << raised_us;
+    // A host write late by more than half the cut would shift it too
+    EXPECT_LT(shifted_us, cut_us / 2) << "shifted again after the cut";
 }
 
 // The host stalls for half a second. When its writes resume, the next frame's lead is far under
