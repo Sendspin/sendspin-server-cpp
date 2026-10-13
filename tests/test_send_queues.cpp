@@ -21,6 +21,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace {
@@ -202,6 +203,27 @@ TEST(SendQueues, PassATextOrSmallMessageThroughWhole) {
     EXPECT_EQ(queues.take_control(FRAGMENT).bytes.size(),
               sendspin::server::MAX_TRANSPORT_PLAINTEXT);
     EXPECT_EQ(queues.next(), SendChoice::NONE);
+}
+
+// A JSON message, and each fragment of one too large for one Noise transport message, has room
+// for the tag its encryption appends, so that the encryption does not reallocate it
+TEST(SendQueues, LeaveRoomForTheTransportTag) {
+    const auto room = [](const OutboundPlaintext& message) {
+        return message.bytes.capacity() - message.bytes.size();
+    };
+    EXPECT_GE(room(sendspin::server::json_plaintext(R"({"type":"server/time"})")),
+              sendspin::server::TRANSPORT_TAG_BYTES);
+    SendQueues queues{SendQueueCaps{}};
+    ASSERT_TRUE(queues.push_control(sendspin::server::json_plaintext(
+        std::string((2 * sendspin::server::MAX_TRANSPORT_PLAINTEXT) + 1, 'x'))));
+    size_t fragments = 0;
+    while (queues.next() != SendChoice::NONE) {
+        const OutboundPlaintext fragment = queues.take_control(FRAGMENT);
+        EXPECT_EQ(fragment.bytes[0], sendspin::server::MESSAGE_ID_FRAGMENT);
+        EXPECT_GE(room(fragment), sendspin::server::TRANSPORT_TAG_BYTES) << fragments;
+        ++fragments;
+    }
+    EXPECT_GT(fragments, 2U);
 }
 
 }  // namespace

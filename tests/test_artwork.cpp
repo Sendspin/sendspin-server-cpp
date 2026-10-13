@@ -114,6 +114,19 @@ TEST(ArtworkMessages, BuildTheBinaryWireFormat) {
     EXPECT_EQ(sendspin::server::artwork_cancel(1), (std::vector<uint8_t>{9, 1}));
 }
 
+// Each binary message has room for the tag its encryption appends, so that the encryption does
+// not reallocate it
+TEST(ArtworkMessages, LeaveRoomForTheTransportTag) {
+    const auto room = [](const std::vector<uint8_t>& message) {
+        return message.capacity() - message.size();
+    };
+    const std::array<uint8_t, 3> data{7, 8, 9};
+    EXPECT_GE(room(sendspin::server::artwork_announce(2, 1, 3)),
+              sendspin::server::TRANSPORT_TAG_BYTES);
+    EXPECT_GE(room(sendspin::server::artwork_part(3, data)), sendspin::server::TRANSPORT_TAG_BYTES);
+    EXPECT_GE(room(sendspin::server::artwork_cancel(1)), sendspin::server::TRANSPORT_TAG_BYTES);
+}
+
 // spec roles/artwork/v1.md "stream/start artwork object": each channel as the client declared
 // it, the array truncated after the last streamed channel
 TEST(ArtworkMessages, BuildStreamStartTruncatedAfterTheLastStreamedChannel) {

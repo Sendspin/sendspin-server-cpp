@@ -22,6 +22,7 @@
 /// flipping NoiseInitiator::payload_1_ or message_1_.
 
 #include "crypto/keys.h"
+#include "fragmentation.h"
 #include "noise.h"
 #include <gtest/gtest.h>
 #include <noise/protocol.h>
@@ -256,6 +257,26 @@ TEST_P(NoiseInitiatorVector, RejectsATamperedTransportMessage) {
     std::vector<uint8_t> message = from_hex(vector.ciphertexts[3]);
     message.front() ^= 0x01;
     EXPECT_FALSE(ciphers->decrypt(message));
+}
+
+// A plaintext with room reserved for the tag is encrypted where it lies, into the vector's
+// transport message
+TEST_P(NoiseInitiatorVector, EncryptsInPlaceIntoTheRoomReservedForTheTag) {
+    const Vector& vector = GetParam();
+    std::optional<NoiseInitiator> initiator = make_initiator(vector.suite);
+    ASSERT_TRUE(initiator);
+    ASSERT_TRUE(initiator->write_message_1(from_hex(PAYLOADS[0])));
+    ASSERT_TRUE(initiator->read_message_2(from_hex(vector.ciphertexts[1])));
+    std::optional<TransportCiphers> ciphers = initiator->split();
+    ASSERT_TRUE(ciphers);
+    const std::vector<uint8_t> payload = from_hex(PAYLOADS[2]);
+    std::vector<uint8_t> message;
+    sendspin::server::reserve_plaintext(message, payload.size());
+    message.assign(payload.begin(), payload.end());
+    const uint8_t* const buffer = message.data();
+    ASSERT_TRUE(ciphers->encrypt(message));
+    EXPECT_EQ(message, from_hex(vector.ciphertexts[2]));
+    EXPECT_EQ(message.data(), buffer);
 }
 
 INSTANTIATE_TEST_SUITE_P(Suites, NoiseInitiatorVector, testing::ValuesIn(VECTORS),

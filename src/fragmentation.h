@@ -31,9 +31,19 @@ constexpr uint8_t MESSAGE_ID_JSON = 0;
 /// @brief Message ID of a fragment
 constexpr uint8_t MESSAGE_ID_FRAGMENT = 1;
 
-/// @brief Largest plaintext one Noise transport message carries: 65535 bytes less the 16-byte
-/// tag, message ID included
-constexpr size_t MAX_TRANSPORT_PLAINTEXT = 65535 - 16;
+/// @brief Size of the AEAD tag encryption appends to each Noise transport message, in both cipher
+/// suites
+constexpr size_t TRANSPORT_TAG_BYTES = 16;
+
+/// @brief Largest plaintext one Noise transport message carries: 65535 bytes less the tag, message
+/// ID included
+constexpr size_t MAX_TRANSPORT_PLAINTEXT = 65535 - TRANSPORT_TAG_BYTES;
+
+/// @brief Reserves room in an outbound plaintext for plaintext_bytes and the tag, so that
+/// TransportCiphers::encrypt() appends the tag without reallocating
+inline void reserve_plaintext(std::vector<uint8_t>& plaintext, size_t plaintext_bytes) {
+    plaintext.reserve(plaintext_bytes + TRANSPORT_TAG_BYTES);
+}
 
 /// @brief Fragment flags: bit 0 marks the last fragment, bit 1 the first, bits 2-7 are reserved
 constexpr uint8_t FRAGMENT_FLAG_LAST = 0x01;

@@ -17,6 +17,7 @@
 /// ledger's pacing (spec roles/visualizer/v1.md "client/hello visualizer@v1 support object") and
 /// a configuration change in place.
 
+#include "fragmentation.h"
 #include "visualizer_stream.h"
 #include <gtest/gtest.h>
 
@@ -210,6 +211,19 @@ TEST(VisualizerStream, SendsEachMessageOnceWithinTheLedger) {
             EXPECT_EQ(taken[i].at, T0 - 1000000) << i;
         }
     }
+}
+
+// A message has room for the tag its encryption appends, so that the encryption does not reallocate
+// it
+TEST(VisualizerStream, LeavesRoomForTheTransportTag) {
+    FakeGroup group;
+    VisualizerStream stream = started(group, CAPACITY, T0 - 1000000);
+    stream.prepare(&group, 0, T0 - 1000000);
+    ASSERT_TRUE(stream.candidate(&group, T0 - 1000000).ready);
+    const OutboundPlaintext message = stream.take_message(&group);
+    ASSERT_FALSE(message.bytes.empty());
+    EXPECT_GE(message.bytes.capacity() - message.bytes.size(),
+              sendspin::server::TRANSPORT_TAG_BYTES);
 }
 
 // A visualizer starts while its first message, its startup lead past now, is still at or before the
