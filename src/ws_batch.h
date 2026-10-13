@@ -34,11 +34,6 @@ namespace sendspin::server {
 /// flight, read by the writer while one is.
 class WsBatch {
 public:
-    struct Frame {
-        MessageKind kind;
-        std::span<const uint8_t> payload;
-    };
-
     void clear() {
         this->bytes_.clear();
         this->frames_ = 0;
@@ -57,10 +52,6 @@ public:
     size_t frames() const {
         return this->frames_;
     }
-
-    /// @brief The unmasked frame at offset, a frame's start or bytes().size(), and offset moved
-    /// past it; nullopt at the end
-    std::optional<Frame> next(size_t& offset) const;
 
 private:
     ExternalBytes bytes_;

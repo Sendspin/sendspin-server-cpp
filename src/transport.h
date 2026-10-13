@@ -19,8 +19,8 @@
 /// EventLoop::post() and Wakeup::signal(). The sockets are read and written on threads of the
 /// transport's own, so a message's receive stamp never waits for core: on the host, a network
 /// thread per loop on Asio and Beast (transport.cpp), started by its first Listener or dial() and
-/// stopped with it; on ESP-IDF, FreeRTOS tasks on esp_websocket_client and esp_http_server
-/// (src/esp/), with the differences noted below.
+/// stopped with it; on ESP-IDF, FreeRTOS tasks on lwIP's sockets and esp_http_server (src/esp/),
+/// with the differences noted below.
 
 #pragma once
 
@@ -97,9 +97,8 @@ struct TransportSettings {
     /// ESP-IDF, 404 for another path either way).
     std::string path{"/sendspin"};
     /// Beast's write buffer size; a masked message (on a dialed connection) up to this size goes
-    /// to the socket in one send. Raised to Beast's minimum when below it. On ESP-IDF, a dialed
-    /// connection's esp_websocket_client buffers, at most 16 KB: a larger message goes as several
-    /// frames.
+    /// to the socket in one send. Raised to Beast's minimum when below it. Ignored on ESP-IDF,
+    /// where every message is one frame and a write's frames go in one send.
     size_t write_buffer_bytes{MAX_MESSAGE_BYTES};
     /// Largest inbound message, nonzero and at most MAX_MESSAGE_BYTES (a larger value is lowered
     /// to it); a larger message closes the connection

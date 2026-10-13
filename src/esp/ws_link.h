@@ -14,13 +14,15 @@
 
 /// @file ws_link.h
 /// @brief WsLink: one ESP-IDF WebSocket connection's state shared by its three tasks. The receive
-/// task (esp_websocket_client's for a dialed connection, httpd's for an accepted one) stamps and
-/// assembles inbound messages and pushes them into the loop's inbound ring, and reports the
-/// transport's close; the connection's writer task performs each write (a batch of frames), wait
-/// for room, ping and the close, one at a time, so a slow peer blocks only its own writer, and
-/// raises their outcomes in the ring; the core task asks for them, and the ring delivers to the
-/// endpoint it binds. A dialed connection's writer also starts the client, and the writer tears the
-/// transport down last, so the receive task never outlives the link.
+/// task (the connection's own reader task for a dialed connection, httpd's for an accepted one)
+/// stamps and assembles inbound messages and pushes them into the loop's inbound ring, and reports
+/// the transport's close; the connection's writer task performs each write (a batch of frames, in
+/// one send), wait for room, ping and the close, one at a time, so a slow peer blocks only its own
+/// writer, and raises their outcomes in the ring; the core task asks for them, and the ring
+/// delivers to the endpoint it binds. Both roles frame on the socket alike; a dialed connection's
+/// frames are masked (RFC 6455 section 5.3). A dialed connection's writer also starts its reader
+/// task, and the writer tears the transport down last, so the receive task never outlives the
+/// link.
 
 #pragma once
 
@@ -29,14 +31,17 @@
 #include "freertos/task.h"
 #include "inbound_hold.h"
 #include "inbound_ring.h"
+#include "lwip/sockets.h"
 #include "shared.h"
 #include "transport.h"
 #include "ws_batch.h"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -46,6 +51,9 @@ namespace sendspin::server {
 
 /// @brief How often a writer waiting for room checks for a close or a ping
 constexpr int WS_ROOM_POLL_MS = 100;
+/// @brief The longest a send waits for room at a time before it checks for a close asked for; the
+/// longest the receive task waits to answer a close
+constexpr int WS_SEND_SLICE_MS = 200;
 /// @brief A link keeps up to this much of its message buffer once the message is pushed; a larger
 /// one's buffer is freed
 constexpr size_t WS_KEPT_MESSAGE_BYTES = 2048;
@@ -54,7 +62,9 @@ class WsLink : public InboundProducer, public EnableSharedFromThis<WsLink> {
 public:
     /// @param loop held for the link's life: the loop's destructor closes it, so a link holding it
     /// last destroys only what the loop left
-    WsLink(SharedPtr<LoopCore> loop, const TransportSettings& settings);
+    /// @param masks a dialed connection's: every frame it sends is masked with a fresh key from
+    /// the hardware RNG (RFC 6455 section 5.3)
+    WsLink(SharedPtr<LoopCore> loop, const TransportSettings& settings, bool masks);
     ~WsLink() override;
     WsLink(const WsLink&) = delete;
     WsLink& operator=(const WsLink&) = delete;
@@ -75,7 +85,8 @@ public:
     void start_inbound();
 
     void request_room();
-    /// @brief While no write is in flight: adds payload, copied, as one frame of the next write
+    /// @brief While no write is in flight: adds payload, copied (and masked as it is), as one frame
+    /// of the next write
     void stage_write(MessageKind kind, std::span<const uint8_t> payload);
     /// @brief Drops the frames staged since the last write, which is then never requested
     void drop_staged();
@@ -130,7 +141,7 @@ protected:
     bool end_frame(bool fin, int64_t rx_us);
 
     /// @brief Receive task, as the message of generation is held: stops receiving until it is
-    /// released (a session's pause in httpd; a dialed client task waits)
+    /// released (a session's pause in httpd; a dialed connection's reader task waits)
     /// @return false when it could not stop receiving
     virtual bool hold_receiving(uint64_t generation) = 0;
 
@@ -159,6 +170,18 @@ protected:
         return (this->requests_.load(std::memory_order_acquire) & REQUEST_CLOSE) != 0;
     }
 
+    // ---- Receive task ----
+
+    /// @brief A ping's payload, for the pong the writer sends (ask_pong())
+    void store_ping(const uint8_t* payload, size_t len);
+    /// @brief The close frame that answers the peer's, echoing its status code (RFC 6455 section
+    /// 5.5.1), unless a close was sent already. A frame the writer has begun cannot be
+    /// interrupted; past WS_SEND_SLICE_MS in all, waiting for it and sending, the close goes
+    /// unanswered.
+    void answer_close(const uint8_t* payload, size_t len);
+    /// @brief Receive task: asks the writer to call send_pong()
+    void ask_pong();
+
     // ---- Writer task: the transport's own operations ----
 
     /// @brief Before anything else: a dialed connection dials here
@@ -166,24 +189,32 @@ protected:
     virtual bool open() {
         return true;
     }
-    /// @return > 0 when the socket has room, 0 when timeout_ms passed, < 0 on an error
-    virtual int poll_room(int timeout_ms) = 0;
-    /// @brief Every frame of batch, in order, within the write stall
-    virtual bool send_batch(const WsBatch& batch) = 0;
-    virtual bool send_ping() = 0;
-    /// @brief Answers the last ping the receive task asked to answer (ask_pong())
-    virtual bool send_pong() {
-        return true;
-    }
-    /// @brief Closes the transport, with a close frame when code is set; may wait. The receive
-    /// task makes no call after it returns.
+    /// @brief Closes the transport, with a close frame when code is set (send_close()); may wait.
+    /// The receive task makes no call after it returns.
     virtual void shut(std::optional<uint16_t> code) = 0;
 
-    /// @brief Receive task: asks the writer to call send_pong()
-    void ask_pong();
+    /// @brief A close frame carrying code
+    bool send_close(uint16_t code);
+
+    /// @brief Any task: shuts the socket down with how (SHUT_WR, SHUT_RDWR) unless it is closed
+    void shutdown_socket(int how);
+
+    /// @brief Any task: the masking key for the next frame sent, or nullopt for an accepted
+    /// connection's
+    std::optional<WsMaskKey> mask_key() const;
 
     const TransportSettings settings_;
     std::string remote_endpoint_;
+
+    /// The connection's socket: set before the writer's first use (an accepted connection's at
+    /// construction, a dialed one's before report_connected()); closed by httpd for an accepted
+    /// connection, by the writer's shut() for a dialed one
+    int fd_{-1};
+    /// Set under socket_mutex_ once fd_ is closed
+    std::atomic<bool> fd_closed_{false};
+    /// Held only for a call that moves bytes or shuts the socket, so a close waits no longer than
+    /// that
+    std::mutex socket_mutex_;
 
 private:
     static constexpr uint32_t REQUEST_ROOM = 1U << 0U;
@@ -199,6 +230,22 @@ private:
     /// Sends the pings and pongs asked for; false once a close is asked for
     bool serve_control();
     void wait_for_room();
+
+    /// > 0 when the socket has room, 0 when timeout_ms passed, < 0 on an error
+    int poll_room(int timeout_ms);
+    /// The batch's frames in one send, as it holds them
+    bool send_batch(const WsBatch& batch);
+    bool send_ping();
+    /// Answers the last ping stored (store_ping())
+    bool send_pong();
+    /// One whole frame, waiting for the frame lock while the receive task answers a close
+    bool send_frame(uint8_t opcode, const uint8_t* data, size_t len);
+    /// Under frame_mutex_: writes one control frame (send_parts()), masked when the link masks
+    bool write_frame(uint8_t opcode, const uint8_t* data, size_t len, int64_t deadline_us);
+    /// Under frame_mutex_: sends whole frames until they are all sent, deadline_us passes or a
+    /// close is asked for. The socket mutex is held only while lwIP copies what fits. A frame left
+    /// part written breaks the stream: every later frame, a close included, is refused.
+    bool send_parts(iovec* parts, size_t count, int64_t deadline_us);
 
     const SharedPtr<LoopCore> loop_;
     /// Where messages and events go: set by bind(), before the writer starts and before
@@ -220,6 +267,17 @@ private:
     WsBatch write_batch_;
     /// Core task, then the writer task once REQUEST_CLOSE is seen
     std::optional<uint16_t> close_code_;
+    const bool masks_;
+    /// Held for one whole frame, so frames from the writer and the receive task never interleave;
+    /// taken before socket_mutex_
+    std::timed_mutex frame_mutex_;
+    /// Guarded by frame_mutex_: a close frame was sent or begun
+    bool close_sent_{false};
+    /// Guarded by frame_mutex_: a frame was left part written
+    bool frame_broken_{false};
+    /// Guarded by socket_mutex_, which no one holds long: the last ping's payload
+    std::array<uint8_t, WS_CONTROL_PAYLOAD_MAX> pong_{};
+    size_t pong_bytes_{0};
     std::atomic<bool> connected_{false};
     /// -1 while open, else the CloseReason
     std::atomic<int> closed_{-1};

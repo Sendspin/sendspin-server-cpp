@@ -47,8 +47,8 @@ namespace {
 /// CONFIG_FREERTOS_NUMBER_OF_CORES - 1 and give any other value the project's default
 constexpr int PTHREAD_NO_AFFINITY = -1;
 static_assert(CONFIG_PTHREAD_TASK_CORE_DEFAULT == -1,
-              "the connections' writer tasks run on either core: CONFIG_PTHREAD_TASK_CORE_DEFAULT "
-              "must be -1 (no affinity), as ESP-IDF's default is");
+              "the connections' writer and reader tasks run on either core: "
+              "CONFIG_PTHREAD_TASK_CORE_DEFAULT must be -1 (no affinity), as ESP-IDF's default is");
 
 // The core thread and the dispatch thread on core 0, the group audio worker and the artwork thread
 // on core 1; each stack where profile.h places it
@@ -101,6 +101,15 @@ esp_pthread_cfg_t config_of(ThreadRole role) {
             cfg.prio = 11;
             cfg.pin_to_core = PTHREAD_NO_AFFINITY;
             stack = profile::LINK_WRITER_STACK;
+            break;
+        case ThreadRole::LINK_READER:
+            // Above the writers and the core task, so a message is stamped as soon as it is read;
+            // the stack holds the dial's resolve, connect and upgrade, then the frames' reads
+            cfg.thread_name = "ss_ws_rx";
+            cfg.stack_size = 3584;
+            cfg.prio = 12;
+            cfg.pin_to_core = PTHREAD_NO_AFFINITY;
+            stack = profile::DIAL_RECEIVE_STACK;
             break;
     }
     cfg.stack_alloc_caps = stack_caps(stack, cfg.stack_size);

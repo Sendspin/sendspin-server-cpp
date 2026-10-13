@@ -34,18 +34,4 @@ void WsBatch::append(MessageKind kind, std::span<const uint8_t> payload,
     ++this->frames_;
 }
 
-std::optional<WsBatch::Frame> WsBatch::next(size_t& offset) const {
-    if (offset >= this->bytes_.size()) {
-        return std::nullopt;
-    }
-    const WsHeaderParse parse =
-        ws_parse_frame_header(std::span<const uint8_t>(this->bytes_).subspan(offset), false);
-    const auto len = static_cast<size_t>(parse.header.payload_bytes);
-    const Frame frame{
-        parse.header.opcode == ws_opcode::TEXT ? MessageKind::TEXT : MessageKind::BINARY,
-        std::span<const uint8_t>(this->bytes_.data() + offset + parse.header.header_bytes, len)};
-    offset += parse.header.header_bytes + len;
-    return frame;
-}
-
 }  // namespace sendspin::server

@@ -6,10 +6,9 @@
 #                                   own targets on a host, with stb's warnings off)
 #   SENDSPIN_SERVER_HOST_SOURCES  - a host's platform files: the transport on Asio and Beast, the
 #                                   pffft FFT, plain std::threads, one heap
-#   SENDSPIN_SERVER_ESP_SOURCES   - ESP-IDF's platform files (src/esp/): the transport on
-#                                   esp_websocket_client and esp_http_server among them, and no
-#                                   mDNS backend; the host's mDNS backends are chosen in
-#                                   CMakeLists.txt
+#   SENDSPIN_SERVER_ESP_SOURCES   - ESP-IDF's platform files (src/esp/): the transport on lwIP's
+#                                   sockets and esp_http_server among them, and no mDNS backend;
+#                                   the host's mDNS backends are chosen in CMakeLists.txt
 
 set(SENDSPIN_SERVER_SOURCES
     # Artwork and colors: the role's values, the per-session stream, core's cache of encodings,
@@ -119,8 +118,8 @@ set(SENDSPIN_SERVER_HOST_SOURCES
 
 set(SENDSPIN_SERVER_ESP_SOURCES
     # The transport: the core task's loop on FreeRTOS and esp_timer, a connection's core half and
-    # the link its receive and writer tasks share, dials on esp_websocket_client and the listener
-    # on esp_http_server
+    # the link its receive and writer tasks share, dials on lwIP's sockets and the listener on
+    # esp_http_server
     src/esp/connection_esp.cpp
     src/esp/dial_esp.cpp
     src/esp/event_loop_esp.cpp

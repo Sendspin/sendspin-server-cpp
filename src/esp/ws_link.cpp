@@ -14,11 +14,15 @@
 
 #include "ws_link.h"
 
+#include "clock.h"
+#include "esp_random.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 #include "thread_setup.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <utility>
@@ -29,6 +33,26 @@ namespace {
 
 /// How long an ending writer task waits between looks at a wake_writer() still in progress
 constexpr TickType_t WAKING_WRITER_POLL_TICKS = 1;
+/// Close codes a close frame never carries (RFC 6455 section 7.4.1)
+constexpr uint16_t CLOSE_NO_STATUS = 1005;
+constexpr uint16_t CLOSE_ABNORMAL = 1006;
+constexpr uint16_t CLOSE_TLS_HANDSHAKE = 1015;
+constexpr size_t STATUS_CODE_BYTES = 2;
+constexpr int64_t US_PER_MS = 1000;
+
+void skip_sent(msghdr& message, size_t sent) {
+    while (sent > 0 && message.msg_iovlen > 0) {
+        iovec& part = message.msg_iov[0];
+        const size_t taken = std::min(sent, part.iov_len);
+        part.iov_base = static_cast<uint8_t*>(part.iov_base) + taken;
+        part.iov_len -= taken;
+        sent -= taken;
+        if (part.iov_len == 0) {
+            ++message.msg_iov;
+            --message.msg_iovlen;
+        }
+    }
+}
 
 TransportSettings bounded(TransportSettings settings) {
     settings.read_message_max = std::min(settings.read_message_max, MAX_MESSAGE_BYTES);
@@ -37,9 +61,10 @@ TransportSettings bounded(TransportSettings settings) {
 
 }  // namespace
 
-WsLink::WsLink(SharedPtr<LoopCore> loop, const TransportSettings& settings)
+WsLink::WsLink(SharedPtr<LoopCore> loop, const TransportSettings& settings, bool masks)
     : settings_(bounded(settings)),
       loop_(std::move(loop)),
+      masks_(masks),
       hold_(
           [this](MessageKind kind, std::span<const uint8_t> payload, int64_t rx_us) {
               return this->loop().inbound().push(this->endpoint_, kind, payload, rx_us);
@@ -91,7 +116,7 @@ void WsLink::request_room() {
 }
 
 void WsLink::stage_write(MessageKind kind, std::span<const uint8_t> payload) {
-    this->write_batch_.append(kind, payload);
+    this->write_batch_.append(kind, payload, this->mask_key());
 }
 
 void WsLink::drop_staged() {
@@ -207,6 +232,29 @@ void WsLink::ask_pong() {
     this->request(REQUEST_PONG);
 }
 
+void WsLink::store_ping(const uint8_t* payload, size_t len) {
+    const std::lock_guard<std::mutex> lock(this->socket_mutex_);
+    std::memcpy(this->pong_.data(), payload, len);
+    this->pong_bytes_ = len;
+}
+
+void WsLink::answer_close(const uint8_t* payload, size_t len) {
+    const int64_t deadline_us = now_us() + static_cast<int64_t>(WS_SEND_SLICE_MS) * US_PER_MS;
+    std::unique_lock<std::timed_mutex> lock(this->frame_mutex_, std::defer_lock);
+    if (!lock.try_lock_for(std::chrono::milliseconds(WS_SEND_SLICE_MS))) {
+        return;
+    }
+    // A code a close frame never carries is answered with none
+    size_t echoed = 0;
+    if (len >= STATUS_CODE_BYTES) {
+        const auto code = static_cast<uint16_t>((payload[0] << 8U) | payload[1]);
+        if (code != CLOSE_NO_STATUS && code != CLOSE_ABNORMAL && code != CLOSE_TLS_HANDSHAKE) {
+            echoed = STATUS_CODE_BYTES;
+        }
+    }
+    this->write_frame(ws_opcode::CLOSE, payload, echoed, deadline_us);
+}
+
 void WsLink::signal_core() {
     // One before the bind is signalled by the bind
     if (this->wake_bound_.load(std::memory_order_acquire)) {
@@ -303,6 +351,149 @@ void WsLink::wait_for_room() {
             return;
         }
     }
+}
+
+int WsLink::poll_room(int timeout_ms) {
+    if (this->fd_closed_.load(std::memory_order_acquire)) {
+        return -1;
+    }
+    // Outside the socket mutex: lwIP holds a socket for the whole of a select() on it
+    // (LWIP_NETCONN_FULLDUPLEX), so a close meanwhile frees the descriptor only after it; one
+    // closed before the select() starts fails it, or, reused, answers spuriously, and the write
+    // that follows checks fd_closed_ under the socket mutex
+    fd_set writable;
+    FD_ZERO(&writable);
+    FD_SET(this->fd_, &writable);
+    timeval timeout{};
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    return select(this->fd_ + 1, nullptr, &writable, nullptr, &timeout);
+}
+
+bool WsLink::send_batch(const WsBatch& batch) {
+    const std::lock_guard<std::timed_mutex> lock(this->frame_mutex_);
+    if (this->close_sent_ || this->frame_broken_) {
+        return false;
+    }
+    const std::span<const uint8_t> bytes = batch.bytes();
+    std::array<iovec, 1> parts{};
+    parts[0].iov_base = const_cast<uint8_t*>(bytes.data());
+    parts[0].iov_len = bytes.size();
+    return this->send_parts(parts.data(), parts.size(), now_us() + this->settings_.write_stall_us);
+}
+
+bool WsLink::send_ping() {
+    return this->send_frame(ws_opcode::PING, nullptr, 0);
+}
+
+bool WsLink::send_pong() {
+    std::array<uint8_t, WS_CONTROL_PAYLOAD_MAX> payload{};
+    size_t bytes = 0;
+    {
+        const std::lock_guard<std::mutex> lock(this->socket_mutex_);
+        bytes = this->pong_bytes_;
+        std::memcpy(payload.data(), this->pong_.data(), bytes);
+    }
+    return this->send_frame(ws_opcode::PONG, payload.data(), bytes);
+}
+
+bool WsLink::send_close(uint16_t code) {
+    const std::array<uint8_t, STATUS_CODE_BYTES> body{static_cast<uint8_t>(code >> 8U),
+                                                      static_cast<uint8_t>(code)};
+    return this->send_frame(ws_opcode::CLOSE, body.data(), body.size());
+}
+
+void WsLink::shutdown_socket(int how) {
+    const std::lock_guard<std::mutex> lock(this->socket_mutex_);
+    if (this->fd_ >= 0 && !this->fd_closed_) {
+        shutdown(this->fd_, how);
+    }
+}
+
+std::optional<WsMaskKey> WsLink::mask_key() const {
+    if (!this->masks_) {
+        return std::nullopt;
+    }
+    const uint32_t random = esp_random();
+    WsMaskKey key{};
+    std::memcpy(key.data(), &random, key.size());
+    return key;
+}
+
+bool WsLink::send_frame(uint8_t opcode, const uint8_t* data, size_t len) {
+    const std::lock_guard<std::timed_mutex> lock(this->frame_mutex_);
+    return this->write_frame(opcode, data, len, now_us() + this->settings_.write_stall_us);
+}
+
+bool WsLink::write_frame(uint8_t opcode, const uint8_t* data, size_t len, int64_t deadline_us) {
+    // RFC 6455 section 5.5.1: nothing follows a close frame
+    if (this->close_sent_ || this->frame_broken_) {
+        return false;
+    }
+    if (opcode == ws_opcode::CLOSE) {
+        this->close_sent_ = true;
+    }
+    std::array<uint8_t, WS_FRAME_HEADER_MAX> header{};
+    const std::optional<WsMaskKey> mask = this->mask_key();
+    const size_t header_bytes = ws_frame_header(opcode, len, header, mask);
+    std::array<uint8_t, WS_CONTROL_PAYLOAD_MAX> masked{};
+    if (mask && len > 0) {
+        ws_mask_copy(masked.data(), data, len, *mask);
+        data = masked.data();
+    }
+    // Header and payload in one call, so they leave in as few segments as fit
+    std::array<iovec, 2> parts{};
+    parts[0].iov_base = header.data();
+    parts[0].iov_len = header_bytes;
+    parts[1].iov_base = const_cast<uint8_t*>(data);
+    parts[1].iov_len = len;
+    return this->send_parts(parts.data(), len > 0 ? 2 : 1, deadline_us);
+}
+
+bool WsLink::send_parts(iovec* parts, size_t count, int64_t deadline_us) {
+    msghdr message{};
+    message.msg_iov = parts;
+    message.msg_iovlen = static_cast<decltype(message.msg_iovlen)>(count);
+    size_t total = 0;
+    for (size_t i = 0; i < count; ++i) {
+        total += parts[i].iov_len;
+    }
+    size_t left = total;
+    // Frames some of whose bytes went are broken by any failure from here
+    const auto fail = [this, &left, total] {
+        if (left < total) {
+            this->frame_broken_ = true;
+        }
+        return false;
+    };
+    while (left > 0) {
+        ssize_t sent = 0;
+        {
+            const std::lock_guard<std::mutex> lock(this->socket_mutex_);
+            if (this->fd_closed_) {
+                return fail();
+            }
+            sent = sendmsg(this->fd_, &message, MSG_DONTWAIT);
+        }
+        if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            return fail();
+        }
+        if (sent > 0) {
+            left -= static_cast<size_t>(sent);
+            skip_sent(message, static_cast<size_t>(sent));
+            continue;
+        }
+        const int64_t left_us = deadline_us - now_us();
+        if (left_us <= 0 || this->close_requested()) {
+            return fail();
+        }
+        const auto wait_ms = static_cast<int>(
+            std::min<int64_t>((left_us / US_PER_MS) + 1, static_cast<int64_t>(WS_SEND_SLICE_MS)));
+        if (this->poll_room(wait_ms) < 0) {
+            return fail();
+        }
+    }
+    return true;
 }
 
 // ==============================================================================
