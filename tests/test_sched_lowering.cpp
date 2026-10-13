@@ -110,4 +110,31 @@ TEST(LiveLowering, CarriesADebtAcrossWritesBoundedByTheLatestWindow) {
     EXPECT_EQ(observe_live_write(late, -20000, 2 * WINDOW), 0);
 }
 
+/// Every write caps the debt at its own excess: a joiner raising the group lead mid-payment, or a
+/// write late after a stall, leaves less or nothing to cut, which a later write does not revive
+TEST(LiveLowering, EndsWhatAWritesOwnExcessNoLongerHolds) {
+    LiveLowering raised;
+    EXPECT_EQ(observe_live_write(raised, 500000, 0), 0);
+    EXPECT_EQ(observe_live_write(raised, 500000, WINDOW), 500000);
+    record_cut(raised, 100000);
+    // A joiner raised G_next by 300 ms: 100 ms of the 400 ms owed is still excess
+    EXPECT_EQ(observe_live_write(raised, 100000, WINDOW + 10000), 100000);
+    record_cut(raised, 100000);
+    EXPECT_EQ(observe_live_write(raised, 0, WINDOW + 20000), 0);
+
+    LiveLowering stalled;
+    EXPECT_EQ(observe_live_write(stalled, 500000, 0), 0);
+    EXPECT_EQ(observe_live_write(stalled, 500000, WINDOW), 500000);
+    record_cut(stalled, 100000);
+    // A stall left the next write late: nothing is owed, nor once writes are on time again
+    EXPECT_EQ(observe_live_write(stalled, -50000, WINDOW + 600000), 0);
+    EXPECT_EQ(observe_live_write(stalled, 400000, WINDOW + 610000), 0);
+    // Control: on time throughout, the debt stays until cut
+    LiveLowering steady;
+    EXPECT_EQ(observe_live_write(steady, 500000, 0), 0);
+    EXPECT_EQ(observe_live_write(steady, 500000, WINDOW), 500000);
+    record_cut(steady, 100000);
+    EXPECT_EQ(observe_live_write(steady, 400000, WINDOW + 10000), 400000);
+}
+
 }  // namespace

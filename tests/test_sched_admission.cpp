@@ -180,11 +180,15 @@ TEST(SchedAdmission, DecideWrite) {
     AdmissionInput both = draining;
     both.latched = true;
 
+    struct Taken {
+        uint64_t frames;
+        InputState state;
+    };
     struct Row {
         const char* name;
         AdmissionInput in;
         uint64_t offered;
-        WriteDecision decision;
+        Taken decision;
     };
     const Row rows[] = {
         {"Control: room for everything", buffered(RunState::NONE, 0), 882, {882, InputState::OPEN}},
@@ -199,12 +203,17 @@ TEST(SchedAdmission, DecideWrite) {
          live(RunState::NONE, 0),
          48000,
          {9600, InputState::FULL}},
+        // The head's time, which a live write's lowering reads, comes with a playing epoch's
+        {"playing", buffered(RunState::PLAYING, 0), 0, {0, InputState::OPEN}},
     };
     for (const Row& row : rows) {
         SCOPED_TRACE(row.name);
         const WriteDecision decision = sched::decide_write(row.in, epoch2(), row.offered, 0);
         EXPECT_EQ(decision.frames, row.decision.frames);
         EXPECT_EQ(decision.state, row.decision.state);
+        EXPECT_EQ(decision.head_us, row.in.run == RunState::PLAYING
+                                        ? std::optional(sched::time_of(epoch2(), row.in.head))
+                                        : std::nullopt);
     }
 }
 

@@ -56,6 +56,12 @@ constexpr uint8_t MAX_FLAC_BIT_DEPTH = 24;
 /// @brief `P_prep`: cells between a cursor and a new pipeline's first frame at a format switch
 constexpr int64_t SWITCH_PREP_CELLS = 2;
 
+/// @brief A live input's latency lowering (lowering.h): how long every write's excess must stay at
+/// or above LOWERING_MIN_US before a cut. A hundred 20 ms writes, so one early run does not count
+constexpr int64_t LOWERING_WINDOW_US = 2000000;
+/// @brief The least excess cut, two cells; a smaller one stays in the timeline
+constexpr int64_t LOWERING_MIN_US = 2 * CELL_US;
+
 namespace timing_defaults {
 constexpr int64_t PUMP_MARGIN_US = 10000;
 constexpr int64_t JOIN_MIN_US = 100000;

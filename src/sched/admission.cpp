@@ -36,8 +36,17 @@ int64_t pending_rebase_us(const AdmissionInput& in, const Anchor& anchor, int64_
     return rebase_needed(lead, in.rebase) ? rebase_delta(lead, in.rebase) : 0;
 }
 
-/// P_max before the PCM ring's cap
-uint64_t uncapped_limit(const AdmissionInput& in, const Anchor& anchor, int64_t now_us) {
+/// The head's time while playing, which uncapped_limit() takes
+std::optional<int64_t> playing_head_us(const AdmissionInput& in, const Anchor& anchor) {
+    if (in.run != RunState::PLAYING) {
+        return std::nullopt;
+    }
+    return time_of(anchor, in.head);
+}
+
+/// P_max before the PCM ring's cap; head_us is playing_head_us()
+uint64_t uncapped_limit(const AdmissionInput& in, const Anchor& anchor, int64_t now_us,
+                        std::optional<int64_t> head_us) {
     switch (in.run) {
         case RunState::PAUSED:
             return in.kind == InputKind::LIVE
@@ -46,9 +55,9 @@ uint64_t uncapped_limit(const AdmissionInput& in, const Anchor& anchor, int64_t 
         case RunState::PLAYING: {
             const int64_t horizon = now_us + in.group_lead_us + in.write_ahead_us;
             // `t_head'`, as if rebased
-            const int64_t head_us =
-                time_of(anchor, in.head) + pending_rebase_us(in, anchor, now_us);
-            return in.head + samples_in(horizon - head_us, in.head_rate);
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): set while playing
+            const int64_t rebased_us = *head_us + pending_rebase_us(in, anchor, now_us);
+            return in.head + samples_in(horizon - rebased_us, in.head_rate);
         }
         case RunState::NONE:
         case RunState::PENDING:
@@ -59,13 +68,19 @@ uint64_t uncapped_limit(const AdmissionInput& in, const Anchor& anchor, int64_t 
     return in.p0 + samples_in(in.write_ahead_us, in.head_rate);
 }
 
-}  // namespace
-
-uint64_t admission_limit(const AdmissionInput& in, const Anchor& anchor, int64_t now_us) {
+/// admission_limit() with the head's time read once
+uint64_t limit_at(const AdmissionInput& in, const Anchor& anchor, int64_t now_us,
+                  std::optional<int64_t> head_us) {
     if (in.draining || in.latched) {
         return in.head;
     }
-    return std::min(uncapped_limit(in, anchor, now_us), in.ring_limit);
+    return std::min(uncapped_limit(in, anchor, now_us, head_us), in.ring_limit);
+}
+
+}  // namespace
+
+uint64_t admission_limit(const AdmissionInput& in, const Anchor& anchor, int64_t now_us) {
+    return limit_at(in, anchor, now_us, playing_head_us(in, anchor));
 }
 
 uint64_t admitted_past_head(const AdmissionInput& in, const Anchor& anchor, int64_t now_us) {
@@ -75,17 +90,19 @@ uint64_t admitted_past_head(const AdmissionInput& in, const Anchor& anchor, int6
 
 WriteDecision decide_write(const AdmissionInput& in, const Anchor& anchor, uint64_t offered,
                            int64_t now_us) {
+    const std::optional<int64_t> head_us = playing_head_us(in, anchor);
     if (in.latched) {
-        return {0, InputState::STOP_LATCHED};
+        return {0, InputState::STOP_LATCHED, head_us};
     }
     if (in.draining) {
-        return {0, InputState::DRAINING};
+        return {0, InputState::DRAINING, head_us};
     }
-    const uint64_t room = admitted_past_head(in, anchor, now_us);
+    const uint64_t limit = limit_at(in, anchor, now_us, head_us);
+    const uint64_t room = limit > in.head ? limit - in.head : 0;
     if (offered > room) {
-        return {room, InputState::FULL};
+        return {room, InputState::FULL, head_us};
     }
-    return {offered, InputState::OPEN};
+    return {offered, InputState::OPEN, head_us};
 }
 
 int64_t readiness_time(const AdmissionInput& in, const Anchor& anchor, uint64_t r_min,

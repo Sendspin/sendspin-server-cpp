@@ -53,6 +53,9 @@ constexpr int64_t LEAD_US = 300000;
 constexpr int64_t AHEAD_US = 1000000;
 constexpr uint64_t AHEAD_FRAMES = RATE;
 constexpr int64_t LIVE_AHEAD_US = 200000;
+/// A live group lead's fall, and a cell of frames
+constexpr int64_t FALL_US = 200000;
+constexpr uint64_t CELL = RATE / 50;
 
 class HostViewTest : public testing::Test {
 protected:
@@ -78,6 +81,17 @@ protected:
                                                 GroupParams{LEAD_US, 0, LIVE_AHEAD_US},
                                                 this->dispatcher, &this->recorder);
         return *this->view;
+    }
+
+    /// The live input anchored at a 300 ms lead, then the lead lowered by FALL_US, with a window of
+    /// its writes already behind it (HostView::lowering_), so the next write closes the window and
+    /// its excess, the fall plus the cell written, is owed at once. A write-ahead of a second lets
+    /// one write hold the whole cut.
+    void begin_owing() {
+        ASSERT_EQ(this->write(CELL).frames, CELL);
+        this->view->set_group_params({LEAD_US - FALL_US, 0, AHEAD_US});
+        this->view->lowering_ = {now_us() - sendspin::server::sched::LOWERING_WINDOW_US,
+                                 std::numeric_limits<int64_t>::max(), 0, 0};
     }
 
     WriteResult write(uint64_t frames) {
@@ -184,57 +198,36 @@ TEST_F(HostViewTest, AdmitsAStalledLiveInputAsIfRebased) {
     EXPECT_EQ(result.state, InputState::FULL);
 }
 
-// A live input whose group lead falls once its run is anchored lands every write that much later
-// than a fresh anchor would place it. Once a whole sched::LOWERING_WINDOW_US of writes kept that
-// excess, the input refuses the writes that follow until it has cut it, never more than the
-// excess, and the effective lead falls with it toward the lead its players need, so the next frame
-// is not rebased back up. Positions count only what was taken. Takes about 2.6 s: one cell written
-// on each cell's deadline, as a capture device delivers, past a window of real time.
+// A live input whose group lead fell lands every write later than a fresh anchor would place it.
+// Once a window of writes kept that excess, it cuts it from the end of the next write, to the frame
+// and never more, and the effective lead falls to where the cut leaves the writes that follow, the
+// lead its players need, so the next frame is not rebased back up. Positions count only what was
+// taken.
 TEST_F(HostViewTest, LowersALiveInputsLatencyOnceItsLeadFalls) {
-    constexpr uint64_t CELL = RATE / 50;
-    constexpr int64_t FALL_US = 200000;
+    constexpr uint64_t FRAME_US = 1000000 / RATE;
     HostView& view = this->make_live();
     const int64_t start = now_us();
-    ASSERT_EQ(this->write(CELL).frames, CELL);
-    view.set_group_params({LEAD_US - FALL_US, 0, LIVE_AHEAD_US});
-    uint64_t head = CELL;
-    uint64_t refused = 0;
-    constexpr int64_t CELLS = (sendspin::server::sched::LOWERING_WINDOW_US / 20000) + 30;
-    for (int64_t k = 1; k < CELLS; ++k) {
-        std::this_thread::sleep_until(std::chrono::steady_clock::now() +
-                                      std::chrono::microseconds(start + (k * 20000) - now_us()));
-        const WriteResult result = this->write(CELL);
-        EXPECT_EQ(result.state, InputState::OPEN);
-        head += result.frames;
-        refused += CELL - result.frames;
-    }
-    // However late the writes came, the cut is at most the excess; it is most of it unless one
-    // came more than 100 ms late
-    const auto cut_us = static_cast<int64_t>(refused * 1000000 / RATE);
-    EXPECT_GT(cut_us, FALL_US / 2);
-    EXPECT_LE(cut_us, FALL_US);
+    ASSERT_NO_FATAL_FAILURE(this->begin_owing());
+    const WriteResult result = this->write(RATE / 2);
+    const int64_t spent = now_us() - start;
+    EXPECT_EQ(result.state, InputState::OPEN);
+    const auto cut_us = static_cast<int64_t>((RATE / 2 - result.frames) * 1000000 / RATE);
+    const int64_t excess = FALL_US + 20000;
+    EXPECT_LE(cut_us, excess);
+    // Short of the excess by the time the write took to come, and a frame of rounding
+    EXPECT_GE(cut_us, excess - spent - FRAME_US) << spent;
     const int64_t lead_eff = view.job_view().group_lead_eff_us;
-    EXPECT_LE(lead_eff, LEAD_US - cut_us + 1);
     EXPECT_GE(lead_eff, LEAD_US - FALL_US);
-    EXPECT_EQ(view.job_view().head, head);
+    EXPECT_LE(lead_eff, LEAD_US - FALL_US + FRAME_US);
+    EXPECT_EQ(view.job_view().head, CELL + result.frames);
 }
 
-// What a live epoch owes ends with it: the input refuses one write to lower its latency, then a
-// flush begins a new epoch at a fresh lead, whose writes it takes whole. Takes about 2 s, as the
-// test above.
+// What a live epoch owes ends with it: a flush begins a new epoch at a fresh lead, whose writes the
+// input takes whole
 TEST_F(HostViewTest, EndsALiveInputsLoweringWithItsEpoch) {
-    constexpr uint64_t CELL = RATE / 50;
     HostView& view = this->make_live();
-    const int64_t start = now_us();
-    ASSERT_EQ(this->write(CELL).frames, CELL);
-    view.set_group_params({LEAD_US - 200000, 0, LIVE_AHEAD_US});
-    for (int64_t k = 1;; ++k) {
-        std::this_thread::sleep_until(std::chrono::steady_clock::now() +
-                                      std::chrono::microseconds(start + (k * 20000) - now_us()));
-        if (this->write(CELL).frames < CELL) {
-            break;
-        }
-    }
+    ASSERT_NO_FATAL_FAILURE(this->begin_owing());
+    ASSERT_EQ(this->write(CELL).frames, 0U);
     view.flush();
     ASSERT_EQ(this->write(CELL).frames, CELL);
     EXPECT_EQ(this->write(CELL).frames, CELL);

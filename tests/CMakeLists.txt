@@ -130,7 +130,9 @@ set_source_files_properties(test_noise_initiator.cpp PROPERTIES COMPILE_OPTIONS 
 # public_share_ to reach the known answers, since start() samples the scalar from the CSPRNG.
 set_source_files_properties(test_pairing_crypto.cpp PROPERTIES COMPILE_OPTIONS -fno-access-control)
 # White-box: test_host_view.cpp leaves the outbox as a host call does between deciding a callback and posting
-# it, so that close() racing that host call can be checked without a race.
+# it, so that close() racing that host call can be checked without a race. It sets
+# HostView::lowering_ to a window of live writes already behind the input, so a latency cut is
+# checked without waiting out the window in real time.
 set_source_files_properties(test_host_view.cpp PROPERTIES COMPILE_OPTIONS -fno-access-control)
 # White-box: test_group_audio.cpp swaps an instance's encoder (GroupAudio::instances_) for one that
 # refuses, the only way to show a pipeline failure: no format the server selects makes an encoder

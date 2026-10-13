@@ -24,7 +24,6 @@ int64_t observe_live_write(LiveLowering& lowering, int64_t excess_us, int64_t no
     if (!lowering.window_start_us) {
         lowering.window_start_us = now_us;
         lowering.window_least_us = counted;
-        return lowering.debt_us;
     }
     lowering.window_least_us = std::min(lowering.window_least_us, counted);
     if (now_us - *lowering.window_start_us >= LOWERING_WINDOW_US) {
@@ -37,6 +36,7 @@ int64_t observe_live_write(LiveLowering& lowering, int64_t excess_us, int64_t no
         lowering.window_start_us = now_us;
         lowering.window_least_us = counted;
     }
+    lowering.debt_us = std::min(lowering.debt_us, std::max<int64_t>(excess_us, 0));
     return lowering.debt_us;
 }
 

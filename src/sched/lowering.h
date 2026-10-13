@@ -26,11 +26,6 @@
 
 namespace sendspin::server::sched {
 
-/// @brief How long every write's excess must stay at or above LOWERING_MIN_US before a cut
-constexpr int64_t LOWERING_WINDOW_US = 2000000;
-/// @brief The least excess cut; a smaller one stays in the timeline
-constexpr int64_t LOWERING_MIN_US = 2 * CELL_US;
-
 /// @brief One live epoch's lowering state, from its anchor
 struct LiveLowering {
     /// When the current window began; nullopt before the epoch's first observation
@@ -46,9 +41,11 @@ struct LiveLowering {
 
 /// @brief Observes a live write of a playing epoch. Its excess is `time_of(head) - now - G_next`:
 /// how much later the write's first sample lands than an anchor made at now would place it, the
-/// fresh anchor's lead being the least that serves every player. A window that ends with every
-/// excess in it at or above LOWERING_MIN_US sets the debt to its least excess, net of the cuts made
-/// since, so the latest write in it would have landed as if anchored then.
+/// fresh anchor's lead being the least that serves every player. Windows of LOWERING_WINDOW_US
+/// follow one another from the epoch's first observation; one that ends with every excess in it at
+/// or above LOWERING_MIN_US sets the debt to its least excess, net of the cuts made since, so the
+/// latest write in it would have landed as if anchored then. Every observation caps the debt at its
+/// own excess, so a lead that rose or a write that came late since ends what is no longer owed.
 /// @return the debt: the time to cut from this write's end, then report with record_cut()
 int64_t observe_live_write(LiveLowering& lowering, int64_t excess_us, int64_t now_us);
 

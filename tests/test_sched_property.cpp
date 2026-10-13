@@ -29,6 +29,7 @@
 #include "sched/frames.h"
 #include "sched/leads.h"
 #include "sched/ledger.h"
+#include "sched/lowering.h"
 #include "sched/selection.h"
 #include "sched/timeline.h"
 #include <gtest/gtest.h>
@@ -493,13 +494,16 @@ void run_grid_seed(uint64_t seed) {
 /// The blocks a live run writes: a minute of 10 ms blocks
 constexpr int64_t LIVE_BLOCKS = 6000;
 
-/// One live run: a source delivers blocks in real time, or from a clock running slow, each written
-/// late by up to the declared jitter and now and then after a stall, the blocks it held back
-/// dropped; now and then a joiner raises the group lead. Each frame is produced as soon as its
-/// input is staged (no resampler, so no lookahead), its rebase decided first. One anchor is folded
+/// One live run: a source delivers blocks in real time, or from a clock running slow or fast, each
+/// written late by up to the declared jitter and now and then after a stall, the blocks it held
+/// back dropped; now and then a joiner raises the group lead, or one leaves and lowers it. Each
+/// write first lowers the latency as the host view does (lowering.h), cutting what the epoch owes
+/// from its end and `G_eff` with it. Each frame is produced as soon as its input is staged (no
+/// resampler, so no lookahead), its rebase decided first. One anchor is folded
 /// below the cell a cell behind the position playing, as the host view folds its own, one below the
 /// last cell begun, as core folds its own, and one never.
-void run_live_seed(uint64_t seed) {
+/// @param cut adds the frames cut to lower the latency
+void run_live_seed(uint64_t seed, uint64_t& cut) {
     std::mt19937_64 rng(seed);
     auto uniform = [&rng](int64_t low, int64_t high) {
         return low + static_cast<int64_t>(rng() % static_cast<uint64_t>(high - low + 1));
@@ -523,8 +527,13 @@ void run_live_seed(uint64_t seed) {
     params.pipeline_latency_us = latency;
     params.live_jitter_us = jitter;
     params.pump_margin_us = timing.pump_margin_us;
-    // Half the sources' clocks run slow, by up to 0.2 %
-    const int64_t ppm = uniform(0, 1) == 0 ? 0 : uniform(50, 2000);
+    // A third of the sources' clocks run slow and a third fast, by up to 0.2 %
+    const int64_t clock = uniform(0, 2);
+    const int64_t ppm = clock == 0 ? 0 : clock == 1 ? uniform(50, 2000) : -uniform(50, 2000);
+    // `G_next`, which the lowering measures against; params.group_lead_us is `G_eff`
+    int64_t lead_next = params.group_lead_us;
+    const int64_t lead_least = lead_next;
+    sched::LiveLowering lowering;
 
     sched::Anchor full;
     sched::Anchor folded;
@@ -557,8 +566,13 @@ void run_live_seed(uint64_t seed) {
             core = full;
         } else if (uniform(0, 499) == 0) {
             // A joiner raises G_eff within the epoch
-            params.group_lead_us += uniform(10, 300) * MS;
+            const int64_t raise = uniform(10, 300) * MS;
+            params.group_lead_us += raise;
+            lead_next += raise;
             ++raises;
+        } else if (uniform(0, 499) == 0) {
+            // A high-lead member leaves: G_next falls, G_eff stays until the lowering cuts
+            lead_next = std::max(lead_least, lead_next - (uniform(10, 300) * MS));
         }
         AdmissionInput in;
         in.kind = InputKind::LIVE;
@@ -588,7 +602,23 @@ void run_live_seed(uint64_t seed) {
             // The folded anchor admits the same
             ASSERT_EQ(sched::admission_limit(in, folded, now), limit) << i;
         }
-        head += block;
+        uint64_t taken = block;
+        if (i > 0) {
+            const int64_t excess = sched::time_of(full, head) - now - lead_next;
+            const int64_t debt = sched::observe_live_write(lowering, excess, now);
+            const auto owed =
+                static_cast<uint64_t>(std::max<int64_t>(debt, 0) * rate / sched::US_PER_SECOND);
+            const uint64_t dropped = std::min(owed, block);
+            if (dropped > 0) {
+                const auto dropped_us = static_cast<int64_t>(dropped) * sched::US_PER_SECOND / rate;
+                sched::record_cut(lowering, dropped_us);
+                params.group_lead_us = std::max(
+                    lead_next, std::min(params.group_lead_us, lead_next + excess - dropped_us));
+                taken -= dropped;
+                cut += dropped;
+            }
+        }
+        head += taken;
 
         while (sched::cell_position(full, next + cells) <= head) {
             const int64_t frame_lead = sched::frame_timestamp(full, next) - now;
@@ -634,8 +664,8 @@ void run_live_seed(uint64_t seed) {
         ASSERT_EQ(sched::frame_timestamp(core, next), sched::frame_timestamp(full, next));
         ASSERT_LE(static_cast<int64_t>(core.shifts.size()), ((next - lowest) / cells) + 1);
     }
-    // A write late by no more than its declared jitter never shifts; only a stall or a raised lead
-    // does, once each
+    // A write late by no more than its declared jitter never shifts, nor does a cut; only a stall
+    // or a raised lead does, once each
     if (ppm == 0) {
         EXPECT_LE(shifts, stalls + raises);
     }
@@ -682,16 +712,19 @@ TEST(SchedProperty, FrameGridHoldsAcrossSegments) {
 
 // A live input keeps every frame at least G_eff - L_p - M_pump ahead, a rebase restores the on-time
 // lead exactly and never runs the timeline back, only a stall or a raised lead shifts a source
-// whose clock keeps time, admission as if rebased is what the rebase leaves and stays within the
-// horizon, and folding keeps every live timestamp
+// whose clock keeps time (a cut that lowers the latency never does), admission as if rebased is
+// what the rebase leaves and stays within the horizon, and folding keeps every live timestamp. The
+// seeds cut audio somewhere, after a leave, a stall or a fast clock.
 TEST(SchedProperty, LiveRebaseAdmissionAndFoldingHoldAtEveryWrite) {
+    uint64_t cut = 0;
     for (int seed = 1; seed <= SEEDS; ++seed) {
         SCOPED_TRACE(seed);
-        run_live_seed(static_cast<uint64_t>(seed));
+        run_live_seed(static_cast<uint64_t>(seed), cut);
         if (HasFatalFailure()) {
             return;
         }
     }
+    EXPECT_GT(cut, 0U);
 }
 
 }  // namespace

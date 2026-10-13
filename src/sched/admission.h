@@ -67,6 +67,8 @@ uint64_t admitted_past_head(const AdmissionInput& in, const Anchor& anchor, int6
 struct WriteDecision {
     uint64_t frames{0};
     InputState state{InputState::OPEN};
+    /// `time_of(head)` while playing, as admission read it; nullopt otherwise
+    std::optional<int64_t> head_us;
 };
 
 /// @brief What write() takes of `offered` samples and why it took fewer

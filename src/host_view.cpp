@@ -147,7 +147,8 @@ WriteResult HostView::write(const void* pcm, size_t frames) {
             sched::decide_write(this->admission_input(), this->anchor_, frames, now);
         uint64_t taken = decision.frames;
         if (this->kind_ == InputKind::LIVE && this->run_.run == sched::RunState::PLAYING) {
-            taken = this->lower_latency(taken, now);
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): set while playing
+            taken = this->lower_latency(taken, *decision.head_us, now);
         }
         if (taken > 0) {
             // The write that begins a run or a pending epoch anchors it
@@ -717,9 +718,8 @@ void HostView::anchor_at(int64_t now_us) {
     this->lowering_ = {};
 }
 
-uint64_t HostView::lower_latency(uint64_t frames, int64_t now_us) {
-    const int64_t excess =
-        sched::time_of(this->anchor_, this->head_) - now_us - this->params_.group_lead_us;
+uint64_t HostView::lower_latency(uint64_t frames, int64_t head_us, int64_t now_us) {
+    const int64_t excess = head_us - now_us - this->params_.group_lead_us;
     const int64_t debt = sched::observe_live_write(this->lowering_, excess, now_us);
     const uint32_t rate = this->format_.sample_rate;
     const auto cut = std::min<uint64_t>(
@@ -729,10 +729,12 @@ uint64_t HostView::lower_latency(uint64_t frames, int64_t now_us) {
     }
     const auto cut_us = static_cast<int64_t>(cut) * sched::US_PER_SECOND / rate;
     sched::record_cut(this->lowering_, cut_us);
-    // The rebase threshold falls with the latency, down to the lead every player needs, so the
-    // next frame does not shift the timeline back up
+    // The rebase threshold falls with the latency, to where the cut leaves the writes that follow
+    // and never below the lead every player needs, so the next frame does not shift the timeline
+    // back up
+    const int64_t lead = this->params_.group_lead_us;
     this->group_lead_eff_us_ =
-        std::max(this->params_.group_lead_us, this->group_lead_eff_us_ - cut_us);
+        std::max(lead, std::min(this->group_lead_eff_us_, lead + excess - cut_us));
     return frames - cut;
 }
 
