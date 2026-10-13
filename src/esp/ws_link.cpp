@@ -162,49 +162,31 @@ bool WsLink::begin_frame(uint8_t opcode, size_t payload_bytes) {
     if (this->dropping_) {
         return false;
     }
-    if (opcode == ws_opcode::CONTINUATION) {
-        if (!this->assembling_) {
-            this->dropping_ = true;
-            this->report_closed(CloseReason::PROTOCOL_VIOLATION);
-            return false;
-        }
-    } else {
-        // A text or binary frame opens a message; one may not open inside another
-        if (this->assembling_) {
-            this->dropping_ = true;
-            this->report_closed(CloseReason::PROTOCOL_VIOLATION);
-            return false;
-        }
-        this->assembling_ = true;
-        this->message_kind_ = opcode == ws_opcode::TEXT ? MessageKind::TEXT : MessageKind::BINARY;
-        this->message_bytes_ = 0;
-        if (this->hold_.begin_message() == nullptr) {
-            this->dropping_ = true;
-            this->report_closed(CloseReason::FAILED);
-            return false;
-        }
-    }
-    if (payload_bytes > this->settings_.read_message_max - this->message_bytes_) {
+    const WsFrameStep step =
+        this->assembly_.begin(opcode, payload_bytes, this->settings_.read_message_max);
+    if (step == WsFrameStep::VIOLATION) {
         this->dropping_ = true;
         this->report_closed(CloseReason::PROTOCOL_VIOLATION);
         return false;
     }
-    this->hold_.message().resize(this->message_bytes_ + payload_bytes);
-    this->frame_bytes_ = payload_bytes;
+    if (step == WsFrameStep::OPENS && this->hold_.begin_message() == nullptr) {
+        this->dropping_ = true;
+        this->report_closed(CloseReason::FAILED);
+        return false;
+    }
+    this->hold_.message().resize(this->assembly_.message_bytes() + payload_bytes);
     return true;
 }
 
 bool WsLink::end_frame(bool fin, int64_t rx_us) {
-    if (this->dropping_ || !this->assembling_) {
-        return !this->dropping_;
+    if (this->dropping_) {
+        return false;
     }
-    this->message_bytes_ += this->frame_bytes_;
-    if (!fin) {
+    if (!this->assembly_.end(fin)) {
         return true;
     }
-    this->assembling_ = false;
     const InboundHold::Outcome offered =
-        this->hold_.offer(this->message_kind_, this->message_bytes_, rx_us);
+        this->hold_.offer(this->assembly_.kind(), this->assembly_.message_bytes(), rx_us);
     if (offered.result == InboundHold::Result::HELD && !this->hold_receiving(offered.generation)) {
         this->dropping_ = true;
         return false;

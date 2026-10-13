@@ -14,7 +14,7 @@
 
 /// @file test_ws_frame.cpp
 /// @brief WebSocket framing for the ESP-IDF transport, on the host: a received header's parse
-/// with its rejections, the masking and the masking keys.
+/// with its rejections, a message's assembly from its frames, the masking and the masking keys.
 
 #include "ws_frame.h"
 #include <gtest/gtest.h>
@@ -32,10 +32,13 @@ namespace {
 using sendspin::server::chacha20_block;
 using sendspin::server::CHACHA20_BLOCK_BYTES;
 using sendspin::server::CHACHA20_KEY_BYTES;
+using sendspin::server::MessageKind;
 using sendspin::server::ws_frame_header;
 using sendspin::server::WS_FRAME_HEADER_MAX;
 using sendspin::server::ws_mask_copy;
 using sendspin::server::ws_parse_frame_header;
+using sendspin::server::WsAssembly;
+using sendspin::server::WsFrameStep;
 using sendspin::server::WsHeaderParse;
 using sendspin::server::WsHeaderStatus;
 using sendspin::server::WsMaskKey;
@@ -230,6 +233,102 @@ TEST(WsMaskKeys, ReadsTheKeystreamFourBytesAtATime) {
     WsMaskKeys same;
     same.seed(counting_key(), STREAM);
     EXPECT_NE(other.next(), same.next());
+}
+
+// RFC 6455 section 5.4: a message is a text or binary frame and the continuations up to its final
+// frame, within its cap; each row's frames go through one assembly in order, and the last frame's
+// step and the message completed are checked
+TEST(WsAssembly, AssemblesAMessageFromItsFrames) {
+    struct Frame {
+        uint8_t opcode;
+        size_t bytes;
+        bool fin;
+    };
+    struct Row {
+        std::string name;
+        std::vector<Frame> frames;
+        WsFrameStep last_step;
+        // For a complete message
+        std::optional<MessageKind> kind;
+        size_t message_bytes;
+    };
+    constexpr size_t CAP = 64;
+    constexpr uint8_t TEXT = ws_opcode::TEXT;
+    constexpr uint8_t BINARY = ws_opcode::BINARY;
+    constexpr uint8_t CONT = ws_opcode::CONTINUATION;
+    constexpr auto OPENS = WsFrameStep::OPENS;
+    constexpr auto CONTINUES = WsFrameStep::CONTINUES;
+    constexpr auto VIOLATION = WsFrameStep::VIOLATION;
+    const Row rows[] = {
+        {"Control: one text frame", {{TEXT, 5, true}}, OPENS, MessageKind::TEXT, 5},
+        {"Control: binary in three frames, an empty one among them",
+         {{BINARY, 10, false}, {CONT, 0, false}, {CONT, 7, true}},
+         CONTINUES,
+         MessageKind::BINARY,
+         17},
+        {"Control: a message of the cap in two frames",
+         {{BINARY, CAP - 1, false}, {CONT, 1, true}},
+         CONTINUES,
+         MessageKind::BINARY,
+         CAP},
+        {"Control: a message after a complete one starts from nothing",
+         {{TEXT, 30, true}, {BINARY, 40, true}},
+         OPENS,
+         MessageKind::BINARY,
+         40},
+        {"Control: a fragment pending", {{TEXT, 3, false}}, OPENS, std::nullopt, 0},
+        {"a continuation with no message open", {{CONT, 1, true}}, VIOLATION, std::nullopt, 0},
+        {"a continuation after a complete message",
+         {{TEXT, 1, true}, {CONT, 1, true}},
+         VIOLATION,
+         std::nullopt,
+         0},
+        {"a text frame inside a message",
+         {{BINARY, 1, false}, {TEXT, 1, true}},
+         VIOLATION,
+         std::nullopt,
+         0},
+        {"a binary frame inside a message",
+         {{TEXT, 1, false}, {BINARY, 1, true}},
+         VIOLATION,
+         std::nullopt,
+         0},
+        {"one frame over the cap", {{BINARY, CAP + 1, true}}, VIOLATION, std::nullopt, 0},
+        {"fragments over the cap",
+         {{BINARY, CAP - 1, false}, {CONT, 2, true}},
+         VIOLATION,
+         std::nullopt,
+         0},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        WsAssembly assembly;
+        WsFrameStep step = WsFrameStep::OPENS;
+        bool complete = false;
+        size_t frame_at = 0;
+        for (const Frame& frame : row.frames) {
+            const size_t before = assembly.message_bytes();
+            step = assembly.begin(frame.opcode, frame.bytes, CAP);
+            if (step == WsFrameStep::VIOLATION) {
+                break;
+            }
+            // A continuation's payload goes after the bytes before it
+            EXPECT_EQ(assembly.message_bytes(), step == WsFrameStep::OPENS ? 0 : before);
+            EXPECT_EQ(assembly.frame_bytes(), frame.bytes);
+            frame_at = assembly.message_bytes();
+            complete = assembly.end(frame.fin);
+        }
+        EXPECT_EQ(step, row.last_step);
+        if (row.last_step == WsFrameStep::VIOLATION) {
+            continue;
+        }
+        EXPECT_EQ(complete, row.kind.has_value());
+        if (row.kind) {
+            EXPECT_EQ(assembly.kind(), *row.kind);
+            EXPECT_EQ(assembly.message_bytes(), row.message_bytes);
+            EXPECT_EQ(frame_at + row.frames.back().bytes, row.message_bytes);
+        }
+    }
 }
 
 }  // namespace

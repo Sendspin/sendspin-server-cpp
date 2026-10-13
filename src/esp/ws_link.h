@@ -132,8 +132,9 @@ protected:
     /// @brief The place of the payload of the frame begun last, until end_frame(); null for an
     /// empty one
     uint8_t* frame_data() {
-        return this->frame_bytes_ > 0 ? this->hold_.message().data() + this->message_bytes_
-                                      : nullptr;
+        return this->assembly_.frame_bytes() > 0
+                   ? this->hold_.message().data() + this->assembly_.message_bytes()
+                   : nullptr;
     }
     /// @brief The frame begun last is complete; a final frame offers its message to the ring,
     /// stamped with rx_us, and stops receiving while it is held (hold_receiving())
@@ -295,10 +296,7 @@ protected:
 
 private:
     /// Receive task only: the message being assembled in hold_'s buffer
-    MessageKind message_kind_{MessageKind::BINARY};
-    bool assembling_{false};
-    size_t message_bytes_{0};
-    size_t frame_bytes_{0};
+    WsAssembly assembly_;
     bool dropping_{false};
 };
 

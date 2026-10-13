@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include "transport.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -85,6 +87,49 @@ private:
     std::array<uint8_t, CHACHA20_BLOCK_BYTES> block_{};
     /// The bytes of block_ taken; a full block refills at the next key
     size_t taken_{CHACHA20_BLOCK_BYTES};
+};
+
+/// @brief What a data frame does to the message being assembled
+enum class WsFrameStep : uint8_t {
+    OPENS,      ///< A text or binary frame opens a message
+    CONTINUES,  ///< A continuation frame adds to the open message
+    /// A continuation with no message open, a text or binary frame inside one (RFC 6455 section
+    /// 5.4), or a message that would pass its cap: the connection fails
+    VIOLATION,
+};
+
+/// @brief One message assembled from its data frames (RFC 6455 section 5.4): which frame may come
+/// next, the message's kind and length, and where each frame's payload goes. Control frames do not
+/// touch it, so they may come between a message's frames (section 5.5).
+class WsAssembly {
+public:
+    /// @brief A data frame of payload_bytes begins; the message may total message_max bytes
+    WsFrameStep begin(uint8_t opcode, size_t payload_bytes, size_t message_max);
+
+    /// @brief The frame begun last has all its payload
+    /// @return true when it was the message's final frame: the message is message_bytes() long,
+    /// and the next data frame opens another
+    bool end(bool fin);
+
+    MessageKind kind() const {
+        return this->kind_;
+    }
+
+    /// @brief The message's bytes before the frame begun last, or its whole length once complete
+    size_t message_bytes() const {
+        return this->message_bytes_;
+    }
+
+    /// @brief The payload of the frame begun last
+    size_t frame_bytes() const {
+        return this->frame_bytes_;
+    }
+
+private:
+    MessageKind kind_{MessageKind::BINARY};
+    bool open_{false};
+    size_t message_bytes_{0};
+    size_t frame_bytes_{0};
 };
 
 /// @brief A frame header as received

@@ -203,6 +203,41 @@ WsMaskKey WsMaskKeys::next() {
     return key;
 }
 
+WsFrameStep WsAssembly::begin(uint8_t opcode, size_t payload_bytes, size_t message_max) {
+    WsFrameStep step = WsFrameStep::CONTINUES;
+    if (opcode == ws_opcode::CONTINUATION) {
+        if (!this->open_) {
+            return WsFrameStep::VIOLATION;
+        }
+    } else {
+        if (this->open_) {
+            return WsFrameStep::VIOLATION;
+        }
+        this->open_ = true;
+        this->kind_ = opcode == ws_opcode::TEXT ? MessageKind::TEXT : MessageKind::BINARY;
+        this->message_bytes_ = 0;
+        step = WsFrameStep::OPENS;
+    }
+    if (payload_bytes > message_max - this->message_bytes_) {
+        return WsFrameStep::VIOLATION;
+    }
+    this->frame_bytes_ = payload_bytes;
+    return step;
+}
+
+bool WsAssembly::end(bool fin) {
+    if (!this->open_) {
+        return false;
+    }
+    this->message_bytes_ += this->frame_bytes_;
+    this->frame_bytes_ = 0;
+    if (!fin) {
+        return false;
+    }
+    this->open_ = false;
+    return true;
+}
+
 WsHeaderParse ws_parse_frame_header(std::span<const uint8_t> bytes, bool peer_masks) {
     WsHeaderParse parse;
     if (bytes.size() < 2) {
