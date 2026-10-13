@@ -62,12 +62,12 @@ float a_weighting_db(float hz);
 void spectrum_edges(const SpectrumConfig& spectrum, std::span<float> edges);
 
 /// @brief The A-weighting as the periodic types' FFT bins apply it to a window, as a time-domain
-/// filter at one rate, single precision. Two second-order sections: the curve's poles at 107.7 and
-/// 737.9 Hz by the bilinear transform, and its pole pair at 12194 Hz matched in z over one zero
-/// fitted at 0.85 times the Nyquist frequency (20 kHz at most); its gain at 1 kHz is
-/// a_weighting_db()'s. The curve's pole pair at 20.6 Hz is left out: the window's leakage lifts the
-/// bins' weighting at the low end about as much. Within 0.4 dB of a_weighting_db() from 100 Hz to
-/// 0.9 times the Nyquist frequency, 20 kHz at most, at 8 to 192 kHz.
+/// filter at one rate, single precision: the curve's poles at 107.7 and 737.9 Hz by the bilinear
+/// transform, and its 12194 Hz pole pair matched in z over one zero fitted near the Nyquist
+/// frequency. The curve's 20.6 Hz pole pair is left out, as the window's leakage lifts the bins'
+/// low end about as much; above 20 kHz it weights somewhat more than the curve. Its gain is the
+/// curve's at 1 kHz. Below 4 kHz, too low a rate for the curve, it passes samples through
+/// unweighted.
 class AWeightingFilter {
 public:
     /// @brief The sections for input at rate, the state zero; computed in double, so only when the
@@ -78,7 +78,8 @@ public:
     void reset();
 
     /// @brief Filters in into out, as many samples, from the state the last sample filtered left;
-    /// out may be in
+    /// out may be in. A state that decays below a magnitude no sample reaches is zeroed after each
+    /// call, so silence settles on exactly zero.
     void filter(std::span<const float> in, std::span<float> out);
 
 private:
@@ -96,8 +97,7 @@ private:
         float y2{0.0F};
 
         float step(float sample) {
-            // The feedback of the last output enters last, the only term on the path from one
-            // sample's output to the next
+            // The last output's feedback enters last: the only term on the recursion's path
             const float feed = ((this->b0 * sample) + (this->b1 * this->x1)) +
                                ((this->b2 * this->x2) - (this->a2 * this->y2));
             const float filtered = feed - (this->a1 * this->y1);

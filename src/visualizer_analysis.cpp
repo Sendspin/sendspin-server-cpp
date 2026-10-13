@@ -35,8 +35,8 @@ constexpr float U16_FULL = 65535.0F;
 /// The A-weighting gain's clamp
 constexpr float A_WEIGHT_MIN_DB = -50.0F;
 constexpr float A_WEIGHT_MAX_DB = 6.0F;
-/// The A-weighting curve's pole frequencies in Hz above its 20.6 Hz pair (IEC 61672-1), the last
-/// double
+/// The A-weighting curve's pole frequencies in Hz above its 20.6 Hz pair (IEC 61672-1), the last a
+/// double pole
 constexpr double A_POLE_2_HZ = 107.7;
 constexpr double A_POLE_3_HZ = 737.9;
 constexpr double A_POLE_4_HZ = 12194.0;
@@ -44,7 +44,13 @@ constexpr double A_POLE_4_HZ = 12194.0;
 /// most A_FIT_MAX_HZ
 constexpr double A_FIT_NYQUIST_FRACTION = 0.85;
 constexpr double A_FIT_MAX_HZ = 20000.0;
+/// Where AWeightingFilter's gain is set; a rate under A_MIN_RATE_PER_REFERENCE times it is too low
+/// for the curve
 constexpr double A_REFERENCE_HZ = 1000.0;
+constexpr double A_MIN_RATE_PER_REFERENCE = 4.0;
+/// AWeightingFilter's state below this magnitude is flushed to zero after each block, so a silence
+/// never leaves it subnormal
+constexpr float A_FLUSH_BELOW = 1e-30F;
 /// A Hann-windowed full-scale sine's RMS as loudness measures it: sqrt(3 / 16)
 const float LOUDNESS_REFERENCE = std::sqrt(3.0F / 16.0F);
 /// The onset strength's range: the excess over ONSET_RATIO that gives 255
@@ -158,6 +164,13 @@ void spectrum_edges(const SpectrumConfig& spectrum, std::span<float> edges) {
 
 void AWeightingFilter::set_rate(uint32_t rate) {
     const double fs = rate;
+    for (Section& section : this->sections_) {
+        section = {};
+        section.b0 = 1.0F;
+    }
+    if (fs < A_MIN_RATE_PER_REFERENCE * A_REFERENCE_HZ) {
+        return;
+    }
     const double two_pi = 2.0 * std::numbers::pi;
     // The bilinear transform of `s^2 / ((s + p) (s + q))`, p and q in rad/s
     const auto high_pass = [&](double p, double q) {
@@ -170,10 +183,9 @@ void AWeightingFilter::set_rate(uint32_t rate) {
     std::array<std::array<double, 5>, 2> sections{
         high_pass(two_pi * A_POLE_2_HZ, two_pi * A_POLE_3_HZ),
     };
-    // The pole pair at A_POLE_4_HZ matched, `z = e^(s / fs)`, over `1 + c z^-1`, with c giving the
-    // analog section's gain against DC at the fit frequency: for T that gain squared times the
-    // poles' `|D(z)|^2 / D(1)^2` there, `|1 + c z^-1|^2 = T (1 + c)^2`, a quadratic in c whose two
-    // roots are reciprocals; the one within [-1, 1], clamped to [0, 1]
+    // The pole pair at A_POLE_4_HZ matched, `z = e^(s / fs)`, over `1 + c z^-1`, c the root within
+    // [-1, 1] of `|1 + c z^-1|^2 = T (1 + c)^2`, which gives the analog section's gain at the fit
+    // frequency
     const double pole = std::exp(-two_pi * A_POLE_4_HZ / fs);
     const double fit_hz = std::min(A_FIT_NYQUIST_FRACTION * fs / 2.0, A_FIT_MAX_HZ);
     const double omega = two_pi * fit_hz / fs;
@@ -209,18 +221,23 @@ void AWeightingFilter::set_rate(uint32_t rate) {
         out.a1 = static_cast<float>(sections[i][3]);
         out.a2 = static_cast<float>(sections[i][4]);
     }
-    this->reset();
 }
 
 void AWeightingFilter::filter(std::span<const float> in, std::span<float> out) {
-    // A sample at a time through both sections, so their recursions overlap, each section a local
-    // the compiler keeps in registers
+    // Sample by sample through both sections, so their recursions overlap
     Section high = this->sections_[0];
     Section low = this->sections_[1];
     for (size_t i = 0; i < in.size(); ++i) {
         out[i] = low.step(high.step(in[i]));
     }
     this->sections_ = {high, low};
+    for (Section& section : this->sections_) {
+        for (float* state : {&section.x1, &section.x2, &section.y1, &section.y2}) {
+            if (std::fabs(*state) < A_FLUSH_BELOW) {
+                *state = 0.0F;
+            }
+        }
+    }
 }
 
 void AWeightingFilter::reset() {

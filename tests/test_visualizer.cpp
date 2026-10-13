@@ -204,10 +204,9 @@ double a_curve_db(double hz) {
     return 2.0 + (20.0 * std::log10(ra));
 }
 
-// The onsets' filter weights as the FFT bins do: the curve from 100 Hz to 0.9 times the Nyquist
-// frequency (20 kHz at most), and below it the curve without its 20.6 Hz pole pair, which the
-// window's leakage lifts about as much
-TEST(VisualizerScale, FilterByTheCurveTheBinsApply) {
+// The onsets' filter weights by the curve without its 20.6 Hz pole pair, within 0.4 dB to 0.9 times
+// the Nyquist frequency (20 kHz at most), at 8 to 192 kHz
+TEST(VisualizerScale, FilterByTheCurveWithoutItsLowPolePair) {
     struct Row {
         uint32_t rate;
         double hz;
@@ -239,6 +238,67 @@ TEST(VisualizerScale, FilterByTheCurveTheBinsApply) {
             -20.0 * std::log10(row.hz * row.hz / ((row.hz * row.hz) + (20.6 * 20.6)));
         EXPECT_NEAR(10.0 * std::log10(out_power / in_power), a_curve_db(row.hz) + without_low_pair,
                     0.4);
+    }
+}
+
+// A silence after a tone settles the filter on exactly zero, never on a subnormal state
+TEST(VisualizerScale, SettleTheFilterOnZeroInSilence) {
+    sendspin::server::AWeightingFilter filter;
+    filter.set_rate(48000);
+    std::vector<float> block(256);
+    for (size_t i = 0; i < block.size(); ++i) {
+        block[i] =
+            static_cast<float>(std::sin(2.0 * std::numbers::pi * static_cast<double>(i) / 48.0));
+    }
+    filter.filter(block, block);
+    // Two seconds of silence, a block at a time as the analysis pushes it
+    for (int i = 0; i < 375; ++i) {
+        std::fill(block.begin(), block.end(), 0.0F);
+        filter.filter(block, block);
+    }
+    for (const float sample : block) {
+        ASSERT_EQ(sample, 0.0F) << sample;
+    }
+}
+
+// Below 4 kHz (to 1 Hz, which an input may declare) the filter passes samples through, finite, and
+// onsets stay onsets: a steady tone fires none, a rise fires one
+TEST(VisualizerScale, KeepOnsetsDefinedAtLowRates) {
+    for (const uint32_t rate : {1U, 100U, 1000U, 4000U}) {
+        SCOPED_TRACE(rate);
+        VisualizerAnalysis analysis({type::PEAK, 30, std::nullopt});
+        ASSERT_TRUE(analysis.set_rate(rate));
+        const size_t window = analysis.window();
+        const auto tone = [&](double amplitude) {
+            std::vector<float> samples(window);
+            for (size_t i = 0; i < window; ++i) {
+                samples[i] = static_cast<float>(
+                    amplitude * std::sin(2.0 * std::numbers::pi * static_cast<double>(i) / 8.0));
+            }
+            return samples;
+        };
+        sendspin::server::AWeightingFilter filter;
+        filter.set_rate(rate);
+        std::vector<float> filtered(window);
+        const std::vector<float> loud = tone(1.0);
+        filter.filter(loud, filtered);
+        for (size_t i = 0; i < window; ++i) {
+            ASSERT_TRUE(std::isfinite(filtered[i])) << filtered[i];
+            if (rate < 4000) {
+                EXPECT_EQ(filtered[i], loud[i]);
+            }
+        }
+        std::vector<uint8_t> bytes;
+        int64_t ts = 0;
+        for (int check = 0; check < 20; ++check, ts += 100000) {
+            analysis.push(tone(0.25));
+            analysis.analyze(ts, false, true, bytes);
+        }
+        EXPECT_TRUE(bytes.empty()) << bytes.size() << " bytes of peaks";
+        analysis.push(tone(1.0));
+        analysis.analyze(ts, false, true, bytes);
+        // One `peak` message: type 20, the timestamp, the strength
+        EXPECT_EQ(bytes.size(), 10U);
     }
 }
 

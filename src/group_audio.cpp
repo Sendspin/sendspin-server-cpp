@@ -1132,7 +1132,8 @@ bool GroupAudio::feed_analysis(Analysis& analysis, const JobView& view, uint64_t
         if (channels == 1) {
             analysis.analysis->push(floats);
         } else {
-            // A multiply where a divide per frame costs more on a small FPU; exact for 2 and 4
+            // A multiply where a divide per frame costs more on a small FPU; exact when channels is
+            // a power of two
             const float scale = 1.0F / static_cast<float>(channels);
             for (size_t i = 0; i < frames; ++i) {
                 float sum = 0.0F;
