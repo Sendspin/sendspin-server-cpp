@@ -14,6 +14,7 @@
 
 #include "visualizer_stream.h"
 
+#include "fragmentation.h"
 #include "sched/timeline.h"
 
 #include <algorithm>
@@ -300,6 +301,7 @@ OutboundPlaintext VisualizerStream::take_message(const StreamSource* source) {
         return message;
     }
     const auto from = next->cell->payload.begin() + static_cast<std::ptrdiff_t>(next->offset);
+    reserve_plaintext(message.bytes, next->bytes);
     message.bytes.assign(from, from + static_cast<std::ptrdiff_t>(next->bytes));
     // Counted until its own timestamp
     this->ledger_.add(next->ts_us, static_cast<int64_t>(next->bytes));

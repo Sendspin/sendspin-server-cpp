@@ -88,7 +88,8 @@ struct CipherStateDeleter {
 /// @brief The transport-mode cipher states of one connection, one per direction
 class TransportCiphers {
 public:
-    /// @brief Encrypts message in place and appends the AEAD tag
+    /// @brief Encrypts message in place and appends the AEAD tag, without reallocating when its
+    /// capacity has room for the tag (reserve_plaintext())
     /// @return false when the send cipher refuses (nonce exhausted); the message is then unusable
     bool encrypt(std::vector<uint8_t>& message);
 

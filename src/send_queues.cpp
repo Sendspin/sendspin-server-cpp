@@ -23,7 +23,7 @@ namespace sendspin::server {
 
 OutboundPlaintext json_plaintext(std::string_view json) {
     OutboundPlaintext message{MessageKind::BINARY, {}};
-    message.bytes.reserve(json.size() + 1);
+    reserve_plaintext(message.bytes, json.size() + 1);
     message.bytes.push_back(MESSAGE_ID_JSON);
     message.bytes.insert(message.bytes.end(), json.begin(), json.end());
     return message;

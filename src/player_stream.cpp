@@ -301,6 +301,7 @@ PackedChunk PlayerStream::take_chunk(const StreamSource* source, size_t max_mess
     }
     std::vector<uint8_t>& bytes = chunk.plaintext.bytes;
     chunk.plaintext.kind = MessageKind::BINARY;
+    reserve_plaintext(bytes, sched::CHUNK_HEADER_BYTES + payload);
     bytes.resize(sched::CHUNK_HEADER_BYTES + payload);
     size_t offset = sched::CHUNK_HEADER_BYTES;
     for (size_t i = 0; i < frames; ++i) {

@@ -14,6 +14,8 @@
 
 #include "artwork.h"
 
+#include "fragmentation.h"
+
 #include <algorithm>
 
 namespace sendspin::server {
@@ -57,7 +59,9 @@ std::span<const ArtworkChannel> streamed_prefix(const ArtworkChannels& channels)
 // ==============================================================================
 
 std::vector<uint8_t> artwork_announce(size_t channel, int64_t timestamp_us, uint32_t total_size) {
-    std::vector<uint8_t> message(ARTWORK_ANNOUNCE_BYTES);
+    std::vector<uint8_t> message;
+    reserve_plaintext(message, ARTWORK_ANNOUNCE_BYTES);
+    message.resize(ARTWORK_ANNOUNCE_BYTES);
     message[0] = message_id(channel);
     message[1] = ARTWORK_FLAG_ANNOUNCE;
     // Big-endian timestamp and total_size (spec roles/artwork/v1.md "Artwork (Binary)")
@@ -74,7 +78,7 @@ std::vector<uint8_t> artwork_announce(size_t channel, int64_t timestamp_us, uint
 
 std::vector<uint8_t> artwork_part(size_t channel, std::span<const uint8_t> data) {
     std::vector<uint8_t> message;
-    message.reserve(ARTWORK_PART_HEADER_BYTES + data.size());
+    reserve_plaintext(message, ARTWORK_PART_HEADER_BYTES + data.size());
     message.push_back(message_id(channel));
     message.push_back(0);
     message.insert(message.end(), data.begin(), data.end());
@@ -82,7 +86,12 @@ std::vector<uint8_t> artwork_part(size_t channel, std::span<const uint8_t> data)
 }
 
 std::vector<uint8_t> artwork_cancel(size_t channel) {
-    return {message_id(channel), ARTWORK_FLAG_CANCEL};
+    // A part's header with the cancel flag and no data
+    std::vector<uint8_t> message;
+    reserve_plaintext(message, ARTWORK_PART_HEADER_BYTES);
+    message.push_back(message_id(channel));
+    message.push_back(ARTWORK_FLAG_CANCEL);
+    return message;
 }
 
 // ==============================================================================

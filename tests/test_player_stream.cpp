@@ -16,6 +16,7 @@
 /// @brief PlayerStream driven over a fake group with the clock passed in: what its markers and
 /// cursor emit around a switch in place, and how long its cursor holds a short chunk
 
+#include "fragmentation.h"
 #include "player_stream.h"
 #include <gtest/gtest.h>
 
@@ -259,6 +260,34 @@ TEST(PlayerStreamPacking, WakesAChunkHeldForRoomWhenTheLedgerHasIt) {
     const sendspin::server::PackedChunk ninth = stream.take_chunk(&group, 16384, room);
     EXPECT_EQ(ninth.ts_us, T0 + (40 * sched::CELL_US));
     EXPECT_EQ(static_cast<int64_t>(ninth.plaintext.bytes.size()), CHUNK_BYTES);
+}
+
+// A chunk has room for the tag its encryption appends, so that the encryption does not reallocate
+// it
+TEST(PlayerStreamPacking, LeavesRoomForTheTransportTag) {
+    FakeGroup group;
+    FakeGroup::fill(group.ring16_, 0, LAST_CELL);
+    PlayerStream stream;
+    PlayerSupport support;
+    support.supported_formats = {{sendspin::server::Codec::PCM, 2, 48000, 16}};
+    support.buffer_capacity = 1000000;
+    stream.set_support(support);
+    stream.on_activation_written(true);
+    ClientState state;
+    state.available = true;
+    state.player = PlayerState{};
+    stream.on_client_state(state);
+    stream.set_pending_kind(sched::TriggerKind::JOIN);
+    const MarkerPlan plan =
+        plan_marker(stream, &group, sched::RoleSet::of(sched::StreamRole::PLAYER), START_US);
+    ASSERT_EQ(plan.action, sched::StreamAction::START);
+    stream.commit_marker(&group, plan.action, plan.want, START_US);
+    stream.prepare(&group, 0, START_US);
+    ASSERT_TRUE(stream.candidate(&group, 16384, START_US).ready);
+    const sendspin::server::PackedChunk chunk = stream.take_chunk(&group, 16384, START_US);
+    ASSERT_FALSE(chunk.plaintext.bytes.empty());
+    EXPECT_GE(chunk.plaintext.bytes.capacity() - chunk.plaintext.bytes.size(),
+              sendspin::server::TRANSPORT_TAG_BYTES);
 }
 
 // spec player/v1.md "Server Audio Send Constraints": a chunk short of n_target waits for more
