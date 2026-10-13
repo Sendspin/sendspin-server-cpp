@@ -79,7 +79,7 @@ jobs:
       - name: Build
         run: |
           ccache --zero-stats
-          cmake --build build --parallel
+          cmake --build build --parallel 4
           ccache --show-stats
 
       - name: Save ccache
@@ -114,11 +114,11 @@ jobs:
         run: cmake -B build-asan -DSENDSPIN_SERVER_ENABLE_WERROR=ON -DSENDSPIN_SERVER_BUILD_TESTS=ON -DSENDSPIN_SERVER_ENABLE_SANITIZERS=ON .
 
       - name: Build
-        # Two compiles at a time: a bare --parallel lets make start them all at once, and GCC
+        # One compile per core: a bare --parallel lets make start them all at once, and GCC
         # takes up to 2.3 GB to compile one of these sanitized sources
         run: |
           ccache --zero-stats
-          cmake --build build-asan --parallel 2
+          cmake --build build-asan --parallel 4
           ccache --show-stats
 
       - name: Save ccache
@@ -157,11 +157,11 @@ jobs:
         run: cmake -B build-embedded -DSENDSPIN_SERVER_ENABLE_WERROR=ON -DSENDSPIN_SERVER_BUILD_TESTS=ON -DSENDSPIN_SERVER_ENABLE_SANITIZERS=ON -DSENDSPIN_SERVER_EMBEDDED_PROFILE=ON .
 
       - name: Build
-        # Two compiles at a time: a bare --parallel lets make start them all at once, and GCC
+        # One compile per core: a bare --parallel lets make start them all at once, and GCC
         # takes up to 2.3 GB to compile one of these sanitized sources
         run: |
           ccache --zero-stats
-          cmake --build build-embedded --parallel 2
+          cmake --build build-embedded --parallel 4
           ccache --show-stats
 
       - name: Save ccache
@@ -199,11 +199,11 @@ jobs:
         run: cmake -B build-tsan -DSENDSPIN_SERVER_ENABLE_WERROR=ON -DSENDSPIN_SERVER_BUILD_TESTS=ON -DSENDSPIN_SERVER_ENABLE_TSAN=ON .
 
       - name: Build
-        # Two compiles at a time: a bare --parallel lets make start them all at once, and GCC
+        # One compile per core: a bare --parallel lets make start them all at once, and GCC
         # takes up to 2.3 GB to compile one of these sanitized sources
         run: |
           ccache --zero-stats
-          cmake --build build-tsan --parallel 2
+          cmake --build build-tsan --parallel 4
           ccache --show-stats
 
       - name: Save ccache
@@ -249,7 +249,7 @@ jobs:
       - name: Build
         run: |
           ccache --zero-stats
-          cmake --build build-asan --parallel
+          cmake --build build-asan --parallel 3
           ccache --show-stats
 
       - name: Save ccache
