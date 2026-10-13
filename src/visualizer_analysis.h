@@ -172,7 +172,8 @@ public:
     /// @brief A new epoch: the history zeros, the smoothing and onset state cleared
     void reset();
 
-    /// @brief Appends mono samples, the newest last
+    /// @brief Appends mono samples, the newest last: one past full scale clipped to it, one not
+    /// finite taken as silence, so no input leaves the analysis undefined
     void push(std::span<const float> mono);
 
     /// @brief Analyzes the window ending at the newest sample pushed and appends its messages to

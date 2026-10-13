@@ -32,6 +32,8 @@ constexpr float DB_FLOOR = -60.0F;
 /// The smallest ratio db_unit() takes the log of
 constexpr float MIN_RATIO = 1e-10F;
 constexpr float U16_FULL = 65535.0F;
+/// A full-scale sample's magnitude
+constexpr float FULL_SCALE = 1.0F;
 /// The A-weighting gain's clamp
 constexpr float A_WEIGHT_MIN_DB = -50.0F;
 constexpr float A_WEIGHT_MAX_DB = 6.0F;
@@ -88,6 +90,11 @@ void visit_window(std::span<const float> ring, size_t oldest, std::span<const fl
     };
     segment(ring.data() + oldest, 0, window - oldest);
     segment(ring.data(), window - oldest, window);
+}
+
+/// A sample as the analysis takes it: clipped to full scale, and silence when not finite
+float in_range(float sample) {
+    return std::isfinite(sample) ? std::clamp(sample, -FULL_SCALE, FULL_SCALE) : 0.0F;
 }
 
 void put_u16(std::vector<uint8_t>& out, uint16_t value) {
@@ -348,11 +355,13 @@ void VisualizerAnalysis::push(std::span<const float> mono) {
         const size_t take = std::min(mono.size(), window - at);
         const std::span<const float> part = mono.first(take);
         if (periodic) {
-            std::copy(part.begin(), part.end(),
-                      this->history_.begin() + static_cast<std::ptrdiff_t>(at));
+            std::transform(part.begin(), part.end(),
+                           this->history_.begin() + static_cast<std::ptrdiff_t>(at), in_range);
         }
         if (peak) {
-            this->a_weighting_.filter(part, std::span(this->weighted_history_).subspan(at, take));
+            const std::span<float> weighted = std::span(this->weighted_history_).subspan(at, take);
+            std::transform(part.begin(), part.end(), weighted.begin(), in_range);
+            this->a_weighting_.filter(weighted, weighted);
         }
         this->history_at_ = (at + take) % window;
         mono = mono.subspan(take);

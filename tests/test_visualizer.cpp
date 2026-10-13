@@ -25,6 +25,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <numbers>
 #include <optional>
@@ -795,9 +796,9 @@ TEST_F(VisualizerFeatures, FireOnsetsByTheAWeightedEnergy) {
 // onset
 TEST_F(VisualizerFeatures, CheckOnsetsOnTheNewestSamplesInOrder) {
     // A steady tone, then a window silent but for a louder burst in its newest quarter
-    std::vector<float> samples = sine(1000.0, 0.25, WINDOW);
+    std::vector<float> samples = sine(1000.0, 0.125, WINDOW);
     samples.resize(2 * WINDOW, 0.0F);
-    const std::vector<float> burst = sine(1000.0, 2.0, WINDOW / 4);
+    const std::vector<float> burst = sine(1000.0, 1.0, WINDOW / 4);
     std::copy(burst.begin(), burst.end(),
               samples.end() - static_cast<std::ptrdiff_t>(burst.size()));
     std::vector<std::optional<uint8_t>> strengths;
@@ -812,6 +813,41 @@ TEST_F(VisualizerFeatures, CheckOnsetsOnTheNewestSamplesInOrder) {
     // Below the 255 a rise six times the threshold's gives, so a window misread would show
     EXPECT_LT(*strengths[0], 255);
     EXPECT_EQ(strengths[1], strengths[0]);
+}
+
+// A sample past full scale or not finite (an F32 input may carry either) leaves every message
+// defined, and once normal audio follows the features and onsets resume
+TEST_F(VisualizerFeatures, RecoverFromSamplesOutOfRange) {
+    struct Row {
+        const char* name;
+        float value;
+    };
+    const std::vector<Row> rows = {
+        {"NaN", std::numeric_limits<float>::quiet_NaN()},
+        {"+inf", std::numeric_limits<float>::infinity()},
+        {"-inf", -std::numeric_limits<float>::infinity()},
+        {"1e30", 1e30F},
+    };
+    const VisualizerConfig config{type::LOUDNESS | type::F_PEAK | type::SPECTRUM | type::PEAK, 30,
+                                  SpectrumConfig{8, SpectrumScale::LIN, 0, 4000}};
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        VisualizerAnalysis analysis = this->analysis(config);
+        int64_t ts = 0;
+        const Decoded bad = run(analysis, std::vector<float>(WINDOW, row.value), ts, true, true);
+        EXPECT_TRUE(bad.loudness && bad.f_peak && bad.spectrum);
+        // A quiet tone long enough to settle the onset average, then a rise
+        for (int check = 0; check < 10; ++check) {
+            ts += 100000;
+            run(analysis, sine(BIN_CENTERED_HZ, 0.05), ts, true, true);
+        }
+        ts += 100000;
+        const Decoded rise = run(analysis, sine(BIN_CENTERED_HZ, 0.5), ts, true, true);
+        ASSERT_TRUE(rise.loudness && rise.f_peak);
+        EXPECT_GT(*rise.loudness, 0);
+        EXPECT_EQ(rise.f_peak->first, static_cast<uint16_t>(std::round(BIN_CENTERED_HZ)));
+        EXPECT_TRUE(rise.peak);
+    }
 }
 
 // spec roles/visualizer/v1.md "Visualization Data (Binary)": `[type][ts:8 big-endian][data]`, in
