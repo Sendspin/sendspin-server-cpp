@@ -85,12 +85,13 @@ TEST(ServerCoreBackoff, ADialAfterAFailureWaitsOutTheBackoff) {
     ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
     sendspin::server::EventLoop loop;
     sendspin::server::AudioWorkers workers(1);
+    // Outlives the dispatcher, whose thread calls it until joined
+    ErrorCounter listener;
     sendspin::server::Dispatcher dispatcher;
     const sendspin::server::Identity identity = *sendspin::server::Identity::generate();
     const sendspin::server::CoreSettings settings;
     sendspin::server::ClientSnapshot snapshot;
     sendspin::server::GroupSnapshot groups;
-    ErrorCounter listener;
     sendspin::server::InputRegistry inputs;
     std::atomic<uint64_t> group_ids{1};
     sendspin::server::ServerCore core(loop, workers, dispatcher, &listener, identity, settings,
@@ -185,12 +186,13 @@ TEST(ServerCoreBackoff, RetriesAUrlUntilConnectedUntilCancelled) {
         SCOPED_TRACE(row.name);
         sendspin::server::EventLoop loop;
         sendspin::server::AudioWorkers workers(1);
+        // Outlives the dispatcher, whose thread calls it until joined
+        ErrorCounter listener;
         sendspin::server::Dispatcher dispatcher;
         const sendspin::server::Identity identity = *sendspin::server::Identity::generate();
         const sendspin::server::CoreSettings settings;
         sendspin::server::ClientSnapshot snapshot;
         sendspin::server::GroupSnapshot groups;
-        ErrorCounter listener;
         sendspin::server::InputRegistry inputs;
         std::atomic<uint64_t> group_ids{1};
         sendspin::server::ServerCore core(loop, workers, dispatcher, &listener, identity, settings,
@@ -237,12 +239,13 @@ TEST(ServerCoreDiscovery, ALostInstanceCancelsItsDialWait) {
     ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
     sendspin::server::EventLoop loop;
     sendspin::server::AudioWorkers workers(1);
+    // Outlives the dispatcher, whose thread calls it until joined
+    ErrorCounter listener;
     sendspin::server::Dispatcher dispatcher;
     const sendspin::server::Identity identity = *sendspin::server::Identity::generate();
     const sendspin::server::CoreSettings settings;
     sendspin::server::ClientSnapshot snapshot;
     sendspin::server::GroupSnapshot groups;
-    ErrorCounter listener;
     sendspin::server::InputRegistry inputs;
     std::atomic<uint64_t> group_ids{1};
     sendspin::server::ServerCore core(loop, workers, dispatcher, &listener, identity, settings,
@@ -286,12 +289,13 @@ TEST(ServerCoreDiscovery, ADialThatWaitedChecksAgainBeforeItStarts) {
     ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
     sendspin::server::EventLoop loop;
     sendspin::server::AudioWorkers workers(1);
+    // Outlives the dispatcher, whose thread calls it until joined
+    ErrorCounter listener;
     sendspin::server::Dispatcher dispatcher;
     const sendspin::server::Identity identity = *sendspin::server::Identity::generate();
     const sendspin::server::CoreSettings settings;
     sendspin::server::ClientSnapshot snapshot;
     sendspin::server::GroupSnapshot groups;
-    ErrorCounter listener;
     sendspin::server::InputRegistry inputs;
     std::atomic<uint64_t> group_ids{1};
     sendspin::server::ServerCore core(loop, workers, dispatcher, &listener, identity, settings,
@@ -344,12 +348,13 @@ TEST(ServerCoreShutdown, ClosesAnInputWhoseAttachmentHasNotRun) {
     ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
     sendspin::server::EventLoop loop;
     sendspin::server::AudioWorkers workers(1);
+    // Outlives the dispatcher, whose thread calls it until joined
+    Recorder recorder;
     auto dispatcher = std::make_shared<sendspin::server::Dispatcher>();
     const sendspin::server::Identity identity = *sendspin::server::Identity::generate();
     const sendspin::server::CoreSettings settings;
     sendspin::server::ClientSnapshot snapshot;
     sendspin::server::GroupSnapshot groups;
-    Recorder recorder;
     sendspin::server::InputRegistry inputs;
     std::atomic<uint64_t> group_ids{1};
     sendspin::server::ServerCore core(loop, workers, *dispatcher, &recorder, identity, settings,
@@ -441,13 +446,14 @@ TEST(ServerCorePipelines, MovesAPlayerOffAFailedFormatAndStillCompletesADrain) {
     ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
     sendspin::server::EventLoop loop;
     sendspin::server::AudioWorkers workers(1);
+    // Outlives the dispatcher, whose thread calls it until joined
+    Recorder recorder;
     auto dispatcher = std::make_shared<sendspin::server::Dispatcher>();
     const sendspin::server::Identity identity = *sendspin::server::Identity::generate();
     sendspin::server::CoreSettings settings;
     settings.approve_all_clients = true;
     sendspin::server::ClientSnapshot snapshot;
     sendspin::server::GroupSnapshot groups;
-    Recorder recorder;
     sendspin::server::InputRegistry inputs;
     std::atomic<uint64_t> group_ids{1};
     sendspin::server::ServerCore core(loop, workers, *dispatcher, &recorder, identity, settings,
