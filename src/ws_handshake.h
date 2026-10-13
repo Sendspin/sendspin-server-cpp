@@ -66,8 +66,8 @@ struct WsUpgradeCheck {
 
 /// @brief Checks the bytes received so far for the response to an upgrade sent with key (RFC
 /// 6455 section 4.1): status 101 on HTTP/1.1 (a redirect or any other status is REJECTED),
-/// one Upgrade line of `websocket` and Connection `Upgrade` (on any of its lines) in any case, the
-/// Sec-WebSocket-Accept key requires, and no Sec-WebSocket-Extensions or
+/// one Upgrade line of `websocket` and Connection `Upgrade` (on any of its lines) in any case, one
+/// Sec-WebSocket-Accept line of the value key requires, and no Sec-WebSocket-Extensions or
 /// Sec-WebSocket-Protocol, as none was offered
 WsUpgradeCheck check_upgrade_response(std::string_view received, std::string_view key);
 

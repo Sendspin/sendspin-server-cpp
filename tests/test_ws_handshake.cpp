@@ -150,6 +150,8 @@ TEST(WsHandshake, ChecksTheResponse) {
          WsUpgradeStatus::REJECTED, 0},
         {"no accept", ok_status + "Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
          WsUpgradeStatus::REJECTED, 0},
+        {"two accept lines, both matching", ok_status + ok_headers + accept + "\r\n",
+         WsUpgradeStatus::REJECTED, 0},
         {"no Upgrade", ok_status + "Connection: Upgrade\r\n" + accept + "\r\n",
          WsUpgradeStatus::REJECTED, 0},
         {"Upgrade to another protocol",

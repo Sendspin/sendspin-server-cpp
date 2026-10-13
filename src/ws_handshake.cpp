@@ -269,7 +269,8 @@ WsUpgradeCheck check_upgrade_response(std::string_view received, std::string_vie
             // RFC 9110 section 5.3: repeated lines are one comma-separated list
             connection = connection || lists_token(value, "Upgrade");
         } else if (equals_ignoring_case(name, "Sec-WebSocket-Accept")) {
-            if (value != accept) {
+            // RFC 6455 sections 4.1 step 4 and 11.3.3: one line, exactly the key's accept
+            if (accepted || value != accept) {
                 return check;
             }
             accepted = true;
