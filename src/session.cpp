@@ -845,6 +845,7 @@ std::optional<OutboundMessage> Session::take_message() {
     OutboundPlaintext message;
     int64_t stamp_us = 0;
     size_t audio_bytes = 0;
+    bool time_reply = false;
     for (bool taken = false; !taken;) {
         const int64_t now = now_us();
         this->prepare(now);
@@ -854,6 +855,7 @@ std::optional<OutboundMessage> Session::take_message() {
                 const ClientTime request = this->queues_.take_time();
                 stamp_us = ::sendspin::server::now_us();
                 message = json_plaintext(build_server_time(request, stamp_us));
+                time_reply = true;
                 taken = true;
                 break;
             }
@@ -951,7 +953,7 @@ std::optional<OutboundMessage> Session::take_message() {
     if (this->trace_ != nullptr) {
         this->trace_->on_outbound(message.kind, traced, stamp_us, audio_bytes);
     }
-    return OutboundMessage{message.kind, std::move(message.bytes)};
+    return OutboundMessage{message.kind, std::move(message.bytes), time_reply};
 }
 
 bool Session::queue_text(const std::string& text) {

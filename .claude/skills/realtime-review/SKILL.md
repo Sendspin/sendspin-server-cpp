@@ -29,7 +29,7 @@ Determine the diff: if `$ARGUMENTS` names a commit range or branch, diff that; o
 
 ## The send path
 
-- The write invariant: no write starts unless `async_wait(wait_write)` reported room; one message per write; the next wait starts only after the write completes. Flag a path that writes outside the pump or queues a second write.
+- The write invariant: no write starts unless the transport reported room; a write carries the messages ready as it starts, each its own WebSocket frame, within `write_batch_has_room()`, and a time reply ends it; the next wait starts only after the write completes. Flag a path that writes outside the pump, queues a second write, holds a message back to fill a write, or builds a message after a time reply in the same write.
 - A message is built, stamped and encrypted when `Session::take_message()` takes it, with the stamp read immediately before encryption. Flag a stamp read earlier (at queueing, before packing) or a message encrypted ahead of its turn.
 - Selection order is `sched::select_next()`'s; a control or time message is never held behind audio. Flag a new message kind that bypasses the queues.
 
