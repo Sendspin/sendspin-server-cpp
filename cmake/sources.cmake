@@ -74,7 +74,9 @@ set(SENDSPIN_SERVER_SOURCES
     src/session.cpp
     src/session_driver.cpp
     # The source role: a session's commands and input stream, the feed to a routed source's
-    # decoder on the group audio threads, and the sink that writes its PCM into a group's input
+    # decoder on the group audio threads, and the sink that corrects its clock and writes its PCM
+    # into a group's input
+    src/source_clock.cpp
     src/source_decoder.cpp
     src/source_feed.cpp
     src/source_sink.cpp

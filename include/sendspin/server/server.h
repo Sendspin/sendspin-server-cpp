@@ -391,12 +391,13 @@ public:
     /// moving with it; into the group its input holds, it returns GROUP_BUSY until that input is
     /// released.
     ///
-    /// The group's timeline is the server's, as for any live input: the source's capture times
-    /// drop a chunk that arrives later than the write jitter allows, the backlog of a stall, and
-    /// end the input's run at a gap of a second or more, and at the end of the source's stream,
-    /// so its next audio starts a new run (docs/internals.md "Known limitations"). A device that
-    /// is a player too plays only what its group streams it, its own input included (spec
-    /// roles/source/v1.md).
+    /// The source's audio plays a fixed latency after its capture: the group's lead past its
+    /// arrival when its run starts, held there by correcting the source's clock against the
+    /// server's once the two measurably drift, and raised or lowered as for any live input. Its
+    /// capture times also drop a chunk that arrives later than the write jitter allows, the
+    /// backlog of a stall, and end the input's run at a gap of a second or more, and at the end
+    /// of the source's stream, so its next audio starts a new run. A device that is a player too
+    /// plays only what its group streams it, its own input included (spec roles/source/v1.md).
     /// @param client_id need not be connected
     RoutedSource route_source(std::string_view client_id, GroupId group,
                               const SourceRouteOptions& options = {});

@@ -76,6 +76,7 @@ add_executable(sendspin_server_cpp_tests
     test_server_visualizer.cpp
     test_session.cpp
     test_session_driver.cpp
+    test_source_clock.cpp
     test_source_decoder.cpp
     test_source_sink.cpp
     test_source_stream.cpp

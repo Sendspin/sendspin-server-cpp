@@ -475,7 +475,9 @@ TEST(SourceDecoder, WritesEachChunkWholeIntoALiveInput) {
             sendspin::server::GroupId{1}, sendspin::server::InputId{2}, options,
             sendspin::server::GroupParams{300000, 0, 2000000}, dispatcher, nullptr);
         const auto feed = std::make_shared<SourceFeed>(1 << 20, 16);
-        SourceDecoder decoder(feed, std::make_unique<sendspin::server::LiveSourceSink>(view, 0),
+        SourceDecoder decoder(feed,
+                              std::make_unique<sendspin::server::LiveSourceSink>(
+                                  view, 0, sendspin::server::ResamplerQuality::MEDIUM),
                               nullptr);
         SourceItem item;
         item.format = row.format;

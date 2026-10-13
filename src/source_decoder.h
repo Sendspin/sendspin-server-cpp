@@ -40,10 +40,6 @@ struct OpusDecoder;
 
 namespace sendspin::server {
 
-/// @brief The longest chunk a source may send (roles/source/v1.md "Source Audio Chunks
-/// (Binary)")
-constexpr int64_t MAX_SOURCE_CHUNK_US = 150000;
-
 /// @brief Whether this build decodes Opus (SENDSPIN_SERVER_ENABLE_OPUS)
 bool source_opus_available();
 

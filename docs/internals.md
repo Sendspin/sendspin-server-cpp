@@ -96,6 +96,8 @@ Each member's stream format comes from `select_player_format()` (`playback_polic
 
 `route_source()` opens a live input on the group and posts the route to core (`server_core_source.cpp`). The bound connection's `SourceStream` (`source_stream.h`) emits the source's `start` and `stop` and pushes the stream's items into the route's `SourceFeed`; the route's `SourceDecoder`, on the group audio threads, decodes them and writes the PCM through a `LiveSourceSink` into the input.
 
+The sink keeps each sample a fixed latency after its capture. The run's anchor sets that latency (the group's lead past the write of its first chunk); the source's clock is then held to the server's: `SourceClock` (`source_clock.h`) compares each chunk's capture time with the time its first frame plays at its corrected position, and once their difference drifts past `SOURCE_CLOCK_ENGAGE_US` a PI loop steers the correction, `SourceAsrc` (micro-resampler's ASRC; the input then takes floats) where `profile::SOURCE_ASRC`, else `SampleSlip`. Until then the audio passes unaltered. The input's own rebase and lowering move the latency as for any live input; the loop measures only the corrected stream, so neither disturbs it.
+
 ## Work on the core thread
 
 Receive: the network thread stamps a message when its last byte is read and pushes it into the inbound ring; core's drain delivers it to the driver. `Session` checks the phase, decrypts, traces the plaintext, reassembles fragments and dispatches.
@@ -123,12 +125,11 @@ Send: after every event the driver runs its pump. With a message to send and no 
 
 ## ESP-IDF
 
-On ESP-IDF the library is a component (`cmake/esp_idf.cmake`, sources from `cmake/sources.cmake`) built with the embedded resource profile, `src/profile.h`: smaller write-ahead, staging ring and connection caps, one group audio thread and no Opus. The host runs its whole test suite with the same values (`-DSENDSPIN_SERVER_EMBEDDED_PROFILE=ON`). The transport is native (`src/esp/`): dials on esp_websocket_client, accepts on esp_http_server, a writer task per connection, all handing received messages to core through the same inbound ring. `src/esp/memory_esp.cpp` wraps the whole application's `pthread_mutex_init()` and `pthread_cond_init()` at link time, so another component that wraps either symbol will not link with it.
+On ESP-IDF the library is a component (`cmake/esp_idf.cmake`, sources from `cmake/sources.cmake`) built with the embedded resource profile, `src/profile.h`: smaller write-ahead, staging ring and connection caps, one group audio thread, a source's clock corrected by single-frame slips rather than the ASRC, and no Opus. The host runs its whole test suite with the same values (`-DSENDSPIN_SERVER_EMBEDDED_PROFILE=ON`). The transport is native (`src/esp/`): dials on esp_websocket_client, accepts on esp_http_server, a writer task per connection, all handing received messages to core through the same inbound ring. `src/esp/memory_esp.cpp` wraps the whole application's `pthread_mutex_init()` and `pthread_cond_init()` at link time, so another component that wraps either symbol will not link with it.
 
 ## Known limitations
 
-- **A routed source plays on the server's timeline.** Its audio goes into an ordinary live input and plays the group's lead after it arrives; its capture times are used only to drop a stall's backlog and to end the run at a long gap, and nothing corrects the source's clock against the server's.
-- **A live input's latency falls in one cut.** The audio it drops is heard as a skip, as a rise is heard as a gap.
+- **A live input's latency falls in one cut.** The audio it drops is heard as a skip, as a rise is heard as a gap; only a routed source's clock drift is slewed inaudibly.
 - **A live input's silence is one gap in its run.** A live input that receives no writes keeps its run, and its next write moves the timeline forward by the silence; a host whose source can go silent should call `GroupInput::stop()` and let its next samples start a new run.
 - **An Opus stream starts with silence**, the encoder's lookahead at each new Opus instance.
 - **A group's fifth visualizer configuration gets no stream.** Past `MAX_GROUP_ANALYSES`, a configuration fails for the rest of the run.

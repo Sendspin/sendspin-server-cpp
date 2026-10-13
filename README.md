@@ -15,7 +15,7 @@ Early development. The public API changes between releases without deprecation, 
 - Groups the host creates, renames and moves clients between, each playing its own input
 - Host PCM input, buffered (a file or decoder) or live (a capture device), streamed to each player as PCM, FLAC or Opus (off by default, `ServerConfig::enable_opus`) in its chosen format, resampled and channel-mixed per player, with in-place format switches
 - Controller, metadata, artwork (JPEG or PNG, fitted to each channel), color and visualizer roles
-- Source role: a client's captured audio routed into a group's live input
+- Source role: a client's captured audio routed into a group's live input, played a fixed latency after its capture, the source's clock drift corrected (ASRC on a host, single-sample slips on ESP-IDF)
 - `examples/server_cli`: a command-line and browser-controlled host on the public API
 
 ## Documentation
