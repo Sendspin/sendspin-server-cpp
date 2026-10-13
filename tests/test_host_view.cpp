@@ -371,12 +371,35 @@ TEST_F(HostViewTest, StartsTheSlewOverInANewFormat) {
     }
 }
 
+// While a write runs through the slew, between the step that takes it up and the steps that stage
+// its blocks, the input is FULL: another write takes nothing, and a writer waiting for room is
+// woken as the slewed write ends, the input OPEN again
+TEST_F(HostViewTest, HoldsOffWritersWhileAWriteSlews) {
+    constexpr uint64_t ANCHOR = RATE / 2;
+    HostView& view = this->make_slewing(0);
+    const Bytes anchor = tone_pcm(0, ANCHOR);
+    const Bytes pcm = tone_pcm(ANCHOR, RATE);
+    ASSERT_EQ(view.write(anchor.data(), ANCHOR).frames, ANCHOR);
+    const HostView::SlewedWrite slewed = view.begin_slewed(RATE, 300, InputState::OPEN);
+    EXPECT_EQ(view.state(), InputState::FULL);
+    const WriteResult between = view.write(pcm.data(), RATE);
+    EXPECT_EQ(between.frames, 0U);
+    EXPECT_EQ(between.state, InputState::FULL);
+    // No timeout: only the slewed write's end wakes it
+    InputState woken = InputState::FULL;
+    std::thread waiter([&] { woken = view.wait_writable(std::numeric_limits<int64_t>::max()); });
+    EXPECT_EQ(view.write_slewed(pcm.data(), slewed).state, InputState::OPEN);
+    waiter.join();
+    EXPECT_EQ(woken, InputState::OPEN);
+    EXPECT_EQ(view.state(), InputState::OPEN);
+}
+
 // A write runs through the slew with the mutex released, so it takes up the slew in one step and
 // stages its blocks in others. A write made in between takes nothing (FULL), whatever the call
-// before it left; a flush, pause,
-// format, drain, close or server stop in between ends the staging, so nothing more lands past what
-// that call left, and the write reports the state the call left and takes no slew time into
-// `G_eff`. After a flush the next writes take the slew up again.
+// before it left. A flush, pause, format, drain, close or server stop in between ends the
+// staging, so nothing more lands past what that call left, and the write reports the state the
+// call left and takes no slew time into `G_eff`. After a flush the next writes take the slew up
+// again.
 TEST_F(HostViewTest, EndsASlewedWriteACallOverran) {
     constexpr uint64_t ANCHOR = RATE / 2;
     struct Row {
@@ -432,12 +455,14 @@ TEST_F(HostViewTest, EndsASlewedWriteACallOverran) {
 
 // One live input slewing under a writer while another thread flushes, pauses and resumes, sets
 // formats and finally closes it, each call landing wherever the writer is: every write reports no
-// more than it was given, and the input still takes writes until it closes. Bounded, a few
-// hundred milliseconds; its point is the ThreadSanitizer run.
+// more than it was given, some writes are played fast, and the input still takes writes until it
+// closes. Bounded, a few hundred milliseconds; its point is the ThreadSanitizer run.
 TEST_F(HostViewTest, SlewsUnderCallsFromAnotherThread) {
     HostView& view = this->make_slewing(0);
     view.set_group_params({LEAD_US - 200000, 0, SLEW_AHEAD_US});
     std::atomic<bool> done{false};
+    // Writes the slew played fast, so the run shows it engaged
+    uint64_t slewed = 0;
     std::thread writer([&] {
         const Bytes pcm = tone_floats(0, RATE / 10);
         while (!done.load()) {
@@ -449,6 +474,10 @@ TEST_F(HostViewTest, SlewsUnderCallsFromAnotherThread) {
             // Either format's frames fit the buffer: S16 reads half of it
             const WriteResult result = view.write(pcm.data(), RATE / 10);
             ASSERT_LE(result.frames, RATE / 10);
+            if (result.state == InputState::OPEN && result.frames < RATE / 10) {
+                ++slewed;
+            }
+            std::this_thread::yield();
         }
     });
     for (int i = 0; i < 1000; ++i) {
@@ -472,6 +501,7 @@ TEST_F(HostViewTest, SlewsUnderCallsFromAnotherThread) {
     view.close();
     done.store(true);
     writer.join();
+    EXPECT_GT(slewed, 0U);
     EXPECT_EQ(view.write(tone_pcm(0, CELL).data(), CELL).state, InputState::CLOSED);
 }
 

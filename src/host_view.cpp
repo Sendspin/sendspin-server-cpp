@@ -228,8 +228,11 @@ InputState HostView::wait_writable(int64_t timeout_us) {
             this->host_calls_seen_ = this->host_calls_;
             return state;
         }
-        const int64_t ready = sched::readiness_time(this->admission_input(), this->anchor_,
-                                                    this->ready_samples(), now);
+        // A write running through the slew wakes the wait as it ends
+        const int64_t ready = this->slewing_
+                                  ? sched::NEVER
+                                  : sched::readiness_time(this->admission_input(), this->anchor_,
+                                                          this->ready_samples(), now);
         // Within what a steady_clock duration holds; the loop waits again after a longer one
         const int64_t wait_us = std::min({deadline, ready, now + MAX_WAIT_US}) - now;
         this->changed_.wait_for(lock, std::chrono::microseconds(wait_us));
@@ -576,7 +579,8 @@ int64_t HostView::poll_writable(int64_t now_us) {
     AfterUnlock after;
     {
         const std::lock_guard<std::mutex> lock(this->mutex_);
-        if (!this->writable_wanted_ || this->closed_ || this->released_) {
+        // A write running through the slew signals core as it ends
+        if (!this->writable_wanted_ || this->closed_ || this->released_ || this->slewing_) {
             return sched::NEVER;
         }
         const int64_t ready = sched::readiness_time(this->admission_input(), this->anchor_,
@@ -699,6 +703,10 @@ InputState HostView::state_locked(int64_t now_us) const {
     }
     if (this->run_.drain) {
         return InputState::DRAINING;
+    }
+    // A write running through the slew holds the room admission gave it until it ends
+    if (this->slewing_) {
+        return InputState::FULL;
     }
     return sched::admitted_past_head(this->admission_input(), this->anchor_, now_us) >=
                    this->ready_samples()
@@ -832,6 +840,7 @@ WriteResult HostView::write_slewed(const uint8_t* pcm, const SlewedWrite& slewed
             this->writable_wanted_ = true;
         }
         this->signal(after);
+        this->changed_.notify_all();
     }
     this->run_after(after);
     // The host counts positions by what it is told was taken
