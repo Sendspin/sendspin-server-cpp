@@ -108,7 +108,10 @@ void Connection::Impl::start_write() {
     if (this->batch_count_ == 0) {
         return;
     }
+    // The writer may be past its check for the close already, so a write requested now could
+    // still go out
     if (this->closed_) {
+        this->link_->drop_staged();
         this->batch_count_ = 0;
         this->batch_bytes_ = 0;
         return;

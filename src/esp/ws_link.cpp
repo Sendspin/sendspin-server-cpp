@@ -94,6 +94,10 @@ void WsLink::stage_write(MessageKind kind, std::span<const uint8_t> payload) {
     this->write_batch_.append(kind, payload);
 }
 
+void WsLink::drop_staged() {
+    this->write_batch_.clear();
+}
+
 void WsLink::request_write() {
     this->request(REQUEST_WRITE);
 }

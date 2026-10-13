@@ -77,6 +77,8 @@ public:
     void request_room();
     /// @brief While no write is in flight: adds payload, copied, as one frame of the next write
     void stage_write(MessageKind kind, std::span<const uint8_t> payload);
+    /// @brief Drops the frames staged since the last write, which is then never requested
+    void drop_staged();
     /// @brief Starts the write of the frames staged since the last
     void request_write();
     void request_ping();
@@ -214,7 +216,7 @@ private:
 
     std::atomic<uint32_t> requests_{0};
     /// Core task, then the writer task once REQUEST_WRITE is seen, which clears it as the write
-    /// completes
+    /// completes; core clears a batch it never requests (drop_staged())
     WsBatch write_batch_;
     /// Core task, then the writer task once REQUEST_CLOSE is seen
     std::optional<uint16_t> close_code_;
