@@ -90,7 +90,7 @@ Each member's stream format comes from `select_player_format()` (`playback_polic
 
 ### Artwork, colors and visualizer
 
-`Group` holds an `ArtworkTimeline` (`artwork.h`) per image source and its colors (`ScheduledUpdates<ColorState>`). Encodings come from the run's `ArtworkCache`, which posts misses to the artwork worker; each session's `ArtworkStream` is its artwork queue. Each distinct visualizer configuration is an analysis in the pipeline set, run by `GroupAudio` beside the frame instances (`VisualizerAnalysis`, its FFT behind `RealFft`).
+`Group` holds an `ArtworkTimeline` (`artwork.h`) per image source and its colors (`ScheduledUpdates<ColorState>`). Encodings come from the run's `ArtworkCache`, which posts misses to the artwork worker; each session's `ArtworkStream` is its artwork queue. Each distinct visualizer configuration is an analysis in the pipeline set, run by `GroupAudio` beside the frame instances (`VisualizerAnalysis`: an FFT behind `RealFft` at each periodic instant, and onset checks on a time-domain A-weighted window with no FFT).
 
 ### Routed sources
 

@@ -94,9 +94,10 @@ struct VisualizerConfig {
 constexpr uint32_t MAX_VISUALIZER_RATE = sched::CELLS_PER_SECOND;
 
 /// @brief The most visualizer analyses a group runs, one per distinct configuration its clients
-/// stream or want: each costs a window of history, its FFT and tables (about 45 KB at 48 kHz) and
-/// an FFT or two per cell, so four bound a group's analysis memory to about 180 KB and its work to
-/// a few FFTs a cell. A configuration past the cap fails as an analysis that failed would.
+/// stream or want: each costs a window of history, its FFT and tables (about 45 KB at 48 kHz, 8 KB
+/// more with `peak`) and at most one FFT per cell, so four bound a group's analysis memory to about
+/// 210 KB and its work to four FFTs a cell. A configuration past the cap fails as an analysis that
+/// failed would.
 constexpr size_t MAX_GROUP_ANALYSES = 4;
 
 /// @brief The most spectrum display bins the server streams (spec roles/visualizer/v1.md

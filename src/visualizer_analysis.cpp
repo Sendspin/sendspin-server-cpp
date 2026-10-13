@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <numbers>
 
 namespace sendspin::server {
@@ -34,6 +35,16 @@ constexpr float U16_FULL = 65535.0F;
 /// The A-weighting gain's clamp
 constexpr float A_WEIGHT_MIN_DB = -50.0F;
 constexpr float A_WEIGHT_MAX_DB = 6.0F;
+/// The A-weighting curve's pole frequencies in Hz above its 20.6 Hz pair (IEC 61672-1), the last
+/// double
+constexpr double A_POLE_2_HZ = 107.7;
+constexpr double A_POLE_3_HZ = 737.9;
+constexpr double A_POLE_4_HZ = 12194.0;
+/// Where AWeightingFilter's low-pass zero is fitted: this fraction of the Nyquist frequency, at
+/// most A_FIT_MAX_HZ
+constexpr double A_FIT_NYQUIST_FRACTION = 0.85;
+constexpr double A_FIT_MAX_HZ = 20000.0;
+constexpr double A_REFERENCE_HZ = 1000.0;
 /// A Hann-windowed full-scale sine's RMS as loudness measures it: sqrt(3 / 16)
 const float LOUDNESS_REFERENCE = std::sqrt(3.0F / 16.0F);
 /// The onset strength's range: the excess over ONSET_RATIO that gives 255
@@ -145,6 +156,82 @@ void spectrum_edges(const SpectrumConfig& spectrum, std::span<float> edges) {
     }
 }
 
+void AWeightingFilter::set_rate(uint32_t rate) {
+    const double fs = rate;
+    const double two_pi = 2.0 * std::numbers::pi;
+    // The bilinear transform of `s^2 / ((s + p) (s + q))`, p and q in rad/s
+    const auto high_pass = [&](double p, double q) {
+        const double k = 2.0 * fs;
+        const double d = (k + p) * (k + q);
+        const double b = k * k / d;
+        return std::array<double, 5>{
+            b, -2.0 * b, b, (((p - k) * (k + q)) + ((k + p) * (q - k))) / d, (p - k) * (q - k) / d};
+    };
+    std::array<std::array<double, 5>, 2> sections{
+        high_pass(two_pi * A_POLE_2_HZ, two_pi * A_POLE_3_HZ),
+    };
+    // The pole pair at A_POLE_4_HZ matched, `z = e^(s / fs)`, over `1 + c z^-1`, with c giving the
+    // analog section's gain against DC at the fit frequency: for T that gain squared times the
+    // poles' `|D(z)|^2 / D(1)^2` there, `|1 + c z^-1|^2 = T (1 + c)^2`, a quadratic in c whose two
+    // roots are reciprocals; the one within [-1, 1], clamped to [0, 1]
+    const double pole = std::exp(-two_pi * A_POLE_4_HZ / fs);
+    const double fit_hz = std::min(A_FIT_NYQUIST_FRACTION * fs / 2.0, A_FIT_MAX_HZ);
+    const double omega = two_pi * fit_hz / fs;
+    const double ratio = fit_hz / A_POLE_4_HZ;
+    const double analog = 1.0 / ((1.0 + (ratio * ratio)) * (1.0 + (ratio * ratio)));
+    const std::complex<double> z_fit = std::polar(1.0, -omega);
+    const double poles_dc = (1.0 - pole) * (1.0 - pole);
+    const double t = analog *
+                     std::norm(1.0 - (2.0 * pole * z_fit) + (pole * pole * z_fit * z_fit)) /
+                     (poles_dc * poles_dc);
+    const double qa = 1.0 - t;
+    const double qb = 2.0 * (std::cos(omega) - t);
+    double c = 0.0;
+    if (qa != 0.0) {
+        const double root = std::sqrt(std::max((qb * qb) - (4.0 * qa * qa), 0.0));
+        const double first = (-qb - root) / (2.0 * qa);
+        c = std::fabs(first) <= 1.0 ? first : (-qb + root) / (2.0 * qa);
+    }
+    sections[1] = {1.0, std::clamp(c, 0.0, 1.0), 0.0, -2.0 * pole, pole * pole};
+    // The gain at A_REFERENCE_HZ set to the curve's there
+    const std::complex<double> z = std::polar(1.0, -two_pi * A_REFERENCE_HZ / fs);
+    std::complex<double> response = 1.0;
+    for (const std::array<double, 5>& b : sections) {
+        response *= (b[0] + (b[1] * z) + (b[2] * z * z)) / (1.0 + (b[3] * z) + (b[4] * z * z));
+    }
+    const double gain = std::pow(10.0, a_weighting_db(A_REFERENCE_HZ) / 20.0) / std::abs(response);
+    for (size_t i = 0; i < sections.size(); ++i) {
+        const double scale = i + 1 == sections.size() ? gain : 1.0;
+        Section& out = this->sections_[i];
+        out.b0 = static_cast<float>(sections[i][0] * scale);
+        out.b1 = static_cast<float>(sections[i][1] * scale);
+        out.b2 = static_cast<float>(sections[i][2] * scale);
+        out.a1 = static_cast<float>(sections[i][3]);
+        out.a2 = static_cast<float>(sections[i][4]);
+    }
+    this->reset();
+}
+
+void AWeightingFilter::filter(std::span<const float> in, std::span<float> out) {
+    // A sample at a time through both sections, so their recursions overlap, each section a local
+    // the compiler keeps in registers
+    Section high = this->sections_[0];
+    Section low = this->sections_[1];
+    for (size_t i = 0; i < in.size(); ++i) {
+        out[i] = low.step(high.step(in[i]));
+    }
+    this->sections_ = {high, low};
+}
+
+void AWeightingFilter::reset() {
+    for (Section& section : this->sections_) {
+        section.x1 = 0.0F;
+        section.x2 = 0.0F;
+        section.y1 = 0.0F;
+        section.y2 = 0.0F;
+    }
+}
+
 int32_t spectrum_bin(float hz, std::span<const float> edges) {
     const auto above = std::upper_bound(edges.begin(), edges.end(), hz);
     const auto bin = static_cast<int32_t>(above - edges.begin()) - 1;
@@ -181,9 +268,11 @@ VisualizerAnalysis::VisualizerAnalysis(const VisualizerConfig& config) : config_
 
 bool VisualizerAnalysis::set_rate(uint32_t rate) {
     const size_t window = analysis_window(rate);
+    const bool periodic = (this->config_.types & visualizer_type::PERIODIC) != 0;
+    const bool peak = (this->config_.types & visualizer_type::PEAK) != 0;
     // The powers live in the FFT's storage
     this->weighted_ = {};
-    if (!this->fft_ || this->fft_->size() != window) {
+    if (periodic && (!this->fft_ || this->fft_->size() != window)) {
         this->fft_ = RealFft::create(window);
         if (!this->fft_) {
             this->rate_ = 0;
@@ -200,9 +289,10 @@ bool VisualizerAnalysis::set_rate(uint32_t rate) {
                             static_cast<float>(window - 1);
         this->hann_[i] = 0.5F - (0.5F * std::cos(phase));
     }
-    this->gains_.resize(half + 1);
-    this->display_bin_.assign(half + 1, -1);
-    for (size_t k = 0; k <= half; ++k) {
+    const size_t bins = periodic ? half + 1 : 0;
+    this->gains_.resize(bins);
+    this->display_bin_.assign(bins, -1);
+    for (size_t k = 0; k < bins; ++k) {
         const float hz =
             static_cast<float>(k) * static_cast<float>(rate) / static_cast<float>(window);
         // A power gain: the A-weighting's amplitude gain squared
@@ -211,8 +301,10 @@ bool VisualizerAnalysis::set_rate(uint32_t rate) {
             this->display_bin_[k] = spectrum_bin(hz, this->edges_);
         }
     }
-    this->history_.assign(window, 0.0F);
+    this->history_.assign(periodic ? window : 0, 0.0F);
+    this->weighted_history_.assign(peak ? window : 0, 0.0F);
     this->history_at_ = 0;
+    this->a_weighting_.set_rate(rate);
     // The bin f_peak held is another frequency at another size
     this->f_peak_bin_ = -1;
     return true;
@@ -220,7 +312,9 @@ bool VisualizerAnalysis::set_rate(uint32_t rate) {
 
 void VisualizerAnalysis::reset() {
     std::fill(this->history_.begin(), this->history_.end(), 0.0F);
+    std::fill(this->weighted_history_.begin(), this->weighted_history_.end(), 0.0F);
     this->history_at_ = 0;
+    this->a_weighting_.reset();
     this->spectrum_started_ = false;
     this->loudness_smoothed_.reset();
     this->f_peak_bin_ = -1;
@@ -230,15 +324,20 @@ void VisualizerAnalysis::reset() {
 
 void VisualizerAnalysis::push(std::span<const float> mono) {
     const size_t window = this->window_;
-    // Only the newest window counts
-    if (mono.size() > window) {
-        mono = mono.last(window);
-    }
+    const bool periodic = !this->history_.empty();
+    const bool peak = !this->weighted_history_.empty();
     while (!mono.empty()) {
-        const size_t take = std::min(mono.size(), window - this->history_at_);
-        std::copy_n(mono.begin(), take,
-                    this->history_.begin() + static_cast<std::ptrdiff_t>(this->history_at_));
-        this->history_at_ = (this->history_at_ + take) % window;
+        const size_t at = this->history_at_;
+        const size_t take = std::min(mono.size(), window - at);
+        const std::span<const float> part = mono.first(take);
+        if (periodic) {
+            std::copy(part.begin(), part.end(),
+                      this->history_.begin() + static_cast<std::ptrdiff_t>(at));
+        }
+        if (peak) {
+            this->a_weighting_.filter(part, std::span(this->weighted_history_).subspan(at, take));
+        }
+        this->history_at_ = (at + take) % window;
         mono = mono.subspan(take);
     }
 }
@@ -251,7 +350,9 @@ void VisualizerAnalysis::analyze(int64_t ts_us, bool periodic, bool onset,
     if (!periodic_due && !onset_due) {
         return;
     }
-    this->transform();
+    if (periodic_due) {
+        this->transform();
+    }
     if (periodic_due && (types & visualizer_type::LOUDNESS) != 0) {
         const uint16_t value = this->loudness();
         this->append_header(visualizer_type::LOUDNESS, ts_us, out);
@@ -384,8 +485,18 @@ void VisualizerAnalysis::spectrum() {
     this->spectrum_started_ = true;
 }
 
+float VisualizerAnalysis::onset_energy() const {
+    float sum = 0.0F;
+    visit_window(this->weighted_history_, this->history_at_, this->hann_,
+                 [&](size_t /*position*/, float weight, float sample) {
+                     const float value = weight * sample;
+                     sum += value * value;
+                 });
+    return sum;
+}
+
 std::optional<uint8_t> VisualizerAnalysis::onset(int64_t ts_us) {
-    const float energy = this->power_;
+    const float energy = this->onset_energy();
     const float average = this->energy_average_;
     if (average <= 0.0F) {
         this->energy_average_ = std::max(energy, MIN_ENERGY);
