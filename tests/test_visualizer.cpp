@@ -25,6 +25,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <numbers>
 #include <optional>
@@ -191,6 +192,114 @@ TEST(VisualizerScale, AWeightsByTheStandardCurve) {
     for (const Row& row : rows) {
         SCOPED_TRACE(row.hz);
         EXPECT_NEAR(sendspin::server::a_weighting_db(row.hz), row.expected_db, 0.1);
+    }
+}
+
+/// The IEC 61672-1 A-weighting curve at hz in dB, unclamped, computed here in double precision
+double a_curve_db(double hz) {
+    const double f2 = hz * hz;
+    const double ra =
+        (12194.0 * 12194.0 * f2 * f2) /
+        ((f2 + (20.6 * 20.6)) * std::sqrt((f2 + (107.7 * 107.7)) * (f2 + (737.9 * 737.9))) *
+         (f2 + (12194.0 * 12194.0)));
+    return 2.0 + (20.0 * std::log10(ra));
+}
+
+// The onsets' filter weights by the curve without its 20.6 Hz pole pair, within 0.4 dB to 0.9 times
+// the Nyquist frequency (20 kHz at most), at 8 to 192 kHz
+TEST(VisualizerScale, FilterByTheCurveWithoutItsLowPolePair) {
+    struct Row {
+        uint32_t rate;
+        double hz;
+    };
+    const std::vector<Row> rows = {
+        {48000, 30},    {48000, 100},  {48000, 1000},  {48000, 4000},   {48000, 10000},
+        {48000, 20000}, {44100, 1000}, {44100, 15000}, {44100, 19845},  {8000, 100},
+        {8000, 1000},   {8000, 3600},  {192000, 30},   {192000, 15000},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(testing::Message() << row.rate << " Hz input, " << row.hz << " Hz");
+        sendspin::server::AWeightingFilter filter;
+        filter.set_rate(row.rate);
+        // A second of the sine, measured over its second half, past the filter's start
+        std::vector<float> samples(row.rate);
+        for (size_t i = 0; i < samples.size(); ++i) {
+            samples[i] = static_cast<float>(
+                std::sin(2.0 * std::numbers::pi * row.hz * static_cast<double>(i) / row.rate));
+        }
+        std::vector<float> filtered(samples.size());
+        filter.filter(samples, filtered);
+        double in_power = 0.0;
+        double out_power = 0.0;
+        for (size_t i = samples.size() / 2; i < samples.size(); ++i) {
+            in_power += double{samples[i]} * samples[i];
+            out_power += double{filtered[i]} * filtered[i];
+        }
+        const double without_low_pair =
+            -20.0 * std::log10(row.hz * row.hz / ((row.hz * row.hz) + (20.6 * 20.6)));
+        EXPECT_NEAR(10.0 * std::log10(out_power / in_power), a_curve_db(row.hz) + without_low_pair,
+                    0.4);
+    }
+}
+
+// A silence after a tone settles the filter on exactly zero, never on a subnormal state
+TEST(VisualizerScale, SettleTheFilterOnZeroInSilence) {
+    sendspin::server::AWeightingFilter filter;
+    filter.set_rate(48000);
+    std::vector<float> block(256);
+    for (size_t i = 0; i < block.size(); ++i) {
+        block[i] =
+            static_cast<float>(std::sin(2.0 * std::numbers::pi * static_cast<double>(i) / 48.0));
+    }
+    filter.filter(block, block);
+    // Two seconds of silence, a block at a time as the analysis pushes it
+    for (int i = 0; i < 375; ++i) {
+        std::fill(block.begin(), block.end(), 0.0F);
+        filter.filter(block, block);
+    }
+    for (const float sample : block) {
+        ASSERT_EQ(sample, 0.0F) << sample;
+    }
+}
+
+// Below 4 kHz (to 1 Hz, which an input may declare) the filter passes samples through, finite, and
+// onsets stay onsets: a steady tone fires none, a rise fires one
+TEST(VisualizerScale, KeepOnsetsDefinedAtLowRates) {
+    for (const uint32_t rate : {1U, 100U, 1000U, 4000U}) {
+        SCOPED_TRACE(rate);
+        VisualizerAnalysis analysis({type::PEAK, 30, std::nullopt});
+        ASSERT_TRUE(analysis.set_rate(rate));
+        const size_t window = analysis.window();
+        const auto tone = [&](double amplitude) {
+            std::vector<float> samples(window);
+            for (size_t i = 0; i < window; ++i) {
+                samples[i] = static_cast<float>(
+                    amplitude * std::sin(2.0 * std::numbers::pi * static_cast<double>(i) / 8.0));
+            }
+            return samples;
+        };
+        sendspin::server::AWeightingFilter filter;
+        filter.set_rate(rate);
+        std::vector<float> filtered(window);
+        const std::vector<float> loud = tone(1.0);
+        filter.filter(loud, filtered);
+        for (size_t i = 0; i < window; ++i) {
+            ASSERT_TRUE(std::isfinite(filtered[i])) << filtered[i];
+            if (rate < 4000) {
+                EXPECT_EQ(filtered[i], loud[i]);
+            }
+        }
+        std::vector<uint8_t> bytes;
+        int64_t ts = 0;
+        for (int check = 0; check < 20; ++check, ts += 100000) {
+            analysis.push(tone(0.25));
+            analysis.analyze(ts, false, true, bytes);
+        }
+        EXPECT_TRUE(bytes.empty()) << bytes.size() << " bytes of peaks";
+        analysis.push(tone(1.0));
+        analysis.analyze(ts, false, true, bytes);
+        // One `peak` message: type 20, the timestamp, the strength
+        EXPECT_EQ(bytes.size(), 10U);
     }
 }
 
@@ -434,12 +543,7 @@ std::vector<float> sine(double hz, double amplitude, size_t count = WINDOW) {
 
 /// The uint16 value of level dB with the A-weighting at hz, computed here in double precision
 double expected_value(double level_db, double hz) {
-    const double f2 = hz * hz;
-    const double ra =
-        (12194.0 * 12194.0 * f2 * f2) /
-        ((f2 + (20.6 * 20.6)) * std::sqrt((f2 + (107.7 * 107.7)) * (f2 + (737.9 * 737.9))) *
-         (f2 + (12194.0 * 12194.0)));
-    const double db = level_db + 2.0 + (20.0 * std::log10(ra));
+    const double db = level_db + a_curve_db(hz);
     return std::clamp((db + 60.0) / 60.0, 0.0, 1.0) * 65535.0;
 }
 
@@ -489,7 +593,7 @@ protected:
         return made;
     }
 
-    static Decoded run(VisualizerAnalysis& analysis, const std::vector<float>& samples, int64_t ts,
+    static Decoded run(VisualizerAnalysis& analysis, std::span<const float> samples, int64_t ts,
                        bool periodic = true, bool onset = false) {
         analysis.push(samples);
         std::vector<uint8_t> bytes;
@@ -657,6 +761,93 @@ TEST_F(VisualizerFeatures, FireAPeakOnAnOnsetOnce) {
     EXPECT_FALSE(run(analysis, sine(BIN_CENTERED_HZ, 1.0), 3 * cell, false, true).peak);
     // A periodic instant alone checks no onset
     EXPECT_FALSE(run(analysis, sine(BIN_CENTERED_HZ, 1.0), 10 * cell, true, false).peak);
+}
+
+// An onset is a rise of the A-weighted energy: a tone added at 2 kHz fires one, the same tone at
+// 50 Hz, about 29 dB down the curve, does not even at four times the amplitude
+TEST_F(VisualizerFeatures, FireOnsetsByTheAWeightedEnergy) {
+    struct Row {
+        const char* name;
+        double hz;
+        double amplitude;
+        bool fires;
+    };
+    const std::vector<Row> rows = {
+        {"Control: a 2 kHz tone at the steady tone's amplitude", 2000.0, 0.25, true},
+        {"a 50 Hz tone at four times it", 50.0, 1.0, false},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        VisualizerAnalysis analysis = this->analysis({type::PEAK, 30, std::nullopt});
+        // A steady 1 kHz tone, then the tone added to it
+        std::vector<float> samples = sine(1000.0, 0.25, 2 * WINDOW);
+        const std::vector<float> added = sine(row.hz, row.amplitude, WINDOW);
+        for (size_t i = 0; i < WINDOW; ++i) {
+            samples[WINDOW + i] += added[i];
+        }
+        EXPECT_FALSE(run(analysis, std::span(samples).first(WINDOW), 0, false, true).peak);
+        const Decoded rise = run(analysis, std::span(samples).last(WINDOW), 1000000, false, true);
+        EXPECT_EQ(rise.peak.has_value(), row.fires);
+    }
+}
+
+// The onset check reads the newest window's A-weighted samples in order wherever the history's
+// ring starts: the same samples after a prefix of silence, which starts it elsewhere, fire the same
+// onset
+TEST_F(VisualizerFeatures, CheckOnsetsOnTheNewestSamplesInOrder) {
+    // A steady tone, then a window silent but for a louder burst in its newest quarter
+    std::vector<float> samples = sine(1000.0, 0.125, WINDOW);
+    samples.resize(2 * WINDOW, 0.0F);
+    const std::vector<float> burst = sine(1000.0, 1.0, WINDOW / 4);
+    std::copy(burst.begin(), burst.end(),
+              samples.end() - static_cast<std::ptrdiff_t>(burst.size()));
+    std::vector<std::optional<uint8_t>> strengths;
+    for (const size_t prefix : {size_t{0}, size_t{300}}) {
+        VisualizerAnalysis analysis = this->analysis({type::PEAK, 30, std::nullopt});
+        analysis.push(std::vector<float>(prefix, 0.0F));
+        EXPECT_FALSE(run(analysis, std::span(samples).first(WINDOW), 0, false, true).peak);
+        strengths.push_back(
+            run(analysis, std::span(samples).last(WINDOW), 1000000, false, true).peak);
+    }
+    ASSERT_TRUE(strengths[0]);
+    // Below the 255 a rise six times the threshold's gives, so a window misread would show
+    EXPECT_LT(*strengths[0], 255);
+    EXPECT_EQ(strengths[1], strengths[0]);
+}
+
+// A sample past full scale or not finite (an F32 input may carry either) leaves every message
+// defined, and once normal audio follows the features and onsets resume
+TEST_F(VisualizerFeatures, RecoverFromSamplesOutOfRange) {
+    struct Row {
+        const char* name;
+        float value;
+    };
+    const std::vector<Row> rows = {
+        {"NaN", std::numeric_limits<float>::quiet_NaN()},
+        {"+inf", std::numeric_limits<float>::infinity()},
+        {"-inf", -std::numeric_limits<float>::infinity()},
+        {"1e30", 1e30F},
+    };
+    const VisualizerConfig config{type::LOUDNESS | type::F_PEAK | type::SPECTRUM | type::PEAK, 30,
+                                  SpectrumConfig{8, SpectrumScale::LIN, 0, 4000}};
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        VisualizerAnalysis analysis = this->analysis(config);
+        int64_t ts = 0;
+        const Decoded bad = run(analysis, std::vector<float>(WINDOW, row.value), ts, true, true);
+        EXPECT_TRUE(bad.loudness && bad.f_peak && bad.spectrum);
+        // A quiet tone long enough to settle the onset average, then a rise
+        for (int check = 0; check < 10; ++check) {
+            ts += 100000;
+            run(analysis, sine(BIN_CENTERED_HZ, 0.05), ts, true, true);
+        }
+        ts += 100000;
+        const Decoded rise = run(analysis, sine(BIN_CENTERED_HZ, 0.5), ts, true, true);
+        ASSERT_TRUE(rise.loudness && rise.f_peak);
+        EXPECT_GT(*rise.loudness, 0);
+        EXPECT_EQ(rise.f_peak->first, static_cast<uint16_t>(std::round(BIN_CENTERED_HZ)));
+        EXPECT_TRUE(rise.peak);
+    }
 }
 
 // spec roles/visualizer/v1.md "Visualization Data (Binary)": `[type][ts:8 big-endian][data]`, in

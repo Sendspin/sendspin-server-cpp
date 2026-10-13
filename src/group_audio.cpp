@@ -1129,14 +1129,21 @@ bool GroupAudio::feed_analysis(Analysis& analysis, const JobView& view, uint64_t
         }
         const std::span<float> floats(this->analysis_floats_.data(), frames * channels);
         to_float(this->input_, format->sample_format, floats);
-        for (size_t i = 0; i < frames; ++i) {
-            float sum = 0.0F;
-            for (uint32_t channel = 0; channel < channels; ++channel) {
-                sum += floats[(i * channels) + channel];
+        if (channels == 1) {
+            analysis.analysis->push(floats);
+        } else {
+            // A multiply where a divide per frame costs more on a small FPU; exact when channels is
+            // a power of two
+            const float scale = 1.0F / static_cast<float>(channels);
+            for (size_t i = 0; i < frames; ++i) {
+                float sum = 0.0F;
+                for (uint32_t channel = 0; channel < channels; ++channel) {
+                    sum += floats[(i * channels) + channel];
+                }
+                this->analysis_mono_[i] = sum * scale;
             }
-            this->analysis_mono_[i] = sum / static_cast<float>(channels);
+            analysis.analysis->push(std::span(this->analysis_mono_.data(), frames));
         }
-        analysis.analysis->push(std::span(this->analysis_mono_.data(), frames));
         analysis.fed = limit;
     }
     return true;
