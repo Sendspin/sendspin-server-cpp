@@ -212,7 +212,10 @@ private:
             return false;
         }
         const int flags = fcntl(fd, F_GETFL, 0);
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            ::close(fd);
+            return false;
+        }
         bool open = false;
         if (connect(fd, address.ai_addr, address.ai_addrlen) == 0 || errno == EINPROGRESS) {
             const int ready = this->await(fd, true, now_us() + this->settings_.connect_timeout_us);
