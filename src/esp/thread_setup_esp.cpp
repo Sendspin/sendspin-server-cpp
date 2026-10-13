@@ -105,8 +105,9 @@ esp_pthread_cfg_t config_of(ThreadRole role) {
         case ThreadRole::LINK_READER:
             // Above the writers and the core task, so a message is stamped as soon as it is read;
             // the stack holds the dial's resolve (getaddrinfo), connect and upgrade (Sha1), then
-            // the frames' reads and a protocol failure's close frame (its masked copy and a
-            // ChaCha20 block); about 1.8 KB stayed free under eight dialed clients' load
+            // the frames' reads and a close frame it sends (a peer's echoed or a protocol
+            // failure's: its masked copy and a ChaCha20 block); about 1.8 KB stayed free under
+            // eight dialed clients' load
             cfg.thread_name = "ss_ws_rx";
             cfg.stack_size = 3584;
             cfg.prio = 12;
