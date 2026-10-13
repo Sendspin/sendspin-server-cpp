@@ -502,6 +502,11 @@ TEST(TransportUrl, ParsesWebSocketUrls) {
         // An address that is empty or holds a character besides hex digits, ':' and '.'
         {"ws://[%en0]/p", false, "", 0, ""},
         {"ws://[fe80::g]/p", false, "", 0, ""},
+        // RFC 3986 section 3.2.2: a bracketed address is IPv6, in an RFC 4291 section 2.2 form
+        {"ws://[1]/p", false, "", 0, ""},
+        {"ws://[::::]/p", false, "", 0, ""},
+        {"ws://[1.2.3.4]/p", false, "", 0, ""},
+        {"ws://[1.2.3.4%en0]/p", false, "", 0, ""},
         {"ws://host/a\r\nX-Injected: 1", false, "", 0, ""},
         {"ws://host/a\nb", false, "", 0, ""},
         {"ws://host/a b", false, "", 0, ""},

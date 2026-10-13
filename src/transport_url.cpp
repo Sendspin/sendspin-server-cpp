@@ -15,8 +15,12 @@
 // parse_ws_url(), shared by every transport implementation
 
 #include "transport.h"
+#include <arpa/inet.h>
+#include <sys/socket.h>
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -29,6 +33,8 @@ namespace sendspin::server {
 namespace {
 
 constexpr uint16_t DEFAULT_WS_PORT = 80;
+/// RFC 4291 section 2: 128 bits
+constexpr size_t IPV6_ADDRESS_BYTES = 16;
 
 bool is_hex_digit(char c) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
@@ -68,15 +74,21 @@ bool only_url_characters(std::string_view text, std::string_view extra) {
 std::optional<std::string> ip_literal_host(std::string_view literal) {
     const size_t percent = literal.find('%');
     const std::string_view address = literal.substr(0, percent);
-    const bool address_valid =
-        !address.empty() && std::all_of(address.begin(), address.end(), [](char c) {
-            return is_hex_digit(c) || c == ':' || c == '.';
-        });
-    if (!address_valid) {
+    // The characters first: a parser that stops at an unexpected one would accept a prefix
+    const bool address_characters = std::all_of(address.begin(), address.end(), [](char c) {
+        return is_hex_digit(c) || c == ':' || c == '.';
+    });
+    if (!address_characters) {
+        return std::nullopt;
+    }
+    // An IPv6 address in an RFC 4291 section 2.2 text form
+    std::string host(address);
+    std::array<uint8_t, IPV6_ADDRESS_BYTES> bytes{};
+    if (inet_pton(AF_INET6, host.c_str(), bytes.data()) != 1) {
         return std::nullopt;
     }
     if (percent == std::string_view::npos) {
-        return std::string(address);
+        return host;
     }
     std::string_view zone = literal.substr(percent + 1);
     constexpr std::string_view ENCODED_PERCENT = "25";
@@ -87,7 +99,6 @@ std::optional<std::string> ip_literal_host(std::string_view literal) {
     if (zone.empty() || !std::all_of(zone.begin(), zone.end(), is_unreserved)) {
         return std::nullopt;
     }
-    std::string host(address);
     host += '%';
     host += zone;
     return host;
