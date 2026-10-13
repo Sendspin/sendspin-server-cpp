@@ -21,6 +21,7 @@
 #pragma once
 
 #include "fft.h"
+#include "memory.h"
 #include "visualizer.h"
 
 #include <array>
@@ -198,15 +199,19 @@ private:
     uint32_t rate_{0};
     size_t window_{0};
     std::unique_ptr<RealFft> fft_;
+    /// The window-sized buffers, in PSRAM (memory.h): four analyses' worth would crowd internal
+    /// RAM, where the FFT's own buffers go
+    template <class T>
+    using WindowVector = std::vector<T, ExternalAllocator<T>>;
     /// The first half of the symmetric Hann window, the A-weighting power gains per FFT bin, and
     /// each FFT bin's display bin (-1 for none)
-    std::vector<float> hann_;
-    std::vector<float> gains_;
-    std::vector<int32_t> display_bin_;
+    WindowVector<float> hann_;
+    WindowVector<float> gains_;
+    WindowVector<int32_t> display_bin_;
     /// The newest window_ samples, for the periodic types, and the same samples A-weighted, for
     /// `peak`: rings whose oldest is at history_at_, each empty when its types are not configured
-    std::vector<float> history_;
-    std::vector<float> weighted_history_;
+    WindowVector<float> history_;
+    WindowVector<float> weighted_history_;
     size_t history_at_{0};
     AWeightingFilter a_weighting_;
     /// The A-weighted power per FFT bin, in the FFT's storage, and their sum
