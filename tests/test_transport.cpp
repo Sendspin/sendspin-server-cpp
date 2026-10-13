@@ -1319,7 +1319,6 @@ TEST_F(TransportTest, WritesOnlyWhenRoomWasReportedAndNoWriteIsInFlight) {
 }
 
 TEST_F(TransportTest, WriteStallClosesOnlyAPeerThatStopsReading) {
-    this->settings.write_stall_us = 500000;
     struct Row {
         const char* name;
         bool peer_reads;
@@ -1344,6 +1343,9 @@ TEST_F(TransportTest, WriteStallClosesOnlyAPeerThatStopsReading) {
     };
     for (const Row& row : rows) {
         SCOPED_TRACE(row.name);
+        // A reading peer's thread can be starved past a short timer on a loaded machine; that a
+        // slow reader outlives it is AHealthyPeerOutlivesTheStallTimeout's to show
+        this->settings.write_stall_us = row.peer_reads ? 30000000 : 500000;
         this->settings.notsent_lowat_bytes = row.lowat;
         this->accepted.clear();
         auto listener = this->listen();
