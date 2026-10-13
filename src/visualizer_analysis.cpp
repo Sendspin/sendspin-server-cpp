@@ -52,6 +52,27 @@ float mel_to_hz(float mel) {
     return 700.0F * (std::pow(10.0F, mel / 2595.0F) - 1.0F);
 }
 
+/// Calls visit(i, weight, sample) for the window's positions i in order, from a ring of one window
+/// whose oldest sample is at oldest, each with the symmetric window's weight from the table of its
+/// first half
+template <typename Visit>
+void visit_window(std::span<const float> ring, size_t oldest, std::span<const float> half_window,
+                  Visit&& visit) {
+    const size_t window = ring.size();
+    const size_t half = half_window.size();
+    // Positions [from, to), their samples from samples on
+    const auto segment = [&](const float* samples, size_t from, size_t to) {
+        for (size_t i = from; i < std::min(to, half); ++i) {
+            visit(i, half_window[i], samples[i - from]);
+        }
+        for (size_t i = std::max(from, half); i < to; ++i) {
+            visit(i, half_window[window - 1 - i], samples[i - from]);
+        }
+    };
+    segment(ring.data() + oldest, 0, window - oldest);
+    segment(ring.data(), window - oldest, window);
+}
+
 void put_u16(std::vector<uint8_t>& out, uint16_t value) {
     out.push_back(static_cast<uint8_t>(value >> 8));
     out.push_back(static_cast<uint8_t>(value & 0xFF));
@@ -260,18 +281,10 @@ void VisualizerAnalysis::analyze(int64_t ts_us, bool periodic, bool onset,
 }
 
 void VisualizerAnalysis::transform() {
-    const size_t window = this->window_;
-    const size_t half = window / 2;
     const std::span<float> input = this->fft_->input();
-    // The ring from its oldest sample into the FFT's input, then windowed, each half by the
-    // symmetric window's half
-    const auto oldest = this->history_.begin() + static_cast<std::ptrdiff_t>(this->history_at_);
-    const auto copied = std::copy(oldest, this->history_.end(), input.begin());
-    std::copy(this->history_.begin(), oldest, copied);
-    for (size_t i = 0; i < half; ++i) {
-        input[i] *= this->hann_[i];
-        input[window - 1 - i] *= this->hann_[i];
-    }
+    visit_window(
+        this->history_, this->history_at_, this->hann_,
+        [&](size_t position, float weight, float sample) { input[position] = sample * weight; });
     this->weighted_ = this->fft_->power();
     // DC carries no frequency to show
     this->weighted_[0] = 0.0F;
