@@ -21,8 +21,10 @@
 #pragma once
 
 #include "fft.h"
+#include "memory.h"
 #include "visualizer.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -60,6 +62,58 @@ float a_weighting_db(float hz);
 /// @param edges room for n_disp_bins + 1 values
 void spectrum_edges(const SpectrumConfig& spectrum, std::span<float> edges);
 
+/// @brief The A-weighting as the periodic types' FFT bins apply it to a window, as a time-domain
+/// filter at one rate, single precision: the curve's poles at 107.7 and 737.9 Hz by the bilinear
+/// transform, and its 12194 Hz pole pair matched in z over one zero fitted near the Nyquist
+/// frequency. The curve's 20.6 Hz pole pair is left out, as the window's leakage lifts the bins'
+/// low end about as much; above 20 kHz it weights somewhat more than the curve. Its gain is the
+/// curve's at 1 kHz. Below 4 kHz, too low a rate for the curve, it passes samples through
+/// unweighted.
+class AWeightingFilter {
+public:
+    /// @brief The sections for input at rate, the state zero; computed in double, so only when the
+    /// rate changes
+    void set_rate(uint32_t rate);
+
+    /// @brief Zeros the state
+    void reset();
+
+    /// @brief Filters in into out, as many samples, from the state the last sample filtered left;
+    /// out may be in. A state that decays below a magnitude no sample reaches is zeroed after each
+    /// call, so silence settles on exactly zero.
+    void filter(std::span<const float> in, std::span<float> out);
+
+private:
+    /// `(b0 + b1 z^-1 + b2 z^-2) / (1 + a1 z^-1 + a2 z^-2)` in direct form I: its last two inputs
+    /// and outputs
+    struct Section {
+        float b0{0.0F};
+        float b1{0.0F};
+        float b2{0.0F};
+        float a1{0.0F};
+        float a2{0.0F};
+        float x1{0.0F};
+        float x2{0.0F};
+        float y1{0.0F};
+        float y2{0.0F};
+
+        float step(float sample) {
+            // The last output's feedback enters last: the only term on the recursion's path
+            const float feed = ((this->b0 * sample) + (this->b1 * this->x1)) +
+                               ((this->b2 * this->x2) - (this->a2 * this->y2));
+            const float filtered = feed - (this->a1 * this->y1);
+            this->x2 = this->x1;
+            this->x1 = sample;
+            this->y2 = this->y1;
+            this->y1 = filtered;
+            return filtered;
+        }
+    };
+
+    /// The high-pass section, then the low-pass one
+    std::array<Section, 2> sections_{};
+};
+
 /// @brief The display bin holding hz: the i with `edges[i] <= hz < edges[i + 1]`; -1 outside
 /// [edges.front(), edges.back())
 int32_t spectrum_bin(float hz, std::span<const float> edges);
@@ -69,17 +123,19 @@ int32_t spectrum_bin(float hz, std::span<const float> edges);
 /// most one, rate being at most MAX_VISUALIZER_RATE
 std::optional<int64_t> periodic_instant_us(int64_t cell, uint32_t rate);
 
-/// @brief One visualizer stream configuration's analysis: a window of mono history, the FFT, the
-/// tables for the input's rate and the smoothing state. Its buffers are allocated when it is built
-/// and when the input's rate changes (set_rate()); push() and analyze() allocate nothing but the
-/// messages they append. Not thread-safe.
+/// @brief One visualizer stream configuration's analysis: a window of mono history and the FFT for
+/// its periodic types, a window of A-weighted history for `peak`, the tables for the input's rate
+/// and the smoothing state. Its buffers are allocated when it is built and when the input's rate
+/// changes (set_rate()); push() and analyze() allocate nothing but the messages they append. Not
+/// thread-safe.
 ///
-/// At each instant, the window of the analysis_window() samples before it (Hann-windowed, DC
-/// dropped) gives, A-weighted: `loudness`, the RMS against a full-scale sine's, smoothed; `f_peak`,
-/// the strongest bin with parabolic interpolation, kept on its bin while another is under
-/// F_PEAK_SWITCH_RATIO above it; `spectrum`, each display bin's RMS against a full-scale sine's
-/// peak, smoothed; and `peak`, an onset when the energy passes ONSET_RATIO times its running
-/// average, at most one per ONSET_GAP_US.
+/// At each instant, the window of the analysis_window() samples before it (Hann-windowed) gives,
+/// A-weighted: `loudness`, the RMS against a full-scale sine's, smoothed; `f_peak`, the strongest
+/// bin with parabolic interpolation, kept on its bin while another is under F_PEAK_SWITCH_RATIO
+/// above it; `spectrum`, each display bin's RMS against a full-scale sine's peak, smoothed; these
+/// three from the FFT's bins, DC dropped. `peak` is an onset when the window's energy, A-weighted
+/// by AWeightingFilter in time, passes ONSET_RATIO times its running average, at most one per
+/// ONSET_GAP_US: an onset check needs no FFT.
 class VisualizerAnalysis {
 public:
     /// Smoothing factors, the weight of the new value
@@ -98,8 +154,8 @@ public:
         return this->config_;
     }
 
-    /// @brief Builds the FFT and the tables for input at rate, the history zeros; allocates, so
-    /// only when the rate changes
+    /// @brief Builds the FFT (for periodic types), the filter (for `peak`) and the tables for input
+    /// at rate, the history zeros; allocates, so only when the rate changes
     /// @return false when the FFT cannot be built
     bool set_rate(uint32_t rate);
 
@@ -116,13 +172,14 @@ public:
     /// @brief A new epoch: the history zeros, the smoothing and onset state cleared
     void reset();
 
-    /// @brief Appends mono samples, the newest last
+    /// @brief Appends mono samples, the newest last: one past full scale clipped to it, one not
+    /// finite taken as silence, so no input leaves the analysis undefined
     void push(std::span<const float> mono);
 
     /// @brief Analyzes the window ending at the newest sample pushed and appends its messages to
     /// out, each `[type][ts][data]` (spec roles/visualizer/v1.md "Visualization Data (Binary)"),
     /// in type order
-    /// @param periodic the configuration's periodic types are due
+    /// @param periodic the configuration's periodic types are due, which transforms the window
     /// @param onset an onset check is due, which appends a `peak` message when one fires
     void analyze(int64_t ts_us, bool periodic, bool onset, std::vector<uint8_t>& out);
 
@@ -135,20 +192,29 @@ private:
     void spectrum();
     /// The onset strength, from 1 to 255, when one fires at ts_us
     std::optional<uint8_t> onset(int64_t ts_us);
+    /// The Hann-windowed energy of the A-weighted window
+    float onset_energy() const;
 
     VisualizerConfig config_;
     uint32_t bins_{0};
     uint32_t rate_{0};
     size_t window_{0};
     std::unique_ptr<RealFft> fft_;
+    /// The window-sized buffers, in PSRAM (memory.h): four analyses' worth would crowd internal
+    /// RAM
+    template <class T>
+    using WindowVector = std::vector<T, ExternalAllocator<T>>;
     /// The first half of the symmetric Hann window, the A-weighting power gains per FFT bin, and
     /// each FFT bin's display bin (-1 for none)
-    std::vector<float> hann_;
-    std::vector<float> gains_;
-    std::vector<int32_t> display_bin_;
-    /// The newest window_ samples, a ring whose oldest is at history_at_
-    std::vector<float> history_;
+    WindowVector<float> hann_;
+    WindowVector<float> gains_;
+    WindowVector<int32_t> display_bin_;
+    /// The newest window_ samples, for the periodic types, and the same samples A-weighted, for
+    /// `peak`: rings whose oldest is at history_at_, each empty when its types are not configured
+    WindowVector<float> history_;
+    WindowVector<float> weighted_history_;
     size_t history_at_{0};
+    AWeightingFilter a_weighting_;
     /// The A-weighted power per FFT bin, in the FFT's storage, and their sum
     std::span<float> weighted_;
     float power_{0.0F};
