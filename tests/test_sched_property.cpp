@@ -674,6 +674,7 @@ void run_live_seed(uint64_t seed, LiveCuts& cuts) {
     if (ppm <= 0) {
         EXPECT_LE(shifts, stalls + raises);
     }
+    // Coarse: a run whose clock keeps time or runs slow may also cut after a stall's shift
     if (ppm < 0) {
         cuts.fast_clock += cut;
     } else if (leaves > 0) {
