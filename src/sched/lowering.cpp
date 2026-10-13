@@ -40,6 +40,22 @@ int64_t observe_live_write(LiveLowering& lowering, int64_t excess_us, int64_t no
     return lowering.debt_us;
 }
 
+LoweredWrite lower_live_write(LiveLowering& lowering, uint64_t frames, uint32_t rate,
+                              int64_t head_us, int64_t now_us, int64_t group_lead_next_us,
+                              int64_t group_lead_eff_us) {
+    const int64_t excess = head_us - now_us - group_lead_next_us;
+    const int64_t debt = observe_live_write(lowering, excess, now_us);
+    const auto cut = std::min<uint64_t>(
+        frames, static_cast<uint64_t>(std::max<int64_t>(debt, 0) * rate / US_PER_SECOND));
+    if (cut == 0) {
+        return {frames, group_lead_eff_us};
+    }
+    const auto cut_us = static_cast<int64_t>(cut) * US_PER_SECOND / rate;
+    record_cut(lowering, cut_us);
+    // The debt never passes the excess, so neither does the cut: never below `G_next`
+    return {frames - cut, std::min(group_lead_eff_us, group_lead_next_us + excess - cut_us)};
+}
+
 void record_cut(LiveLowering& lowering, int64_t cut_us) {
     lowering.cut_us += cut_us;
     lowering.debt_us = std::max<int64_t>(lowering.debt_us - cut_us, 0);

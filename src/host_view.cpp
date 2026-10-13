@@ -147,8 +147,12 @@ WriteResult HostView::write(const void* pcm, size_t frames) {
             sched::decide_write(this->admission_input(), this->anchor_, frames, now);
         uint64_t taken = decision.frames;
         if (this->kind_ == InputKind::LIVE && this->run_.run == sched::RunState::PLAYING) {
-            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): set while playing
-            taken = this->lower_latency(taken, *decision.head_us, now);
+            const sched::LoweredWrite lowered = sched::lower_live_write(
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): set while playing
+                this->lowering_, taken, this->format_.sample_rate, *decision.head_us, now,
+                this->params_.group_lead_us, this->group_lead_eff_us_);
+            taken = lowered.taken;
+            this->group_lead_eff_us_ = lowered.group_lead_eff_us;
         }
         if (taken > 0) {
             // The write that begins a run or a pending epoch anchors it
@@ -716,26 +720,6 @@ void HostView::anchor_at(int64_t now_us) {
     this->shift_index_.reset();
     this->rebase_latency_us_ = 0;
     this->lowering_ = {};
-}
-
-uint64_t HostView::lower_latency(uint64_t frames, int64_t head_us, int64_t now_us) {
-    const int64_t excess = head_us - now_us - this->params_.group_lead_us;
-    const int64_t debt = sched::observe_live_write(this->lowering_, excess, now_us);
-    const uint32_t rate = this->format_.sample_rate;
-    const auto cut = std::min<uint64_t>(
-        frames, static_cast<uint64_t>(std::max<int64_t>(debt, 0) * rate / sched::US_PER_SECOND));
-    if (cut == 0) {
-        return frames;
-    }
-    const auto cut_us = static_cast<int64_t>(cut) * sched::US_PER_SECOND / rate;
-    sched::record_cut(this->lowering_, cut_us);
-    // The rebase threshold falls with the latency, to where the cut leaves the writes that follow
-    // and never below the lead every player needs, so the next frame does not shift the timeline
-    // back up
-    const int64_t lead = this->params_.group_lead_us;
-    this->group_lead_eff_us_ =
-        std::max(lead, std::min(this->group_lead_eff_us_, lead + excess - cut_us));
-    return frames - cut;
 }
 
 void HostView::resolve_empty_drain(AfterUnlock& after) {

@@ -285,6 +285,7 @@ TEST(LiveSourceSink, CorrectsOnlyASourceWhoseClockDrifts) {
         }
         const size_t begun = first_difference(rig.staged, written);
         ASSERT_LT(begun + 200, rig.staged.size());
+        ASSERT_LT(begun + 201, written.size());
         ASSERT_GT(begun, 0U);
         for (size_t i = begun; i < begun + 200; ++i) {
             SCOPED_TRACE(i);

@@ -273,11 +273,6 @@ private:
     uint64_t ready_samples() const;
     /// Anchors the current epoch at p0_ with `T0 = now + G_next`, reusing the anchor's storage
     void anchor_at(int64_t now_us);
-    /// A playing live input's write, of which admission took frames and found the head at head_us:
-    /// observes the write's excess (sched::observe_live_write()) and cuts what the epoch owes from
-    /// the end of the frames taken, lowering `G_eff` with the cut
-    /// @return the frames to take
-    uint64_t lower_latency(uint64_t frames, int64_t head_us, int64_t now_us);
     /// Fills anchor with T0 at t0_us, from p0 through the staged segments
     void build_anchor(sched::Anchor& anchor, int64_t t0_us, uint64_t p0) const;
     /// The staged segment holding position: the last starting at or before it

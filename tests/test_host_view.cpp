@@ -53,8 +53,7 @@ constexpr int64_t LEAD_US = 300000;
 constexpr int64_t AHEAD_US = 1000000;
 constexpr uint64_t AHEAD_FRAMES = RATE;
 constexpr int64_t LIVE_AHEAD_US = 200000;
-/// A live group lead's fall, and a cell of frames
-constexpr int64_t FALL_US = 200000;
+/// A cell of frames
 constexpr uint64_t CELL = RATE / 50;
 
 class HostViewTest : public testing::Test {
@@ -81,17 +80,6 @@ protected:
                                                 GroupParams{LEAD_US, 0, LIVE_AHEAD_US},
                                                 this->dispatcher, &this->recorder);
         return *this->view;
-    }
-
-    /// The live input anchored at a 300 ms lead, then the lead lowered by FALL_US, with a window of
-    /// its writes already behind it (HostView::lowering_), so the next write closes the window and
-    /// its excess, the fall plus the cell written, is owed at once. A write-ahead of a second lets
-    /// one write hold the whole cut.
-    void begin_owing() {
-        ASSERT_EQ(this->write(CELL).frames, CELL);
-        this->view->set_group_params({LEAD_US - FALL_US, 0, AHEAD_US});
-        this->view->lowering_ = {now_us() - sendspin::server::sched::LOWERING_WINDOW_US,
-                                 std::numeric_limits<int64_t>::max(), 0, 0};
     }
 
     WriteResult write(uint64_t frames) {
@@ -198,36 +186,86 @@ TEST_F(HostViewTest, AdmitsAStalledLiveInputAsIfRebased) {
     EXPECT_EQ(result.state, InputState::FULL);
 }
 
-// A live input whose group lead fell lands every write later than a fresh anchor would place it.
-// Once a window of writes kept that excess, it cuts it from the end of the next write, to the frame
-// and never more, and the effective lead falls to where the cut leaves the writes that follow, the
-// lead its players need, so the next frame is not rebased back up. Positions count only what was
-// taken.
-TEST_F(HostViewTest, LowersALiveInputsLatencyOnceItsLeadFalls) {
-    constexpr uint64_t FRAME_US = 1000000 / RATE;
-    HostView& view = this->make_live();
-    const int64_t start = now_us();
-    ASSERT_NO_FATAL_FAILURE(this->begin_owing());
-    const WriteResult result = this->write(RATE / 2);
-    const int64_t spent = now_us() - start;
-    EXPECT_EQ(result.state, InputState::OPEN);
-    const auto cut_us = static_cast<int64_t>((RATE / 2 - result.frames) * 1000000 / RATE);
-    const int64_t excess = FALL_US + 20000;
-    EXPECT_LE(cut_us, excess);
-    // Short of the excess by the time the write took to come, and a frame of rounding
-    EXPECT_GE(cut_us, excess - spent - FRAME_US) << spent;
-    const int64_t lead_eff = view.job_view().group_lead_eff_us;
-    EXPECT_GE(lead_eff, LEAD_US - FALL_US);
-    EXPECT_LE(lead_eff, LEAD_US - FALL_US + FRAME_US);
-    EXPECT_EQ(view.job_view().head, CELL + result.frames);
+/// A live input anchored with a lead of LEAD_US and A_US of input, its lead then fallen by FALL_US,
+/// and a write of C_US e_us after the anchor that closes a window whose least excess, net of cuts,
+/// was least_us: the frames cut from the write, and `G_eff` after it, `G_next` plus the write's
+/// excess less the cut (LEAD_US when nothing is cut)
+constexpr int64_t FALL_US = 200000;
+constexpr int64_t A_US = 60000;
+constexpr int64_t C_US = 140000;
+
+struct Lowered {
+    int64_t cut_frames;
+    int64_t lead_eff_us;
+};
+
+Lowered lowered(int64_t e_us, int64_t least_us) {
+    const int64_t next = LEAD_US - FALL_US;
+    const int64_t excess = A_US + FALL_US - e_us;
+    // The window's least, the closing write's included, is cut once it reaches the minimum
+    const int64_t least = std::min(least_us, excess);
+    const int64_t debt = least >= sendspin::server::sched::LOWERING_MIN_US ? least : 0;
+    const auto frames = std::min<int64_t>(C_US * RATE / 1000000, debt * RATE / 1000000);
+    if (frames == 0) {
+        return {0, LEAD_US};
+    }
+    const int64_t cut_us = frames * 1000000 / RATE;
+    return {frames, std::max(next, std::min(LEAD_US, next + excess - cut_us))};
 }
 
-// What a live epoch owes ends with it: a flush begins a new epoch at a fresh lead, whose writes the
-// input takes whole
+// A live input whose group lead fell lands every write later than a fresh anchor would place it.
+// Once a window of writes kept that excess, the write that closes it is cut from its end, up to the
+// window's least excess, and the effective lead falls to where the cut leaves the writes that
+// follow: never below the lead its players need, never above where it was. Positions count only
+// what was taken. The write-ahead is W_live's, so admission takes the whole write; the bounds take
+// the thread's time between the anchor and the write from the clock, however late it ran.
+TEST_F(HostViewTest, LowersALiveInputsLatencyOnceItsLeadFalls) {
+    // A frame's rounding of the cut, at 48 kHz
+    constexpr int64_t ROUNDING_US = (1000000 + RATE - 1) / RATE + 1;
+    struct Row {
+        const char* name;
+        int64_t least_us;
+    };
+    const Row rows[] = {
+        // The whole write is cut, and G_eff falls to G_next plus what it owed past it
+        {"The window owes the whole excess", std::numeric_limits<int64_t>::max()},
+        // 40 ms cut leaves this write 180 ms past G_next, above where G_eff stands: G_eff stays
+        {"The window owes less than this write's excess", sendspin::server::sched::LOWERING_MIN_US},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        HostView& view = this->make_live();
+        ASSERT_EQ(this->write(A_US * RATE / 1000000).frames, A_US * RATE / 1000000);
+        const int64_t anchored = view.time_of(0) - LEAD_US;
+        view.set_group_params({LEAD_US - FALL_US, 0, LIVE_AHEAD_US});
+        // A window of writes is behind the input, its least excess, counted net of cuts, the row's
+        view.lowering_ = {now_us() - sendspin::server::sched::LOWERING_WINDOW_US, row.least_us, 0,
+                          0};
+        const int64_t before = now_us();
+        const WriteResult result = this->write(C_US * RATE / 1000000);
+        const int64_t after = now_us();
+        EXPECT_EQ(result.state, InputState::OPEN);
+        // The later the write, the less it owes: what it cut and G_eff after it lie between their
+        // values at the clock's readings around it
+        const Lowered late = lowered(after - anchored, row.least_us);
+        const Lowered early = lowered(before - anchored, row.least_us);
+        const auto cut = static_cast<int64_t>(C_US * RATE / 1000000 - result.frames);
+        EXPECT_GE(cut, late.cut_frames - 1);
+        EXPECT_LE(cut, early.cut_frames + 1);
+        const int64_t lead_eff = view.job_view().group_lead_eff_us;
+        EXPECT_GE(lead_eff, late.lead_eff_us - ROUNDING_US);
+        EXPECT_LE(lead_eff, early.lead_eff_us + ROUNDING_US);
+        EXPECT_EQ(view.job_view().head, (A_US * RATE / 1000000) + result.frames);
+    }
+}
+
+// What a live epoch owes ends with it: the epoch a flush begins, and its writes, owe nothing of
+// the one before. Owed a second, the old epoch's debt would cut the new epoch's writes up to their
+// excess.
 TEST_F(HostViewTest, EndsALiveInputsLoweringWithItsEpoch) {
     HostView& view = this->make_live();
-    ASSERT_NO_FATAL_FAILURE(this->begin_owing());
-    ASSERT_EQ(this->write(CELL).frames, 0U);
+    ASSERT_EQ(this->write(CELL).frames, CELL);
+    view.lowering_.debt_us = 1000000;
     view.flush();
     ASSERT_EQ(this->write(CELL).frames, CELL);
     EXPECT_EQ(this->write(CELL).frames, CELL);

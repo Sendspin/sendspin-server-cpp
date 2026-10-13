@@ -2002,7 +2002,9 @@ TEST(ServerPlayersLive, LowerTheGroupLeadOnceAHighLeadJoinerLeaves) {
     const Player& first = s.add(formats);
     const std::shared_ptr<GroupInput> input = s.open_live();
     ASSERT_TRUE(input);
-    const Segment segment{0, 60 * RATE};
+    // Enough for the join, the leave, two windows and the second past the cut; a cut that never
+    // comes ends the feed and fails the test below
+    const Segment segment{0, 15 * RATE};
     std::optional<uint32_t> refused_at;
     std::thread host([&] {
         feed_live(*input, signal, segment, {}, [&](uint32_t written, uint32_t refused) {
@@ -2041,8 +2043,9 @@ TEST(ServerPlayersLive, LowerTheGroupLeadOnceAHighLeadJoinerLeaves) {
         }
     }
     EXPECT_GT(cut_us, 0);
-    // Only a shift raises the latency past a fresh anchor's, so a cut never passes the shifts
-    EXPECT_LE(cut_us, shifted_us);
+    // Only a shift raises the latency past a fresh anchor's, so a cut never passes the shifts, but
+    // for the anchoring write's own lateness, two blocks at most
+    EXPECT_LE(cut_us, shifted_us + (2 * int64_t{LIVE_BLOCK} * 1000000 / RATE));
 }
 
 // The host stalls for half a second. When its writes resume, the next frame's lead is far under

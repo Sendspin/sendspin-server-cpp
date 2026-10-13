@@ -494,16 +494,23 @@ void run_grid_seed(uint64_t seed) {
 /// The blocks a live run writes: a minute of 10 ms blocks
 constexpr int64_t LIVE_BLOCKS = 6000;
 
+/// The frames the live runs cut to lower the latency: in runs whose source's clock runs fast, and
+/// in the others where a member left
+struct LiveCuts {
+    uint64_t fast_clock{0};
+    uint64_t left{0};
+};
+
 /// One live run: a source delivers blocks in real time, or from a clock running slow or fast, each
 /// written late by up to the declared jitter and now and then after a stall, the blocks it held
 /// back dropped; now and then a joiner raises the group lead, or one leaves and lowers it. Each
-/// write first lowers the latency as the host view does (lowering.h), cutting what the epoch owes
-/// from its end and `G_eff` with it. Each frame is produced as soon as its input is staged (no
-/// resampler, so no lookahead), its rebase decided first. One anchor is folded
-/// below the cell a cell behind the position playing, as the host view folds its own, one below the
-/// last cell begun, as core folds its own, and one never.
-/// @param cut adds the frames cut to lower the latency
-void run_live_seed(uint64_t seed, uint64_t& cut) {
+/// write is lowered as the host view lowers it (sched::lower_live_write()), cutting what the epoch
+/// owes from its end and lowering `G_eff` with it. Each frame is produced as soon as its input is
+/// staged (no resampler, so no lookahead), its rebase decided first. One anchor is folded below the
+/// cell a cell behind the position playing, as the host view folds its own, one below the last cell
+/// begun, as core folds its own, and one never.
+/// @param cuts adds the frames this run cut
+void run_live_seed(uint64_t seed, LiveCuts& cuts) {
     std::mt19937_64 rng(seed);
     auto uniform = [&rng](int64_t low, int64_t high) {
         return low + static_cast<int64_t>(rng() % static_cast<uint64_t>(high - low + 1));
@@ -544,7 +551,9 @@ void run_live_seed(uint64_t seed, uint64_t& cut) {
     std::optional<int64_t> last_ts;
     int stalls = 0;
     int raises = 0;
+    int leaves = 0;
     int shifts = 0;
+    uint64_t cut = 0;
     for (int64_t i = 0; i < LIVE_BLOCKS; ++i) {
         const int64_t source_at = MS + (i * block_us) + (i * block_us * ppm / sched::US_PER_SECOND);
         int64_t late = uniform(0, jitter);
@@ -565,14 +574,15 @@ void run_live_seed(uint64_t seed, uint64_t& cut) {
             folded = full;
             core = full;
         } else if (uniform(0, 499) == 0) {
-            // A joiner raises G_eff within the epoch
-            const int64_t raise = uniform(10, 300) * MS;
-            params.group_lead_us += raise;
-            lead_next += raise;
+            // A joiner raises G_next, and with it G_eff within the epoch
+            // (HostView::set_group_params())
+            lead_next += uniform(10, 300) * MS;
+            params.group_lead_us = std::max(params.group_lead_us, lead_next);
             ++raises;
         } else if (uniform(0, 499) == 0) {
             // A high-lead member leaves: G_next falls, G_eff stays until the lowering cuts
             lead_next = std::max(lead_least, lead_next - (uniform(10, 300) * MS));
+            ++leaves;
         }
         AdmissionInput in;
         in.kind = InputKind::LIVE;
@@ -604,19 +614,14 @@ void run_live_seed(uint64_t seed, uint64_t& cut) {
         }
         uint64_t taken = block;
         if (i > 0) {
-            const int64_t excess = sched::time_of(full, head) - now - lead_next;
-            const int64_t debt = sched::observe_live_write(lowering, excess, now);
-            const auto owed =
-                static_cast<uint64_t>(std::max<int64_t>(debt, 0) * rate / sched::US_PER_SECOND);
-            const uint64_t dropped = std::min(owed, block);
-            if (dropped > 0) {
-                const auto dropped_us = static_cast<int64_t>(dropped) * sched::US_PER_SECOND / rate;
-                sched::record_cut(lowering, dropped_us);
-                params.group_lead_us = std::max(
-                    lead_next, std::min(params.group_lead_us, lead_next + excess - dropped_us));
-                taken -= dropped;
-                cut += dropped;
-            }
+            const sched::LoweredWrite lowered =
+                sched::lower_live_write(lowering, block, rate, sched::time_of(full, head), now,
+                                        lead_next, params.group_lead_us);
+            taken = lowered.taken;
+            cut += block - taken;
+            params.group_lead_us = lowered.group_lead_eff_us;
+            // Every player keeps the lead it needs
+            ASSERT_GE(params.group_lead_us, lead_next) << i;
         }
         head += taken;
 
@@ -664,10 +669,15 @@ void run_live_seed(uint64_t seed, uint64_t& cut) {
         ASSERT_EQ(sched::frame_timestamp(core, next), sched::frame_timestamp(full, next));
         ASSERT_LE(static_cast<int64_t>(core.shifts.size()), ((next - lowest) / cells) + 1);
     }
-    // A write late by no more than its declared jitter never shifts, nor does a cut; only a stall
-    // or a raised lead does, once each
-    if (ppm == 0) {
+    // A write late by no more than its declared jitter never shifts, nor does a cut, nor a clock
+    // running fast; only a stall or a raised lead does, once each
+    if (ppm <= 0) {
         EXPECT_LE(shifts, stalls + raises);
+    }
+    if (ppm < 0) {
+        cuts.fast_clock += cut;
+    } else if (leaves > 0) {
+        cuts.left += cut;
     }
     // The checks above saw frames produced through the run
     EXPECT_GT(next, LIVE_BLOCKS * block_us / sched::CELL_US / 2);
@@ -710,21 +720,23 @@ TEST(SchedProperty, FrameGridHoldsAcrossSegments) {
     }
 }
 
-// A live input keeps every frame at least G_eff - L_p - M_pump ahead, a rebase restores the on-time
-// lead exactly and never runs the timeline back, only a stall or a raised lead shifts a source
-// whose clock keeps time (a cut that lowers the latency never does), admission as if rebased is
-// what the rebase leaves and stays within the horizon, and folding keeps every live timestamp. The
-// seeds cut audio somewhere, after a leave, a stall or a fast clock.
+// A live input keeps every frame at least G_eff - L_p - M_pump ahead and G_eff at least G_next, a
+// rebase restores the on-time lead exactly and never runs the timeline back, only a stall or a
+// raised lead shifts a source whose clock keeps time or runs fast (a cut that lowers the latency
+// never does), admission as if rebased is what the rebase leaves and stays within the horizon, and
+// folding keeps every live timestamp. The seeds cut audio both under a fast clock and after a
+// member leaves. About 5 s under TSan: forty minute-long runs, each write and frame checked.
 TEST(SchedProperty, LiveRebaseAdmissionAndFoldingHoldAtEveryWrite) {
-    uint64_t cut = 0;
+    LiveCuts cuts;
     for (int seed = 1; seed <= SEEDS; ++seed) {
         SCOPED_TRACE(seed);
-        run_live_seed(static_cast<uint64_t>(seed), cut);
+        run_live_seed(static_cast<uint64_t>(seed), cuts);
         if (HasFatalFailure()) {
             return;
         }
     }
-    EXPECT_GT(cut, 0U);
+    EXPECT_GT(cuts.fast_clock, 0U);
+    EXPECT_GT(cuts.left, 0U);
 }
 
 }  // namespace
