@@ -268,8 +268,9 @@ struct DialTarget {
     std::vector<std::string> addresses;
 };
 
-/// @brief Parses `ws://host[:port][/path]`. The host may be a bracketed IPv6 literal; the port
-/// defaults to 80 and the path to "/".
+/// @brief Parses `ws://host[:port][/path]`. The host may be a bracketed IPv6 literal, its zone
+/// identifier raw or percent-encoded (RFC 6874) and kept as `address%zone`; the port defaults to 80
+/// and the path to "/".
 /// @return nullopt for any other scheme, a fragment (RFC 6455 section 3), a host or path holding
 /// a character RFC 3986 does not allow there, or another malformed URL
 std::optional<DialTarget> parse_ws_url(std::string_view url);

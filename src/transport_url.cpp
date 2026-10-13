@@ -16,11 +16,13 @@
 
 #include "transport.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace sendspin::server {
 
@@ -32,10 +34,16 @@ bool is_hex_digit(char c) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
 
+/// RFC 3986 section 2.3
+bool is_unreserved(char c) {
+    constexpr std::string_view UNRESERVED_SYMBOLS = "-._~";
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+           UNRESERVED_SYMBOLS.find(c) != std::string_view::npos;
+}
+
 /// Whether text holds only unreserved characters, sub-delims, percent-encodings (RFC 3986 section
 /// 2) and the characters of extra, so no control character or space reaches the upgrade request
 bool only_url_characters(std::string_view text, std::string_view extra) {
-    constexpr std::string_view UNRESERVED_SYMBOLS = "-._~";
     constexpr std::string_view SUB_DELIMS = "!$&'()*+,;=";
     for (size_t i = 0; i < text.size(); ++i) {
         const char c = text[i];
@@ -46,15 +54,43 @@ bool only_url_characters(std::string_view text, std::string_view extra) {
             i += 2;
             continue;
         }
-        const bool alphanumeric =
-            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
-        if (!alphanumeric && UNRESERVED_SYMBOLS.find(c) == std::string_view::npos &&
-            SUB_DELIMS.find(c) == std::string_view::npos &&
+        if (!is_unreserved(c) && SUB_DELIMS.find(c) == std::string_view::npos &&
             extra.find(c) == std::string_view::npos) {
             return false;
         }
     }
     return true;
+}
+
+/// The host an IP literal (RFC 3986 section 3.2.2) names, its zone identifier as the system
+/// resolver takes it (address%zone): written raw, or as RFC 6874 section 2 encodes it ("%25"
+/// first, so a raw zone that starts with "25" reads as encoded)
+std::optional<std::string> ip_literal_host(std::string_view literal) {
+    const size_t percent = literal.find('%');
+    const std::string_view address = literal.substr(0, percent);
+    const bool address_valid =
+        !address.empty() && std::all_of(address.begin(), address.end(), [](char c) {
+            return is_hex_digit(c) || c == ':' || c == '.';
+        });
+    if (!address_valid) {
+        return std::nullopt;
+    }
+    if (percent == std::string_view::npos) {
+        return std::string(address);
+    }
+    std::string_view zone = literal.substr(percent + 1);
+    constexpr std::string_view ENCODED_PERCENT = "25";
+    if (zone.starts_with(ENCODED_PERCENT)) {
+        zone.remove_prefix(ENCODED_PERCENT.size());
+    }
+    // RFC 6874 section 2: a ZoneID's unreserved characters
+    if (zone.empty() || !std::all_of(zone.begin(), zone.end(), is_unreserved)) {
+        return std::nullopt;
+    }
+    std::string host(address);
+    host += '%';
+    host += zone;
+    return host;
 }
 
 }  // namespace
@@ -84,11 +120,11 @@ std::optional<DialTarget> parse_ws_url(std::string_view url) {
         if (close == std::string_view::npos) {
             return std::nullopt;
         }
-        target.host = authority.substr(1, close - 1);
-        // RFC 3986 section 3.2.2: an IP literal, with a zone identifier's (RFC 6874)
-        if (!only_url_characters(target.host, ":")) {
+        std::optional<std::string> host = ip_literal_host(authority.substr(1, close - 1));
+        if (!host) {
             return std::nullopt;
         }
+        target.host = std::move(*host);
         const std::string_view rest = authority.substr(close + 1);
         if (!rest.empty()) {
             if (rest.front() != ':') {

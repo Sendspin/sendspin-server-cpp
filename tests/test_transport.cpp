@@ -483,8 +483,22 @@ TEST(TransportUrl, ParsesWebSocketUrls) {
         // Control: every character class a host and a path may hold
         {"ws://h-1.local/a_b~c.%2F;x=1!$&'()*+,@:?q=/?", true, "h-1.local", 80,
          "/a_b~c.%2F;x=1!$&'()*+,@:?q=/?"},
-        // Control: an IPv6 literal with a zone identifier (RFC 6874)
-        {"ws://[fe80::1%25en0]/p", true, "fe80::1%25en0", 80, "/p"},
+        // An IPv6 zone identifier, kept as the system resolver takes it.
+        // Control: percent-encoded (RFC 6874 section 2)
+        {"ws://[fe80::1%25en0]/p", true, "fe80::1%en0", 80, "/p"},
+        // Control: raw, by name and by index
+        {"ws://[fe80::1%en0]:8928/sendspin", true, "fe80::1%en0", 8928, "/sendspin"},
+        {"ws://[fe80::1%1]/", true, "fe80::1%1", 80, "/"},
+        {"ws://[fe80::1%]/p", false, "", 0, ""},
+        {"ws://[fe80::1%25]/p", false, "", 0, ""},
+        {"ws://[fe80::1%en 0]/p", false, "", 0, ""},
+        {"ws://[fe80::1%en\x01]/p", false, "", 0, ""},
+        {"ws://[fe80::1%en0\r\n]/p", false, "", 0, ""},
+        {"ws://[fe%80::1%en0]/p", false, "", 0, ""},
+        {"ws://[%en0]/p", false, "", 0, ""},
+        {"ws://[fe80::1%25en%250]/p", false, "", 0, ""},
+        {"ws://[fe80::1%%en0]/p", false, "", 0, ""},
+        {"ws://[fe80::g]/p", false, "", 0, ""},
         {"ws://host/a\r\nX-Injected: 1", false, "", 0, ""},
         {"ws://host/a\nb", false, "", 0, ""},
         {"ws://host/a b", false, "", 0, ""},
