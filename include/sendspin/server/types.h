@@ -558,9 +558,9 @@ enum class OpenInputResult : uint8_t {
 };
 
 struct WriteResult {
-    /// Frames taken from the start of the block; for a live input playing a raised latency back
-    /// down, the samples it staged for the block, a few fewer than it played them from
-    /// (GroupInput::write())
+    /// Frames taken from the start of the block; for a live input's write through its slew, the
+    /// samples it staged, up to a few fewer than given, or many fewer where another call ended it
+    /// early (GroupInput::write())
     size_t frames{0};
     InputState state{InputState::OPEN};
 };

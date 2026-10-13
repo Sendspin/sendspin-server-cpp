@@ -189,7 +189,8 @@ struct RoutedSource {
 /// Threading: every method may be called from any thread (on ESP-IDF any task, a pthread or not),
 /// including from a listener call, and returns without waiting, except wait_writable(). Each call
 /// updates the input's state at once, in call order, so time_of(), latency_us(), state() and
-/// pause() reflect every earlier call.
+/// pause() reflect every earlier call; a live input's write through its slew (write()) stages its
+/// samples block by block instead.
 ///
 /// Releasing the input (destroying the last reference) and then opening another on the same group
 /// at once is supported: the released input no longer holds the group.
@@ -213,12 +214,16 @@ public:
     /// real-time safe. Takes as many as the input admits, up to about the group's lead plus its
     /// write-ahead past the time now playing; state says why it took fewer. A new input admits
     /// nothing (InputState::FULL) until the server has attached it to its group. A live input's
-    /// writer drops what write() refuses and never resends what a stall held back. Once a live
-    /// input has played a raised latency back down (InputKind::LIVE), it resamples each write until
-    /// its run's epoch ends (on a host; on ESP-IDF only while it plays the latency down), so
-    /// write() may report up to a few fewer samples taken than given with InputState::OPEN: those
-    /// it staged, which the input's positions count. Its writer drops the rest the same way; they
-    /// play within those staged.
+    /// writer drops what write() refuses and never resends what a stall held back.
+    ///
+    /// Once a live input starts playing a raised latency back down (InputKind::LIVE), its writes
+    /// go through a slew: on a host until its epoch ends, its format changes or it pauses, on
+    /// ESP-IDF only while it plays the latency down. Such a write reports the samples it staged, up
+    /// to a few fewer than given, with InputState::OPEN; the input's positions count those, and its
+    /// writer drops the rest the same way, as they play within those staged. It stages block by
+    /// block: a flush(), pause(), stop(), drain() or set_format(), or the server stopping or
+    /// closing the input, meanwhile ends it early with the state that call left, and another
+    /// write() meanwhile takes nothing (InputState::FULL).
     WriteResult write(const void* pcm, size_t frames);
 
     /// @brief The input's state now: what write() would report for a cell (20 ms) of samples.

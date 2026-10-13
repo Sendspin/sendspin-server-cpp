@@ -299,13 +299,16 @@ private:
         /// start()
         std::optional<size_t> history;
     };
-    /// Takes up a slew the format or epoch replaced, from set_format()'s or restarted
-    void adopt_slew();
+    /// Takes up a slew the format or epoch replaced, from set_format()'s or restarted; the one
+    /// set_format()'s replaces goes to retired, to be freed with the mutex released
+    void adopt_slew(LiveSlew& retired);
     /// Under the mutex: claims the slew for one write of frames at ppm, copying its history
     SlewedWrite begin_slewed(uint64_t frames, int32_t ppm, InputState state);
     /// Without the mutex: runs the write through the slew a block at a time, staging each block's
-    /// output under the mutex unless a flush, stop, drain, close, epoch or format came since
-    /// @return the positions staged, which the host is told were taken
+    /// output under the mutex, and `G_eff` following the time it took out, unless a call that
+    /// bumps slew_generation_ or a drain came since
+    /// @return the positions staged, which the host is told were taken; the input's state where a
+    /// call ended the write early
     WriteResult write_slewed(const uint8_t* pcm, const SlewedWrite& slewed);
     /// `R_min`: one cell of input samples
     uint64_t ready_samples() const;
@@ -372,13 +375,20 @@ private:
     int64_t group_lead_eff_us_{0};
     /// A live input's latency lowering in the current epoch
     sched::LiveLowering lowering_;
-    /// The slew that plays it out. A write runs it with the mutex released while slewing_, and
-    /// no other call touches it: one that replaces it bumps slew_generation_, and the next write
-    /// takes set_format()'s next_slew_ or restarts it (adopt_slew()).
+    /// The slew that plays it out: write() alone touches it, under the mutex or, while slewing_,
+    /// without it (write_slewed())
     LiveSlew slew_;
+    /// A write runs through slew_ with the mutex released; every other write takes nothing.
+    /// Set and cleared by write() under the mutex.
     bool slewing_{false};
+    /// Bumped under the mutex by every call that ends the staged audio's continuity (a new epoch
+    /// or format, a pause, restart_positions()); a write running through the slew reads it to
+    /// stop staging
     uint64_t slew_generation_{0};
+    /// slew_generation_ as slew_ was last taken up (adopt_slew()); read and written by write()
     uint64_t slew_seen_{0};
+    /// The slew set_format() made for its format, which the next write takes up while
+    /// slew_pending_; both written by set_format() and read by write(), under the mutex
     LiveSlew next_slew_;
     bool slew_pending_{false};
     /// `k*` the pipelines published for the current epoch, and the `L_p` its rebase decides with
