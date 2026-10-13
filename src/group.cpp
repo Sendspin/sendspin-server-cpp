@@ -751,7 +751,7 @@ void Group::report_stalls(int64_t now) {
             "group %s: %u rebases (%lld ms in all) and %u frames ready after their play time "
             "since the last report",
             printable(this->name_).c_str(), static_cast<unsigned>(stalls.rebases),
-            static_cast<long long>(stalls.shifted_us / 1000),
+            static_cast<long long>(stalls.shifted_us / sched::US_PER_MS),
             static_cast<unsigned>(stalls.late_frames)));
     }
     stalls = Stalls{};
@@ -960,7 +960,9 @@ void Group::recompute() {
                                          player.cursor_format()) == this->failed_formats_.end()) {
             add_format(player.cursor_format());
         }
-        if (!player.eligible() || !player.support() || !player.player_state()) {
+        const std::optional<PlayerSupport>& support = player.support();
+        const std::optional<PlayerState>& state = player.player_state();
+        if (!player.eligible() || !support || !state) {
             continue;
         }
         const std::optional<sched::AudioFormat> format = player.wanted_format(member.source.get());
@@ -973,8 +975,7 @@ void Group::recompute() {
             }
             continue;
         }
-        eligible.push_back({player_timing(*player.player_state()),
-                            int64_t{player.support()->buffer_capacity}, *format,
+        eligible.push_back({player_timing(*state), int64_t{support->buffer_capacity}, *format,
                             this->pipeline_latency(*format, input_rate)});
         add_format(*format);
     }

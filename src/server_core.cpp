@@ -1395,7 +1395,7 @@ Group& ServerCore::new_group(std::string name, std::optional<GroupId> id_in) {
             this->erase_if_unused(*group);
         }
     };
-    hooks.info = [this](std::string line) { SS_LOGI(this->log_, "%s", line.c_str()); };
+    hooks.info = [this](const std::string& line) { SS_LOGI(this->log_, "%s", line.c_str()); };
     auto group = std::make_unique<Group>(this->loop_, this->workers_, id, std::move(name),
                                          this->next_instance_id_, this->settings_.resampler_quality,
                                          this->settings_.enable_opus, std::move(hooks),
@@ -1488,8 +1488,9 @@ void ServerCore::on_closed(Client& client) {
         this->publish_snapshot();
         ClientDisconnect disconnect;
         disconnect.reason = disconnect_reason(driver.session().end(), driver.transport_close());
-        if (disconnect.reason == DisconnectReason::GOODBYE && driver.session().goodbye()) {
-            disconnect.goodbye_reason = driver.session().goodbye()->reason;
+        const std::optional<ClientGoodbye>& goodbye = driver.session().goodbye();
+        if (disconnect.reason == DisconnectReason::GOODBYE && goodbye) {
+            disconnect.goodbye_reason = goodbye->reason;
         }
         this->post_event([info = client.info, disconnect](ServerListener& listener) {
             listener.on_client_disconnected(info, disconnect);
@@ -1561,8 +1562,9 @@ void ServerCore::after_close(Target& target, const Client& client) {
     }
     ConnectionEnd end;
     end.activated = client.active;
-    end.goodbye = session.goodbye().has_value();
-    end.reason = end.goodbye ? session.goodbye()->reason : std::nullopt;
+    const std::optional<ClientGoodbye>& goodbye = session.goodbye();
+    end.goodbye = goodbye.has_value();
+    end.reason = goodbye ? goodbye->reason : std::nullopt;
     end.activities = client.playback      ? DeclaredActivities::PLAYBACK
                      : client.pairing_now ? DeclaredActivities::PAIRING_ONLY
                                           : DeclaredActivities::NONE;

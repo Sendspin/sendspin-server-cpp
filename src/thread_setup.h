@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <thread>
 
@@ -26,7 +27,7 @@ namespace sendspin::server {
 
 /// @brief The library's threads, each with its own stack, core and priority on ESP-IDF; NETWORK
 /// exists on a host only, LINK_WRITER (a connection's writer task) on ESP-IDF only
-enum class ThreadRole { CORE, NETWORK, DISPATCH, AUDIO_WORKER, ARTWORK, LINK_WRITER };
+enum class ThreadRole : uint8_t { CORE, NETWORK, DISPATCH, AUDIO_WORKER, ARTWORK, LINK_WRITER };
 
 /// @brief Starts a thread running body with role's placement. The calling thread's own setting
 /// for the threads it starts is left as it was, so a host's threads never inherit a role's.

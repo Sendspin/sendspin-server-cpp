@@ -134,10 +134,11 @@ public:
 
     /// @brief Allocates a block of bytes in location; throws std::bad_alloc when neither memory has
     /// them
-    TaskQueue(size_t bytes, MemoryLocation location) : initial_bytes_(bytes), location_(location) {
-        this->head_ = this->allocate(bytes);
-        this->tail_ = this->head_;
-    }
+    TaskQueue(size_t bytes, MemoryLocation location)
+        : head_(allocate(bytes, location)),
+          tail_(head_),
+          initial_bytes_(bytes),
+          location_(location) {}
 
     ~TaskQueue() {
         this->clear();
@@ -161,7 +162,7 @@ public:
             const size_t bytes =
                 std::max({this->tail_ == nullptr ? this->initial_bytes_ : this->tail_->bytes,
                           2 * this->queued_bytes_, stride});
-            Block* block = this->allocate(bytes);
+            Block* block = allocate(bytes, this->location_);
             if (this->tail_ == nullptr) {
                 this->head_ = block;
             } else if (this->count_ == 0) {
@@ -268,8 +269,8 @@ private:
         return reinterpret_cast<uint8_t*>(block) + BLOCK_BYTES;
     }
 
-    Block* allocate(size_t bytes) const {
-        void* memory = placed_malloc(BLOCK_BYTES + bytes, TASK_ALIGNMENT, this->location_);
+    static Block* allocate(size_t bytes, MemoryLocation location) {
+        void* memory = placed_malloc(BLOCK_BYTES + bytes, TASK_ALIGNMENT, location);
         if (memory == nullptr) {
             throw std::bad_alloc();
         }

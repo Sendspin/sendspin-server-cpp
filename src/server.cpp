@@ -53,6 +53,9 @@ namespace {
 /// How long stop() lets closing handshakes in progress finish before the core thread exits
 constexpr int64_t SHUTDOWN_GRACE_US = 1000000;
 
+/// A routed source's input format until the source's first stream sets it
+constexpr InputFormat ROUTED_SOURCE_FORMAT{48000, 2, SampleFormat::S16};
+
 std::once_flag noise_init_once;
 
 std::atomic<uint64_t> next_input_id{1};
@@ -454,9 +457,8 @@ public:
         if (options.write_jitter_us < 0 || options.write_jitter_us > MAX_WRITE_JITTER_US) {
             return {RouteSourceResult::INVALID_JITTER, nullptr};
         }
-        // Its format until the source's first stream sets it
         InputOptions input;
-        input.format = InputFormat{48000, 2, SampleFormat::S16};
+        input.format = ROUTED_SOURCE_FORMAT;
         input.kind = InputKind::LIVE;
         input.write_jitter_us = options.write_jitter_us;
         OpenedInput opened = this->open_input(group, input);
@@ -538,15 +540,14 @@ public:
             return false;
         }
         // pairing.md "Pairing Token": the client key must be the connection's client_id
-        auto decoded =
-            std::make_shared<std::optional<PairingPskToken>>(decode_pairing_psk_token(token));
+        std::optional<PairingPskToken> decoded = decode_pairing_psk_token(token);
         const std::optional<PublicKey> key = public_key_from_peer_id(client_id);
-        if (!*decoded || !key || (*decoded)->client_key != *key) {
+        if (!decoded || !key || decoded->client_key != *key) {
             return false;
         }
-        running->loop.post([core = running->core, id = std::string(client_id), decoded] {
-            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-            core->submit_pairing_token(id, **decoded);
+        auto held = std::make_shared<const PairingPskToken>(std::move(*decoded));
+        running->loop.post([core = running->core, id = std::string(client_id), held] {
+            core->submit_pairing_token(id, *held);
         });
         return true;
     }

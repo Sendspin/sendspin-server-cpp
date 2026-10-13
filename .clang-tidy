@@ -82,6 +82,11 @@ CheckOptions:
     value: '_'
   - key: readability-identifier-naming.ConstantCase
     value: lower_case
+  # A const data member is named like the others: a private one takes the '_' suffix
+  - key: readability-identifier-naming.ConstantMemberCase
+    value: lower_case
+  - key: readability-identifier-naming.ConstantMemberIgnoredRegexp
+    value: '^[a-z][a-z0-9_]*_$'
   - key: readability-identifier-naming.ConstexprVariableCase
     value: UPPER_CASE
   - key: readability-identifier-naming.GlobalConstantCase

@@ -452,7 +452,8 @@ std::optional<PlayerStream::SwitchTarget> PlayerStream::switch_at(
     // A drained epoch whose target ends below the point (a downsampling instance can end a cell
     // early) leaves the stream to end in its format
     const int64_t point = *this->switch_->point;
-    if (ring->final_index() && *ring->final_index() < point) {
+    const std::optional<int64_t> final_index = ring->final_index();
+    if (final_index && *final_index < point) {
         return std::nullopt;
     }
     return SwitchTarget{ring, point};

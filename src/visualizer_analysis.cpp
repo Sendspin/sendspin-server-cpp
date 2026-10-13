@@ -300,11 +300,12 @@ uint16_t VisualizerAnalysis::loudness() {
     // Parseval over the one-sided spectrum: the window's RMS
     const float rms = std::sqrt(2.0F * this->power_) / static_cast<float>(this->window_);
     const float unit = db_unit(rms, LOUDNESS_REFERENCE);
-    this->loudness_smoothed_ = this->loudness_smoothed_
-                                   ? (LOUDNESS_SMOOTHING * unit) +
-                                         ((1.0F - LOUDNESS_SMOOTHING) * *this->loudness_smoothed_)
-                                   : unit;
-    return unit_to_u16(*this->loudness_smoothed_);
+    const float smoothed = this->loudness_smoothed_
+                               ? (LOUDNESS_SMOOTHING * unit) +
+                                     ((1.0F - LOUDNESS_SMOOTHING) * *this->loudness_smoothed_)
+                               : unit;
+    this->loudness_smoothed_ = smoothed;
+    return unit_to_u16(smoothed);
 }
 
 void VisualizerAnalysis::f_peak(uint16_t& hz, uint16_t& amplitude) {

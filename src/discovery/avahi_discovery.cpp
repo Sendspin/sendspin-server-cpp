@@ -50,6 +50,10 @@ constexpr const char* CLIENT_SERVICE = "_sendspin._tcp";
 /// The wait before resolving an instance again after its resolver failed
 constexpr unsigned RESOLVE_RETRY_MS = 5000;
 
+/// Avahi defines no enumerator for the empty flag sets
+constexpr AvahiLookupFlags NO_LOOKUP_FLAGS{};
+constexpr AvahiPublishFlags NO_PUBLISH_FLAGS{};
+
 /// The TXT value of key, if present
 std::optional<std::string> txt_value(AvahiStringList* txt, const char* key) {
     AvahiStringList* entry = avahi_string_list_find(txt, key);
@@ -190,9 +194,9 @@ private:
             }
         }
         if (this->request_.browse && this->browser_ == nullptr) {
-            this->browser_ = avahi_service_browser_new(
-                client, AVAHI_IF_UNSPEC, AVAHI_PROTO_UNSPEC, CLIENT_SERVICE, nullptr,
-                static_cast<AvahiLookupFlags>(0), &AvahiDiscovery::on_browsed, this);
+            this->browser_ = avahi_service_browser_new(client, AVAHI_IF_UNSPEC, AVAHI_PROTO_UNSPEC,
+                                                       CLIENT_SERVICE, nullptr, NO_LOOKUP_FLAGS,
+                                                       &AvahiDiscovery::on_browsed, this);
         }
     }
 
@@ -220,6 +224,9 @@ private:
     /// Adds the advertised service to the entry group and commits it, under the next alternative
     /// name while the name is in use
     void publish() {
+        if (!this->request_.advertise) {
+            return;
+        }
         const AdvertisedServer& server = *this->request_.advertise;
         AvahiStringList* txt = avahi_string_list_add_pair(nullptr, "path", server.path.c_str());
         if (!server.name.empty()) {
@@ -227,9 +234,8 @@ private:
         }
         for (;;) {
             const int added = avahi_entry_group_add_service_strlst(
-                this->group_, AVAHI_IF_UNSPEC, AVAHI_PROTO_UNSPEC,
-                static_cast<AvahiPublishFlags>(0), this->instance_name_.c_str(), SERVER_SERVICE,
-                nullptr, nullptr, server.port, txt);
+                this->group_, AVAHI_IF_UNSPEC, AVAHI_PROTO_UNSPEC, NO_PUBLISH_FLAGS,
+                this->instance_name_.c_str(), SERVER_SERVICE, nullptr, nullptr, server.port, txt);
             if (added == AVAHI_ERR_COLLISION) {
                 this->rename();
                 continue;
@@ -298,8 +304,8 @@ private:
     void resolve(Resolution& resolution) {
         resolution.resolver = avahi_service_resolver_new(
             this->client_, resolution.interface, resolution.protocol, resolution.instance.c_str(),
-            resolution.type.c_str(), resolution.domain.c_str(), AVAHI_PROTO_UNSPEC,
-            static_cast<AvahiLookupFlags>(0), &AvahiDiscovery::on_resolved, &resolution);
+            resolution.type.c_str(), resolution.domain.c_str(), AVAHI_PROTO_UNSPEC, NO_LOOKUP_FLAGS,
+            &AvahiDiscovery::on_resolved, &resolution);
         if (resolution.resolver == nullptr) {
             this->retry_later(resolution);
         }
@@ -389,13 +395,14 @@ private:
         DiscoveredClient client;
         client.instance = name;
         for (const auto& [key, resolution] : instance.resolutions) {
-            if (!resolution->address || resolution->path.empty()) {
+            const std::optional<std::string>& address = resolution->address;
+            if (!address || resolution->path.empty()) {
                 continue;
             }
             latest = resolution.get();
-            if (std::find(client.addresses.begin(), client.addresses.end(), *resolution->address) ==
+            if (std::find(client.addresses.begin(), client.addresses.end(), *address) ==
                 client.addresses.end()) {
-                client.addresses.push_back(*resolution->address);
+                client.addresses.push_back(*address);
             }
         }
         if (latest == nullptr) {

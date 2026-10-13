@@ -14,6 +14,7 @@
 
 #include "source_decoder.h"
 
+#include "sched/constants.h"
 #include <micro_flac/flac_decoder.h>
 #if SENDSPIN_SERVER_ENABLE_OPUS
 #include <opus.h>
@@ -301,7 +302,7 @@ SourceDecoder::Decoded SourceDecoder::decode(const SourceItem& item,
 
 SourceDecoder::Decoded SourceDecoder::emit(const SourceItem& item, const uint8_t* pcm,
                                            size_t frames) {
-    if (static_cast<int64_t>(frames) * 1000000 >
+    if (static_cast<int64_t>(frames) * sched::US_PER_SECOND >
         MAX_SOURCE_CHUNK_US * int64_t{this->output_.sample_rate}) {
         return Decoded::BROKEN;
     }

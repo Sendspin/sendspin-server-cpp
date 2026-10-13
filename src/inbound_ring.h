@@ -105,11 +105,11 @@ public:
 private:
     struct Record {
         SharedPtr<InboundEndpoint> to;
-        size_t offset;
-        size_t size;
-        int64_t rx_us;
-        uint64_t place;
-        MessageKind kind;
+        size_t offset{0};
+        size_t size{0};
+        int64_t rx_us{0};
+        uint64_t place{0};
+        MessageKind kind{MessageKind::TEXT};
     };
 
     struct Raised {

@@ -103,6 +103,7 @@ public:
     }
 
     template <class U>
+    // NOLINTNEXTLINE(readability-identifier-naming): the allocator requirements name it rebind
     struct rebind {
         using other = PlacedAllocator<U, Location>;
     };
