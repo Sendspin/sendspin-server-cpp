@@ -177,6 +177,9 @@ TEST(WsFrame, ChecksAClosePayload) {
         {"Control: U+D7FF and U+10FFFF",
          {0x03, 0xE8, 0xED, 0x9F, 0xBF, 0xF4, 0x8F, 0xBF, 0xBF},
          true},
+        {"Control: U+E000 and U+40000",
+         {0x03, 0xE8, 0xEE, 0x80, 0x80, 0xF1, 0x80, 0x80, 0x80},
+         true},
         {"a 1-byte body", {0x03}, false},
         {"999", {0x03, 0xE7}, false},
         {"1004", {0x03, 0xEC}, false},
@@ -195,6 +198,9 @@ TEST(WsFrame, ChecksAClosePayload) {
         {"truncated sequence", {0x03, 0xE8, 0xE2, 0x82}, false},
         {"lone continuation", {0x03, 0xE8, 0x80}, false},
         {"continuation byte out of range", {0x03, 0xE8, 0xC3, 0xC3}, false},
+        {"continuation byte below range", {0x03, 0xE8, 0xC3, 0x41}, false},
+        {"third byte out of range", {0x03, 0xE8, 0xE2, 0x82, 0x41}, false},
+        {"fourth byte out of range", {0x03, 0xE8, 0xF0, 0x9F, 0x98, 0xC0}, false},
         {"a 124-byte reason", with_reason(124), false},
     };
     for (const Row& row : rows) {
