@@ -131,8 +131,9 @@ std::optional<DialTarget> parse_ws_url(std::string_view url) {
     } else {
         const size_t colon = authority.find(':');
         target.host = authority.substr(0, colon);
-        // RFC 3986 section 3.2.2: a registered name or an IPv4 address
-        if (!only_url_characters(target.host, "")) {
+        // RFC 3986 section 3.2.2: a registered name or an IPv4 address. A percent-encoding would
+        // reach the Host header and the resolver undecoded, so none is taken; a zone is bracketed.
+        if (!only_url_characters(target.host, "") || target.host.find('%') != std::string::npos) {
             return std::nullopt;
         }
         if (colon != std::string_view::npos) {

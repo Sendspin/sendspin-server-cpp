@@ -528,6 +528,11 @@ TEST(TransportUrl, ParsesWebSocketUrls) {
         {"ws://host/%g0", false, "", 0, ""},
         {"ws://host/%0g", false, "", 0, ""},
         {"ws://ho\r\nst/p", false, "", 0, ""},
+        // A percent-encoding in a host outside brackets, which no one would decode.
+        // Control: in the path, it stays as written (above)
+        {"ws://h%20st/p", false, "", 0, ""},
+        {"ws://h%41st/p", false, "", 0, ""},
+        {"ws://1.2.3.4%251/p", false, "", 0, ""},
         {"ws://ho st/p", false, "", 0, ""},
         {"ws://[::1\r\n]/p", false, "", 0, ""},
         {"ws://[::1 ]/p", false, "", 0, ""},
