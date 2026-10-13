@@ -115,6 +115,7 @@ size_t write_fragment(uint8_t orig_type, std::span<const uint8_t> payload, size_
         flags |= FRAGMENT_FLAG_LAST;
     }
     out.clear();
+    reserve_plaintext(out, header + size);
     out.push_back(MESSAGE_ID_FRAGMENT);
     out.push_back(flags);
     if (first) {
