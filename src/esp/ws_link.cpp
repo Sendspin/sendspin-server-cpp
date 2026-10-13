@@ -181,6 +181,13 @@ bool WsLink::end_frame(bool fin, int64_t rx_us) {
     if (!this->assembly_.end(fin)) {
         return true;
     }
+    if (!ws_message_valid(this->assembly_.kind(),
+                          std::span<const uint8_t>(this->hold_.message().data(),
+                                                   this->assembly_.message_bytes()))) {
+        this->dropping_ = true;
+        this->fail_protocol(close_code::INVALID_PAYLOAD);
+        return false;
+    }
     const InboundHold::Outcome offered =
         this->hold_.offer(this->assembly_.kind(), this->assembly_.message_bytes(), rx_us);
     if (offered.result == InboundHold::Result::HELD && !this->hold_receiving(offered.generation)) {
@@ -220,8 +227,9 @@ void WsLink::store_ping(const uint8_t* payload, size_t len) {
 }
 
 bool WsLink::answer_close(const uint8_t* payload, size_t len) {
-    if (!ws_close_payload_valid(std::span<const uint8_t>(payload, len))) {
-        this->fail_protocol();
+    if (const std::optional<uint16_t> fault =
+            ws_close_payload_fault(std::span<const uint8_t>(payload, len))) {
+        this->fail_protocol(*fault);
         return false;
     }
     this->close_within_slice(payload, std::min(len, STATUS_CODE_BYTES));
@@ -229,10 +237,9 @@ bool WsLink::answer_close(const uint8_t* payload, size_t len) {
     return true;
 }
 
-void WsLink::fail_protocol() {
-    const std::array<uint8_t, STATUS_CODE_BYTES> body{
-        static_cast<uint8_t>(close_code::PROTOCOL_ERROR >> 8U),
-        static_cast<uint8_t>(close_code::PROTOCOL_ERROR)};
+void WsLink::fail_protocol(uint16_t code) {
+    const std::array<uint8_t, STATUS_CODE_BYTES> body{static_cast<uint8_t>(code >> 8U),
+                                                      static_cast<uint8_t>(code)};
     this->close_within_slice(body.data(), body.size());
     this->report_closed(CloseReason::PROTOCOL_VIOLATION);
 }

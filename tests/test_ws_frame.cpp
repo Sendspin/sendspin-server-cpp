@@ -34,10 +34,11 @@ using sendspin::server::chacha20_block;
 using sendspin::server::CHACHA20_BLOCK_BYTES;
 using sendspin::server::CHACHA20_KEY_BYTES;
 using sendspin::server::MessageKind;
-using sendspin::server::ws_close_payload_valid;
+using sendspin::server::ws_close_payload_fault;
 using sendspin::server::ws_frame_header;
 using sendspin::server::WS_FRAME_HEADER_MAX;
 using sendspin::server::ws_mask_copy;
+using sendspin::server::ws_message_valid;
 using sendspin::server::ws_parse_frame_header;
 using sendspin::server::WsAssembly;
 using sendspin::server::WsFrameStep;
@@ -45,6 +46,7 @@ using sendspin::server::WsHeaderParse;
 using sendspin::server::WsHeaderStatus;
 using sendspin::server::WsMaskKey;
 using sendspin::server::WsMaskKeys;
+namespace close_code = sendspin::server::close_code;
 namespace ws_opcode = sendspin::server::ws_opcode;
 
 // RFC 6455 sections 5.2 and 5.5: what a client (peer_masks false) and a server (true) accept of
@@ -149,12 +151,13 @@ TEST(WsFrame, ParsesAReceivedHeader) {
 }
 
 // RFC 6455 sections 5.5.1 and 7.4: a close payload is empty or a status code an endpoint may send
-// with a UTF-8 reason (RFC 3629 section 4)
+// with a UTF-8 reason (RFC 3629 section 4); a reason that is not UTF-8 fails the connection with
+// 1007 (section 7.4.1), any other fault with 1002
 TEST(WsFrame, ChecksAClosePayload) {
     struct Row {
         std::string name;
         std::vector<uint8_t> payload;
-        bool valid;
+        std::optional<uint16_t> fault;
     };
     // Code 1000 and a reason of n ASCII bytes
     const auto with_reason = [](size_t n) {
@@ -162,50 +165,86 @@ TEST(WsFrame, ChecksAClosePayload) {
         payload.resize(payload.size() + n, 'r');
         return payload;
     };
+    constexpr std::optional<uint16_t> VALID;
+    constexpr std::optional<uint16_t> PROTOCOL = close_code::PROTOCOL_ERROR;
+    constexpr std::optional<uint16_t> PAYLOAD = close_code::INVALID_PAYLOAD;
     const Row rows[] = {
-        {"Control: empty", {}, true},
-        {"Control: 1000", {0x03, 0xE8}, true},
+        {"Control: empty", {}, VALID},
+        {"Control: 1000", {0x03, 0xE8}, VALID},
         {"Control: 1000 with a multibyte reason, U+00E9 U+20AC U+1F600",
          {0x03, 0xE8, 'o', 'k', 0xC3, 0xA9, 0xE2, 0x82, 0xAC, 0xF0, 0x9F, 0x98, 0x80},
-         true},
-        {"Control: 1000 with a 123-byte reason", with_reason(123), true},
-        {"Control: 1003", {0x03, 0xEB}, true},
-        {"Control: 1007", {0x03, 0xEF}, true},
-        {"Control: 1014", {0x03, 0xF6}, true},
-        {"Control: 3000", {0x0B, 0xB8}, true},
-        {"Control: 4999", {0x13, 0x87}, true},
+         VALID},
+        {"Control: 1000 with a 123-byte reason", with_reason(123), VALID},
+        {"Control: 1003", {0x03, 0xEB}, VALID},
+        {"Control: 1007", {0x03, 0xEF}, VALID},
+        {"Control: 1014", {0x03, 0xF6}, VALID},
+        {"Control: 3000", {0x0B, 0xB8}, VALID},
+        {"Control: 4999", {0x13, 0x87}, VALID},
         {"Control: U+D7FF and U+10FFFF",
          {0x03, 0xE8, 0xED, 0x9F, 0xBF, 0xF4, 0x8F, 0xBF, 0xBF},
-         true},
+         VALID},
         {"Control: U+E000 and U+40000",
          {0x03, 0xE8, 0xEE, 0x80, 0x80, 0xF1, 0x80, 0x80, 0x80},
-         true},
-        {"a 1-byte body", {0x03}, false},
-        {"999", {0x03, 0xE7}, false},
-        {"1004", {0x03, 0xEC}, false},
-        {"1005", {0x03, 0xED}, false},
-        {"1006", {0x03, 0xEE}, false},
-        {"1015", {0x03, 0xF7}, false},
-        {"1016", {0x03, 0xF8}, false},
-        {"2999", {0x0B, 0xB7}, false},
-        {"5000", {0x13, 0x88}, false},
-        {"overlong NUL", {0x03, 0xE8, 0xC0, 0x80}, false},
-        {"overlong three-byte form", {0x03, 0xE8, 0xE0, 0x9F, 0xBF}, false},
-        {"overlong four-byte form", {0x03, 0xE8, 0xF0, 0x8F, 0xBF, 0xBF}, false},
-        {"surrogate U+D800", {0x03, 0xE8, 0xED, 0xA0, 0x80}, false},
-        {"past U+10FFFF", {0x03, 0xE8, 0xF4, 0x90, 0x80, 0x80}, false},
-        {"lead byte past F4", {0x03, 0xE8, 0xF5, 0x80, 0x80, 0x80}, false},
-        {"truncated sequence", {0x03, 0xE8, 0xE2, 0x82}, false},
-        {"lone continuation", {0x03, 0xE8, 0x80}, false},
-        {"continuation byte out of range", {0x03, 0xE8, 0xC3, 0xC3}, false},
-        {"continuation byte below range", {0x03, 0xE8, 0xC3, 0x41}, false},
-        {"third byte out of range", {0x03, 0xE8, 0xE2, 0x82, 0x41}, false},
-        {"fourth byte out of range", {0x03, 0xE8, 0xF0, 0x9F, 0x98, 0xC0}, false},
-        {"a 124-byte reason", with_reason(124), false},
+         VALID},
+        {"a 1-byte body", {0x03}, PROTOCOL},
+        {"999", {0x03, 0xE7}, PROTOCOL},
+        {"1004", {0x03, 0xEC}, PROTOCOL},
+        {"1005", {0x03, 0xED}, PROTOCOL},
+        {"1006", {0x03, 0xEE}, PROTOCOL},
+        {"1015", {0x03, 0xF7}, PROTOCOL},
+        {"1016", {0x03, 0xF8}, PROTOCOL},
+        {"2999", {0x0B, 0xB7}, PROTOCOL},
+        {"5000", {0x13, 0x88}, PROTOCOL},
+        {"overlong NUL", {0x03, 0xE8, 0xC0, 0x80}, PAYLOAD},
+        {"overlong three-byte form", {0x03, 0xE8, 0xE0, 0x9F, 0xBF}, PAYLOAD},
+        {"overlong four-byte form", {0x03, 0xE8, 0xF0, 0x8F, 0xBF, 0xBF}, PAYLOAD},
+        {"surrogate U+D800", {0x03, 0xE8, 0xED, 0xA0, 0x80}, PAYLOAD},
+        {"past U+10FFFF", {0x03, 0xE8, 0xF4, 0x90, 0x80, 0x80}, PAYLOAD},
+        {"lead byte past F4", {0x03, 0xE8, 0xF5, 0x80, 0x80, 0x80}, PAYLOAD},
+        {"truncated sequence", {0x03, 0xE8, 0xE2, 0x82}, PAYLOAD},
+        {"lone continuation", {0x03, 0xE8, 0x80}, PAYLOAD},
+        {"continuation byte out of range", {0x03, 0xE8, 0xC3, 0xC3}, PAYLOAD},
+        {"continuation byte below range", {0x03, 0xE8, 0xC3, 0x41}, PAYLOAD},
+        {"third byte out of range", {0x03, 0xE8, 0xE2, 0x82, 0x41}, PAYLOAD},
+        {"fourth byte out of range", {0x03, 0xE8, 0xF0, 0x9F, 0x98, 0xC0}, PAYLOAD},
+        {"a 124-byte reason", with_reason(124), PROTOCOL},
     };
     for (const Row& row : rows) {
         SCOPED_TRACE(row.name);
-        EXPECT_EQ(ws_close_payload_valid(row.payload), row.valid);
+        EXPECT_EQ(ws_close_payload_fault(row.payload), row.fault);
+    }
+}
+
+// RFC 6455 section 8.1: a complete text message is UTF-8 over its frames' payloads together, so a
+// form split across two frames is whole; a binary message is any bytes
+TEST(WsFrame, ChecksATextMessage) {
+    struct Row {
+        std::string name;
+        std::vector<std::vector<uint8_t>> frames;
+        MessageKind kind;
+        bool valid;
+    };
+    const Row rows[] = {
+        {"Control: empty text", {{}}, MessageKind::TEXT, true},
+        {"Control: U+20AC split across two frames",
+         {{'a', 0xE2}, {0x82, 0xAC}},
+         MessageKind::TEXT,
+         true},
+        {"Control: binary that is not UTF-8", {{0xFF}, {0xC0, 0x80}}, MessageKind::BINARY, true},
+        {"a form whose last byte never came", {{'a', 0xE2}, {0x82}}, MessageKind::TEXT, false},
+        {"surrogate U+D800 split across two frames",
+         {{0xED}, {0xA0, 0x80}},
+         MessageKind::TEXT,
+         false},
+        {"a lone continuation", {{'a'}, {0x80}}, MessageKind::TEXT, false},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        std::vector<uint8_t> message;
+        for (const std::vector<uint8_t>& frame : row.frames) {
+            message.insert(message.end(), frame.begin(), frame.end());
+        }
+        EXPECT_EQ(ws_message_valid(row.kind, message), row.valid);
     }
 }
 

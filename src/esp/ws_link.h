@@ -137,9 +137,10 @@ protected:
                    : nullptr;
     }
     /// @brief The frame begun last is complete; a final frame offers its message to the ring,
-    /// stamped with rx_us, and stops receiving while it is held (hold_receiving())
-    /// @return false when receiving could not stop: the connection is closing, and the receive
-    /// task ends it
+    /// stamped with rx_us, and stops receiving while it is held (hold_receiving()). A message
+    /// ws_message_valid() refuses fails the connection with close_code::INVALID_PAYLOAD instead.
+    /// @return false when the connection failed or receiving could not stop: the connection is
+    /// closing, and the receive task ends it
     bool end_frame(bool fin, int64_t rx_us);
 
     /// @brief Receive task, as the message of generation is held: stops receiving until it is
@@ -180,12 +181,12 @@ protected:
     /// 5.5.1), unless a close was sent already, and it is reported closed. A frame the writer has
     /// begun cannot be interrupted; past WS_SEND_SLICE_MS in all, waiting for it and sending, the
     /// close goes unanswered.
-    /// @return false when the payload is malformed (ws_close_payload_valid()): fail_protocol()
-    /// instead
+    /// @return false when the payload is malformed: fail_protocol() with the code
+    /// ws_close_payload_fault() gives instead
     bool answer_close(const uint8_t* payload, size_t len);
-    /// @brief The peer broke the protocol: a close frame with close_code::PROTOCOL_ERROR, bounded
-    /// as answer_close()'s, fails the connection (RFC 6455 section 7.1.7), reported closed
-    void fail_protocol();
+    /// @brief The peer broke the protocol: a close frame with code, bounded as answer_close()'s,
+    /// fails the connection (RFC 6455 section 7.1.7), reported closed as PROTOCOL_VIOLATION
+    void fail_protocol(uint16_t code = close_code::PROTOCOL_ERROR);
     /// @brief Receive task: asks the writer to call send_pong()
     void ask_pong();
 

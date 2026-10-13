@@ -62,6 +62,7 @@ namespace close_code {
 constexpr uint16_t NORMAL = 1000;
 constexpr uint16_t GOING_AWAY = 1001;
 constexpr uint16_t PROTOCOL_ERROR = 1002;
+constexpr uint16_t INVALID_PAYLOAD = 1007;
 }  // namespace close_code
 
 /// @brief The largest Noise message (Noise Protocol Framework section 3), and so the largest

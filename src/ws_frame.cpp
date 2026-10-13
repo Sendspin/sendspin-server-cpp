@@ -88,7 +88,8 @@ bool known_opcode(uint8_t opcode) {
     }
 }
 
-/// Whether bytes are UTF-8 (RFC 3629 section 4)
+}  // namespace
+
 bool ws_utf8_valid(std::span<const uint8_t> bytes) {
     size_t i = 0;
     while (i < bytes.size()) {
@@ -110,20 +111,28 @@ bool ws_utf8_valid(std::span<const uint8_t> bytes) {
     return true;
 }
 
-}  // namespace
-
-bool ws_close_payload_valid(std::span<const uint8_t> payload) {
+std::optional<uint16_t> ws_close_payload_fault(std::span<const uint8_t> payload) {
     if (payload.empty()) {
-        return true;
+        return std::nullopt;
     }
     if (payload.size() < CLOSE_CODE_BYTES || payload.size() > WS_CONTROL_PAYLOAD_MAX) {
-        return false;
+        return close_code::PROTOCOL_ERROR;
     }
     const auto code = static_cast<uint16_t>((payload[0] << 8U) | payload[1]);
     const bool sendable =
         std::any_of(SENDABLE_CLOSE_CODES.begin(), SENDABLE_CLOSE_CODES.end(),
                     [code](const CloseCodes& c) { return code >= c.low && code <= c.high; });
-    return sendable && ws_utf8_valid(payload.subspan(CLOSE_CODE_BYTES));
+    if (!sendable) {
+        return close_code::PROTOCOL_ERROR;
+    }
+    if (!ws_utf8_valid(payload.subspan(CLOSE_CODE_BYTES))) {
+        return close_code::INVALID_PAYLOAD;
+    }
+    return std::nullopt;
+}
+
+bool ws_message_valid(MessageKind kind, std::span<const uint8_t> payload) {
+    return kind != MessageKind::TEXT || ws_utf8_valid(payload);
 }
 
 size_t ws_frame_header(uint8_t opcode, size_t len, std::array<uint8_t, WS_FRAME_HEADER_MAX>& header,
