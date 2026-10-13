@@ -34,6 +34,7 @@
 #include <sys/socket.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -448,7 +449,7 @@ asio::execution_context::id NetworkService::id;
 // ==============================================================================
 
 /// The core thread's half of a connection: the write invariant, the room after a write, the events
-/// the network half raises and the buffer it writes from. Holds no I/O object, so it may outlive
+/// the network half raises and the batch it writes from. Holds no I/O object, so it may outlive
 /// the network io_context.
 class Connection::Impl : public InboundEndpoint, public std::enable_shared_from_this<Impl> {
 public:
@@ -465,6 +466,10 @@ public:
 
     void start(ConnectionHandler& handler);
     bool wait_writable();
+    bool can_write() const {
+        return !this->closed_ && this->room_ &&
+               write_batch_has_room(this->batch_count_, this->write_buffer_.size());
+    }
     bool write(MessageKind kind, std::span<const uint8_t> payload);
     void close(uint16_t code);
 
@@ -481,8 +486,16 @@ public:
     /// Set by the network half before it hands the connection to core
     std::weak_ptr<NetConnection> net_;
     std::string remote_endpoint_;
-    /// Written by core for a write, read by the network half until the write completes
+    struct BatchFrame {
+        MessageKind kind;
+        size_t bytes;
+    };
+    /// Written by core for a write, read by the network half until the write completes: the
+    /// payloads back to back, and each frame's kind and size
     std::vector<uint8_t> write_buffer_;
+    std::array<BatchFrame, WRITE_BATCH_MESSAGES> batch_frames_{};
+    /// The frames of the write being built or in flight; the batch is cleared once it completes
+    size_t batch_count_{0};
 
 protected:
     void deliver_message(MessageKind kind, std::span<const uint8_t> payload,
@@ -500,10 +513,12 @@ protected:
         this->room_ = true;
         this->handler_->on_writable();
         this->room_ = false;
+        this->start_write();
     }
 
     void deliver_write_done() override {
         this->write_in_flight_ = false;
+        this->clear_batch();
         if (this->closed_) {
             return;
         }
@@ -529,6 +544,14 @@ protected:
     }
 
 private:
+    /// Starts the write of the messages on_writable() took, unless it took none or closed
+    void start_write();
+
+    void clear_batch() {
+        this->write_buffer_.clear();
+        this->batch_count_ = 0;
+    }
+
     /// Runs fn with the network half on the network thread, unless it is gone by then
     template <typename Fn>
     void to_network(Fn fn) {
@@ -554,7 +577,7 @@ private:
     bool closed_{false};
     bool wait_in_flight_{false};
     bool write_in_flight_{false};
-    // True only while on_writable() runs and nothing has consumed the room
+    // True only while on_writable() runs
     bool room_{false};
 };
 
@@ -613,17 +636,13 @@ public:
             [self = this->shared_from_this()](const error_code& ec) { self->on_wait(ec); });
     }
 
-    void write(MessageKind kind) {
+    /// Writes the core half's batch of frames, each a message of its own, one after another
+    void write(size_t frames) {
         if (this->closed_) {
             return;
         }
-        this->ws_.text(kind == MessageKind::TEXT);
         this->write_in_flight_ = true;
-        this->start_io();
-        this->ws_.async_write(asio::buffer(this->core_->write_buffer_),
-                              [self = this->shared_from_this()](const error_code& ec, size_t) {
-                                  self->on_write(ec);
-                              });
+        this->write_frame(0, 0, frames);
     }
 
     void close(uint16_t code) {
@@ -727,15 +746,33 @@ private:
         this->service_.inbound().raise(this->core_, InboundEndpoint::Event::WRITABLE);
     }
 
-    void on_write(const error_code& ec) {
-        this->write_in_flight_ = false;
+    // Beast writes each frame on its own, as its write lock, which its pongs and closing handshake
+    // share, admits only one message at a time
+    void write_frame(size_t index, size_t offset, size_t frames) {
+        const Connection::Impl::BatchFrame frame = this->core_->batch_frames_[index];
+        this->ws_.text(frame.kind == MessageKind::TEXT);
+        this->start_io();
+        this->ws_.async_write(
+            asio::buffer(this->core_->write_buffer_.data() + offset, frame.bytes),
+            [self = this->shared_from_this(), next = index + 1, end = offset + frame.bytes, frames](
+                const error_code& ec, size_t) { self->on_write(ec, next, end, frames); });
+    }
+
+    void on_write(const error_code& ec, size_t next, size_t offset, size_t frames) {
         if (this->closed_) {
+            this->write_in_flight_ = false;
             return;
         }
         if (ec) {
+            this->write_in_flight_ = false;
             this->fail_unless_read_reports(ec);
             return;
         }
+        if (next < frames) {
+            this->write_frame(next, offset, frames);
+            return;
+        }
+        this->write_in_flight_ = false;
         this->service_.inbound().raise(this->core_, InboundEndpoint::Event::WRITE_DONE);
     }
 
@@ -855,7 +892,7 @@ void Connection::Impl::start(ConnectionHandler& handler) {
 
 bool Connection::Impl::wait_writable() {
     if (this->closed_ || this->handler_ == nullptr || this->wait_in_flight_ ||
-        this->write_in_flight_) {
+        this->write_in_flight_ || this->batch_count_ > 0) {
         return false;
     }
     this->room_ = false;
@@ -877,15 +914,25 @@ bool Connection::Impl::wait_writable() {
 }
 
 bool Connection::Impl::write(MessageKind kind, std::span<const uint8_t> payload) {
-    if (this->closed_ || !this->room_ || this->write_in_flight_) {
+    if (!this->can_write()) {
         return false;
     }
-    this->room_ = false;
-    this->small_write_ = payload.size() <= ROOM_AFTER_WRITE_MAX_BYTES;
-    this->write_buffer_.assign(payload.begin(), payload.end());
-    this->write_in_flight_ = true;
-    this->to_network([kind](NetConnection& net) { net.write(kind); });
+    this->write_buffer_.insert(this->write_buffer_.end(), payload.begin(), payload.end());
+    this->batch_frames_[this->batch_count_++] = {kind, payload.size()};
     return true;
+}
+
+void Connection::Impl::start_write() {
+    if (this->batch_count_ == 0) {
+        return;
+    }
+    if (this->closed_) {
+        this->clear_batch();
+        return;
+    }
+    this->small_write_ = this->write_buffer_.size() <= ROOM_AFTER_WRITE_MAX_BYTES;
+    this->write_in_flight_ = true;
+    this->to_network([frames = this->batch_count_](NetConnection& net) { net.write(frames); });
 }
 
 void Connection::Impl::close(uint16_t code) {
@@ -923,6 +970,10 @@ void Connection::start(ConnectionHandler& handler) {
 
 bool Connection::wait_writable() {
     return this->impl_->wait_writable();
+}
+
+bool Connection::can_write() const {
+    return this->impl_->can_write();
 }
 
 bool Connection::write(MessageKind kind, std::span<const uint8_t> payload) {

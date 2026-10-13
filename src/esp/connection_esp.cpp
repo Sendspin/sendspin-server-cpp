@@ -70,7 +70,7 @@ void Connection::Impl::start(ConnectionHandler& handler) {
 
 bool Connection::Impl::wait_writable() {
     if (this->closed_ || this->handler_ == nullptr || this->wait_in_flight_ ||
-        this->write_in_flight_) {
+        this->write_in_flight_ || this->batch_count_ > 0) {
         return false;
     }
     this->room_ = false;
@@ -95,15 +95,28 @@ bool Connection::Impl::wait_writable() {
 }
 
 bool Connection::Impl::write(MessageKind kind, std::span<const uint8_t> payload) {
-    if (this->closed_ || !this->room_ || this->write_in_flight_) {
+    if (!this->can_write()) {
         return false;
     }
-    this->room_ = false;
-    this->small_write_ = payload.size() <= ROOM_AFTER_WRITE_MAX_BYTES;
+    this->link_->stage_write(kind, payload);
+    ++this->batch_count_;
+    this->batch_bytes_ += payload.size();
+    return true;
+}
+
+void Connection::Impl::start_write() {
+    if (this->batch_count_ == 0) {
+        return;
+    }
+    if (this->closed_) {
+        this->batch_count_ = 0;
+        this->batch_bytes_ = 0;
+        return;
+    }
+    this->small_write_ = this->batch_bytes_ <= ROOM_AFTER_WRITE_MAX_BYTES;
     this->write_in_flight_ = true;
     this->start_io();
-    this->link_->request_write(kind, payload);
-    return true;
+    this->link_->request_write();
 }
 
 void Connection::Impl::close(uint16_t code) {
@@ -161,10 +174,13 @@ void Connection::Impl::on_wait() {
     this->room_ = true;
     this->handler_->on_writable();
     this->room_ = false;
+    this->start_write();
 }
 
 void Connection::Impl::on_write() {
     this->write_in_flight_ = false;
+    this->batch_count_ = 0;
+    this->batch_bytes_ = 0;
     if (this->closed_) {
         return;
     }
@@ -332,6 +348,10 @@ void Connection::start(ConnectionHandler& handler) {
 
 bool Connection::wait_writable() {
     return this->impl_->wait_writable();
+}
+
+bool Connection::can_write() const {
+    return this->impl_->can_write();
 }
 
 bool Connection::write(MessageKind kind, std::span<const uint8_t> payload) {

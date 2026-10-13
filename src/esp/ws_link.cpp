@@ -90,9 +90,11 @@ void WsLink::request_room() {
     this->request(REQUEST_ROOM);
 }
 
-void WsLink::request_write(MessageKind kind, std::span<const uint8_t> payload) {
-    this->write_kind_ = kind;
-    this->write_bytes_.assign(payload.begin(), payload.end());
+void WsLink::stage_write(MessageKind kind, std::span<const uint8_t> payload) {
+    this->write_batch_.append(kind, payload);
+}
+
+void WsLink::request_write() {
     this->request(REQUEST_WRITE);
 }
 
@@ -255,8 +257,9 @@ void WsLink::writer_main() {
                 this->send_ping();
             }
             if ((requests & REQUEST_WRITE) != 0) {
-                if (this->send_message(this->write_kind_, this->write_bytes_.data(),
-                                       this->write_bytes_.size())) {
+                const bool sent = this->send_batch(this->write_batch_);
+                this->write_batch_.clear();
+                if (sent) {
                     this->raise(InboundEndpoint::Event::WRITE_DONE);
                 } else {
                     // The close is the write's outcome

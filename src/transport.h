@@ -67,10 +67,22 @@ constexpr uint16_t GOING_AWAY = 1001;
 /// WebSocket message either side sends
 constexpr size_t MAX_MESSAGE_BYTES = 65535;
 
-/// @brief The largest message whose completed write is room for the next (wait_writable()); a
-/// chunk may fill the send buffer, and a wait after it lets a time reply arriving meanwhile go
-/// first
+/// @brief The largest write whose completion is room for the next (wait_writable()); a chunk may
+/// fill the send buffer, and a wait after it lets a time reply arriving meanwhile go first
 constexpr size_t ROOM_AFTER_WRITE_MAX_BYTES = 1024;
+
+/// @brief The most messages one write carries: four analysis instants' visualizer messages, one per
+/// type the server streams (visualizer_type::STREAMABLE), or fewer beside control traffic
+constexpr size_t WRITE_BATCH_MESSAGES = 16;
+/// @brief A message joins a write only while the messages before it total fewer bytes: four
+/// instants at the largest spectrum (MAX_DISPLAY_BINS) fit, encrypted, and a chunk goes last. Past
+/// ROOM_AFTER_WRITE_MAX_BYTES, a write's completion is not room for the next.
+constexpr size_t WRITE_BATCH_BYTES = 4096;
+
+/// @brief Whether a write holding count messages of bytes in all takes another
+constexpr bool write_batch_has_room(size_t count, size_t bytes) {
+    return count < WRITE_BATCH_MESSAGES && bytes < WRITE_BATCH_BYTES;
+}
 
 constexpr int64_t DEFAULT_HANDSHAKE_TIMEOUT_US = 30000000;
 constexpr int64_t DEFAULT_IDLE_TIMEOUT_US = 60000000;
@@ -121,10 +133,10 @@ public:
     /// byte is in (spec messaging.md "Receive timestamps"), however late core gets to it
     virtual void on_message(MessageKind kind, std::span<const uint8_t> payload, int64_t rx_us) = 0;
 
-    /// @brief The socket has room for one write()
+    /// @brief The socket has room for one write, of the messages write() takes during this call
     virtual void on_writable() = 0;
 
-    /// @brief The message passed to write() is fully handed to the kernel
+    /// @brief Every message of the write is fully handed to the kernel
     virtual void on_write_done() = 0;
 
     /// @brief The connection failed or the peer closed it. The last event; close() reports none.
@@ -136,8 +148,10 @@ public:
 /// operations keep the internals alive until they complete.
 ///
 /// Write invariant: wait_writable() asks for one on_writable(); write() is accepted only inside
-/// on_writable() and only when no write is in flight; the next wait_writable() is accepted only
-/// after on_write_done(). The connection queues nothing itself.
+/// on_writable(), for as long as can_write() holds, and the messages it takes there go out as one
+/// write once on_writable() returns, each its own WebSocket frame, in order; the next
+/// wait_writable() is accepted only after on_write_done(). The connection queues nothing past
+/// that write.
 ///
 /// No method calls the handler synchronously; every event comes from a handler on the loop.
 class Connection {
@@ -156,20 +170,25 @@ public:
     void start(ConnectionHandler& handler);
 
     /// @brief Waits for the socket to report room, then calls on_writable(). Write-stall timed.
-    /// After a completed write of at most 1,024 bytes with no `TCP_NOTSENT_LOWAT` gating room
-    /// (notsent_lowat_bytes 0, or ESP-IDF's lwIP), the write left room: on_writable() follows with
-    /// no wait on the socket, once on_write_done() has returned when called from it, else in a
-    /// handler of its own.
+    /// After a completed write of at most ROOM_AFTER_WRITE_MAX_BYTES with no `TCP_NOTSENT_LOWAT`
+    /// gating room (notsent_lowat_bytes 0, or ESP-IDF's lwIP), the write left room: on_writable()
+    /// follows with no wait on the socket, once on_write_done() has returned when called from it,
+    /// else in a handler of its own.
     /// @return false when closed, not started, or refused by the write invariant
     bool wait_writable();
 
-    /// @brief Starts writing one message as one WebSocket frame; the payload is copied.
-    /// Write-stall timed.
+    /// @brief Whether write() would take a message now: inside on_writable(), while the write
+    /// has room under write_batch_has_room()
+    bool can_write() const;
+
+    /// @brief Adds one message, as one WebSocket frame, to the write on_writable() starts as it
+    /// returns; the payload is copied. Write-stall timed.
     /// @return false when closed or refused by the write invariant
     bool write(MessageKind kind, std::span<const uint8_t> payload);
 
     /// @brief Closes with a WebSocket close frame carrying code, or drops the TCP connection
-    /// when a write is in flight. No event follows.
+    /// when a write is in flight. Inside on_writable(), the messages written there are dropped.
+    /// No event follows.
     void close(uint16_t code);
 
     /// @brief False once closed by either side

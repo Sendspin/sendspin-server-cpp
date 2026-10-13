@@ -36,7 +36,9 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,6 +58,9 @@ constexpr int WS_CLIENT_PRIORITY = 12;
 constexpr size_t WS_CLIENT_BUFFER_MAX_BYTES = 16384;
 /// The client's own pings are left at about one a day: the idle timer on the core task pings
 constexpr size_t WS_CLIENT_PING_INTERVAL_S = 86400;
+/// The cork keeps up to this much storage once sent: a write of small messages with their headers
+/// fits, and one carrying a larger message frees it
+constexpr size_t WS_KEPT_CORK_BYTES = 2 * WRITE_BATCH_BYTES;
 constexpr int64_t US_PER_MS = 1000;
 
 TickType_t ticks_for_us(int64_t us) {
@@ -103,8 +108,8 @@ int poll_fd(int fd, bool for_write, int timeout_ms) {
 /// reads and writes take it under one mutex, held only for the call that moves the bytes. Owning
 /// the socket also sets
 /// TCP_NODELAY (esp_transport_ws writes a frame's header and payload as two writes, so a small
-/// message could otherwise wait for the peer's delayed ACK) and lets the address tried differ
-/// from the Host header's name.
+/// message could otherwise wait for the peer's delayed ACK), lets the address tried differ from
+/// the Host header's name, and corks a write of several frames into one send (send_batch()).
 class ClientLink final : public WsLink {
 public:
     ClientLink(SharedPtr<LoopCore> loop, const TransportSettings& settings, DialTarget target)
@@ -173,14 +178,25 @@ protected:
         return poll_fd(this->socket_snapshot(), true, timeout_ms);
     }
 
-    bool send_message(MessageKind kind, const uint8_t* data, size_t len) override {
-        const TickType_t timeout = ticks_for_us(this->settings_.write_stall_us);
-        const char* bytes = reinterpret_cast<const char*>(data);
-        const int size = static_cast<int>(len);
-        const int sent = kind == MessageKind::TEXT
-                             ? esp_websocket_client_send_text(this->client_, bytes, size, timeout)
-                             : esp_websocket_client_send_bin(this->client_, bytes, size, timeout);
-        return sent == size;
+    // One frame goes through the client to the socket. Several go through it into the cork
+    // (write_socket()), where whatever the client task sends meanwhile takes its place among them
+    // as written, and leave in one send.
+    bool send_batch(const WsBatch& batch) override {
+        const bool corked = batch.frames() > 1;
+        if (corked) {
+            const std::lock_guard<std::mutex> lock(this->socket_mutex_);
+            this->corked_ = true;
+        }
+        bool sent = true;
+        size_t offset = 0;
+        while (sent) {
+            const std::optional<WsBatch::Frame> frame = batch.next(offset);
+            if (!frame) {
+                break;
+            }
+            sent = this->send_message(frame->kind, frame->payload);
+        }
+        return corked ? this->flush_cork(sent) : sent;
     }
 
     bool send_ping() override {
@@ -206,6 +222,59 @@ protected:
     }
 
 private:
+    bool send_message(MessageKind kind, std::span<const uint8_t> payload) {
+        const TickType_t timeout = ticks_for_us(this->settings_.write_stall_us);
+        const char* bytes = reinterpret_cast<const char*>(payload.data());
+        const int size = static_cast<int>(payload.size());
+        const int sent = kind == MessageKind::TEXT
+                             ? esp_websocket_client_send_text(this->client_, bytes, size, timeout)
+                             : esp_websocket_client_send_bin(this->client_, bytes, size, timeout);
+        return sent == size;
+    }
+
+    /// The writer: sends the cork whole within the write stall, then lets writes through to the
+    /// socket again. A failure shuts the socket down, so nothing written after it follows a part
+    /// of the cork.
+    bool flush_cork(bool ok) {
+        const int64_t deadline_us = now_us() + this->settings_.write_stall_us;
+        size_t done = 0;
+        while (true) {
+            ssize_t sent = 0;
+            int fd = -1;
+            {
+                const std::lock_guard<std::mutex> lock(this->socket_mutex_);
+                fd = this->fd_;
+                const bool finished = ok && done == this->cork_.size();
+                if (finished || !ok || fd < 0 || this->shut_) {
+                    if (!finished && fd >= 0 && !this->shut_) {
+                        shutdown(fd, SHUT_RDWR);
+                        this->shut_ = true;
+                    }
+                    this->corked_ = false;
+                    this->cork_.clear();
+                    if (this->cork_.capacity() > WS_KEPT_CORK_BYTES) {
+                        ExternalBytes().swap(this->cork_);
+                    }
+                    return finished;
+                }
+                sent = send(fd, this->cork_.data() + done, this->cork_.size() - done, MSG_DONTWAIT);
+            }
+            if (sent > 0) {
+                done += static_cast<size_t>(sent);
+                continue;
+            }
+            if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                ok = false;
+                continue;
+            }
+            const int64_t left_us = deadline_us - now_us();
+            if (left_us <= 0 || this->close_requested() ||
+                poll_fd(fd, true, ms_for_us(left_us)) < 0) {
+                ok = false;
+            }
+        }
+    }
+
     static void on_event(void* arg, esp_event_base_t /*base*/, int32_t id, void* data) {
         // First, so a message's stamp is as close to its last byte's arrival as this task gets
         const int64_t rx_us = now_us();
@@ -366,6 +435,13 @@ private:
 
     static int socket_poll_write(esp_transport_handle_t t, int timeout_ms) {
         ClientLink& link = link_of(t);
+        {
+            // A write to the cork never waits
+            const std::lock_guard<std::mutex> lock(link.socket_mutex_);
+            if (link.corked_ && link.fd_ >= 0 && !link.shut_) {
+                return 1;
+            }
+        }
         return poll_fd(link.socket_snapshot(), true, link.bounded_ms(timeout_ms));
     }
 
@@ -444,7 +520,8 @@ private:
 
     /// The writer, or the client task for its pongs, pings and closes (esp_websocket_client's
     /// send lock serializes them): all of buffer within timeout_ms, or -1, since esp_transport_ws
-    /// would send the rest of a short write as a frame of its own
+    /// would send the rest of a short write as a frame of its own. While corked, the rest goes
+    /// into the cork, behind every byte written before it.
     int write_socket(const char* buffer, int len, int timeout_ms) {
         const int64_t deadline_us = now_us() + static_cast<int64_t>(timeout_ms) * US_PER_MS;
         int written = 0;
@@ -457,6 +534,14 @@ private:
                 fd = this->fd_;
                 if (fd < 0 || this->shut_) {
                     return -1;
+                }
+                if (this->corked_) {
+                    try {
+                        this->cork_.insert(this->cork_.end(), buffer + written, buffer + len);
+                    } catch (const std::bad_alloc&) {
+                        return -1;
+                    }
+                    return len;
                 }
                 sent = send(fd, buffer + written, static_cast<size_t>(len - written), MSG_DONTWAIT);
             }
@@ -572,6 +657,9 @@ private:
     int fd_{-1};
     /// Guarded by socket_mutex_: fd_ is shut down, to be closed when the transport is destroyed
     bool shut_{false};
+    /// Guarded by socket_mutex_: writes go into cork_, which the writer sends whole (flush_cork())
+    bool corked_{false};
+    ExternalBytes cork_;
     /// The client task has ended
     std::atomic<bool> finished_{false};
     std::atomic<int> attempt_failure_{static_cast<int>(CloseReason::FAILED)};

@@ -173,7 +173,8 @@ private:
     Gate& gate_;
 };
 
-// Sends queued messages one at a time under the write invariant and records every event
+// Sends queued messages under the write invariant, as many to a write as it takes (at most
+// per_write), and records every event
 class TestHandler : public ConnectionHandler {
 public:
     struct Message {
@@ -208,13 +209,22 @@ public:
             this->busy_ = false;
             return;
         }
-        auto [kind, payload] = std::move(this->queue_.front());
-        this->queue_.pop_front();
-        EXPECT_TRUE(this->connection_->write(kind, payload));
+        size_t taken = 0;
+        while (!this->queue_.empty() && taken < this->per_write && this->connection_->can_write()) {
+            auto [kind, payload] = std::move(this->queue_.front());
+            this->queue_.pop_front();
+            EXPECT_TRUE(this->connection_->write(kind, payload));
+            ++taken;
+        }
+        this->write_sizes.push_back(taken);
         ++this->writes_started;
     }
 
     void on_write_done() override {
+        // A writable_hook's writes are not counted
+        if (static_cast<size_t>(this->write_done) < this->write_sizes.size()) {
+            this->messages_done += this->write_sizes[this->write_done];
+        }
         ++this->write_done;
         this->busy_ = false;
         if (!this->queue_.empty()) {
@@ -233,6 +243,10 @@ public:
     int writable{0};
     int writes_started{0};
     int write_done{0};
+    // The messages of each write started, and of those completed
+    std::vector<size_t> write_sizes;
+    size_t messages_done{0};
+    size_t per_write{SIZE_MAX};
     std::function<void()> message_hook;
     std::function<void()> writable_hook;
 
@@ -1282,26 +1296,26 @@ TEST_F(TransportTest, WritesOnlyWhenRoomWasReportedAndNoWriteIsInFlight) {
     EXPECT_FALSE(connection.write(MessageKind::TEXT, first));
 
     bool first_written = false;
-    bool second_write_refused = false;
     bool wait_during_write_refused = false;
     handler.writable_hook = [&] {
         first_written = connection.write(MessageKind::TEXT, first);
-        // The room is consumed and a write is in flight
-        second_write_refused = !connection.write(MessageKind::TEXT, second);
+        // The write has begun
         wait_during_write_refused = !connection.wait_writable();
     };
     this->run_until([&] { return handler.writable == 1; });
     EXPECT_TRUE(first_written);
-    EXPECT_TRUE(second_write_refused);
     EXPECT_TRUE(wait_during_write_refused);
-    // Outside on_writable()
+    // Outside on_writable(), and with the write in flight
+    EXPECT_FALSE(connection.can_write());
     EXPECT_FALSE(connection.write(MessageKind::TEXT, second));
+    EXPECT_FALSE(connection.wait_writable());
     this->run_until([&] { return handler.write_done == 1; });
 
     // Room reported but not used expires with the callback
     handler.writable_hook = [] {};
     ASSERT_TRUE(connection.wait_writable());
     this->run_until([&] { return handler.writable == 2; });
+    EXPECT_FALSE(connection.can_write());
     EXPECT_FALSE(connection.write(MessageKind::TEXT, second));
 
     bool second_written = false;
@@ -1318,6 +1332,140 @@ TEST_F(TransportTest, WritesOnlyWhenRoomWasReportedAndNoWriteIsInFlight) {
     EXPECT_TRUE(handler.closes.empty());
 }
 
+// The messages one on_writable() writes leave as one write: each a final frame of its own, text or
+// binary as written, masked on a dialed connection, in order, and one on_write_done() for all
+TEST_F(TransportTest, AWriteCarriesEachMessageAsAFrameOfItsOwn) {
+    const std::vector<std::pair<MessageKind, std::vector<uint8_t>>> messages = {
+        {MessageKind::TEXT, bytes_of("first")},
+        // A 16-bit length
+        {MessageKind::BINARY, pattern(300)},
+        {MessageKind::BINARY, {}},
+        {MessageKind::TEXT, bytes_of("{}")},
+        // Past WRITE_BATCH_BYTES with the messages before it, the largest message there is
+        {MessageKind::BINARY, pattern(sendspin::server::MAX_MESSAGE_BYTES)},
+    };
+    for (const bool dialed : {false, true}) {
+        SCOPED_TRACE(dialed ? "dialed (masked)" : "accepted");
+        this->accepted.clear();
+        asio::io_context peer_io;
+        tcp::acceptor acceptor(peer_io, {LOOPBACK, 0});
+        auto listener = this->listen();
+        const uint16_t port = listener->port();
+        bool peer_ready = false;
+        std::vector<RawFrame> frames;
+
+        Peer peer(this->io, [&] {
+            PeerSocket ws(peer_io);
+            if (dialed) {
+                accept_peer(acceptor, ws);
+            } else {
+                connect_peer(ws, port);
+            }
+            this->signal(peer_ready);
+            for (size_t i = 0; i < messages.size(); ++i) {
+                frames.push_back(read_raw_frame(ws.next_layer()));
+            }
+        });
+
+        std::optional<Connection> dialed_connection;
+        if (dialed) {
+            dialed_connection = this->dial_and_wait(*parse_ws_url(
+                "ws://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/"));
+            ASSERT_TRUE(dialed_connection.has_value());
+        } else {
+            this->run_until([&] { return !this->accepted.empty(); });
+        }
+        Connection& connection = dialed ? *dialed_connection : this->accepted.front();
+        TestHandler handler(connection);
+        connection.start(handler);
+        // The peer reads raw frames, so nothing may follow its handshake response unread
+        this->run_until([&] { return peer_ready; });
+        size_t written = 0;
+        handler.writable_hook = [&] {
+            for (const auto& [kind, payload] : messages) {
+                written += connection.write(kind, payload) ? 1 : 0;
+            }
+        };
+        ASSERT_TRUE(connection.wait_writable());
+        this->run_until([&] { return peer.done() && handler.write_done == 1; });
+
+        ASSERT_EQ(peer.error(), "");
+        EXPECT_EQ(written, messages.size());
+        EXPECT_EQ(handler.writable, 1);
+        ASSERT_EQ(frames.size(), messages.size());
+        for (size_t i = 0; i < messages.size(); ++i) {
+            SCOPED_TRACE(i);
+            EXPECT_TRUE(frames[i].fin);
+            EXPECT_EQ(frames[i].opcode, messages[i].first == MessageKind::TEXT ? 0x1 : 0x2);
+            EXPECT_EQ(frames[i].masked, dialed);
+            EXPECT_EQ(frames[i].payload, messages[i].second);
+        }
+    }
+}
+
+// A message joins a write while the write holds fewer than WRITE_BATCH_MESSAGES messages and
+// WRITE_BATCH_BYTES bytes; the first refused goes in the next write, after the write before it
+TEST_F(TransportTest, AWriteTakesMessagesWithinItsBounds) {
+    using sendspin::server::WRITE_BATCH_BYTES;
+    using sendspin::server::WRITE_BATCH_MESSAGES;
+    struct Row {
+        const char* name;
+        size_t message_size;
+        size_t messages;
+        // Those the first write takes
+        size_t taken;
+    };
+    const Row rows[] = {
+        {"Control: every message within both bounds", 100, 4, 4},
+        {"message count", 1, WRITE_BATCH_MESSAGES + 1, WRITE_BATCH_MESSAGES},
+        // The message that reaches WRITE_BATCH_BYTES is the write's last
+        {"bytes, reached exactly", WRITE_BATCH_BYTES / 4, 6, 4},
+        {"bytes, passed", 1000, 6, (WRITE_BATCH_BYTES + 999) / 1000},
+        {"bytes, one message past them", WRITE_BATCH_BYTES + 1, 2, 1},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        this->accepted.clear();
+        auto listener = this->listen();
+        const uint16_t port = listener->port();
+        std::vector<std::vector<uint8_t>> received;
+
+        Peer peer(this->io, [&] {
+            asio::io_context peer_io;
+            PeerSocket ws(peer_io);
+            connect_peer(ws, port);
+            for (size_t i = 0; i < row.messages; ++i) {
+                beast::flat_buffer buffer;
+                ws.read(buffer);
+                received.push_back(buffer_bytes(buffer));
+            }
+        });
+        this->run_until([&] { return !this->accepted.empty(); });
+        Connection& connection = this->accepted.front();
+        TestHandler handler(connection);
+        connection.start(handler);
+        // Each message distinct, so the peer's order shows
+        for (size_t i = 0; i < row.messages; ++i) {
+            std::vector<uint8_t> message = pattern(row.message_size);
+            message[0] = static_cast<uint8_t>(i);
+            handler.send(MessageKind::BINARY, message);
+        }
+        this->run_until([&] { return peer.done() && handler.messages_done == row.messages; });
+
+        ASSERT_EQ(peer.error(), "");
+        std::vector<size_t> writes{row.taken};
+        if (row.taken < row.messages) {
+            writes.push_back(row.messages - row.taken);
+        }
+        EXPECT_EQ(handler.write_sizes, writes);
+        ASSERT_EQ(received.size(), row.messages);
+        for (size_t i = 0; i < row.messages; ++i) {
+            EXPECT_EQ(received[i].size(), row.message_size);
+            EXPECT_EQ(received[i][0], static_cast<uint8_t>(i)) << i;
+        }
+    }
+}
+
 TEST_F(TransportTest, WriteStallClosesOnlyAPeerThatStopsReading) {
     struct Row {
         const char* name;
@@ -1327,19 +1475,22 @@ TEST_F(TransportTest, WriteStallClosesOnlyAPeerThatStopsReading) {
         int messages;
         // When stalled: a write outstanding, rather than a wait for room
         bool write_stalls{false};
+        size_t per_write{SIZE_MAX};
     };
     const Row rows[] = {
         {"Control: peer reads", true, 16384, 65000, 64},
-        // With no low-water mark a completed small write is the room for the next, with no wait
-        {"Control: peer reads, no low-water mark", true, 0, 1000, 4000},
-        // Each small write completes; the wait for room is what never ends
+        // With no low-water mark a completed small write is the room for the next, with no wait:
+        // writes of WRITE_BATCH_MESSAGES messages of 64 bytes
+        {"Control: peer reads, no low-water mark", true, 0, 64, 4000},
+        // Each write of small messages completes; the wait for room is what never ends
         {"peer stops reading, wait stalls", false, 16384, 1000, 4000},
         // One message far larger than the socket buffers
         {"peer stops reading, write stalls", false, 0, 16 * 1024 * 1024, 1, true},
         // Small writes with no wait between them, until one fills the socket buffers and stays
-        {"peer stops reading, a later small write stalls", false, 0, 1000, 64000, true},
-        // Past ROOM_AFTER_WRITE_MAX_BYTES each write is followed by a wait, which never ends
-        {"peer stops reading, a wait after a larger write stalls", false, 0, 2000, 32000},
+        {"peer stops reading, a later small write stalls", false, 0, 1000, 64000, true, 1},
+        // Past ROOM_AFTER_WRITE_MAX_BYTES each write is followed by a wait, which never ends: one
+        // message to a write, which a socket reporting room always takes whole
+        {"peer stops reading, a wait after a larger write stalls", false, 0, 2000, 32000, false, 1},
     };
     for (const Row& row : rows) {
         SCOPED_TRACE(row.name);
@@ -1372,6 +1523,7 @@ TEST_F(TransportTest, WriteStallClosesOnlyAPeerThatStopsReading) {
         this->run_until([&] { return !this->accepted.empty(); });
         Connection& connection = this->accepted.front();
         TestHandler handler(connection);
+        handler.per_write = row.per_write;
         connection.start(handler);
         // As fast as room allows
         const std::vector<uint8_t> message = pattern(row.message_size);
@@ -1381,14 +1533,14 @@ TEST_F(TransportTest, WriteStallClosesOnlyAPeerThatStopsReading) {
 
         if (row.peer_reads) {
             this->run_until([&] { return peer.done() && !handler.closes.empty(); });
-            EXPECT_EQ(handler.write_done, row.messages);
+            EXPECT_EQ(handler.messages_done, static_cast<size_t>(row.messages));
             EXPECT_EQ(peer_received, row.messages);
             EXPECT_EQ(handler.closes, std::vector<CloseReason>{CloseReason::PEER_CLOSED});
         } else {
             this->run_until([&] { return !handler.closes.empty(); });
             EXPECT_EQ(handler.closes, std::vector<CloseReason>{CloseReason::WRITE_STALLED});
             EXPECT_FALSE(connection.is_open());
-            EXPECT_LT(handler.write_done, row.messages);
+            EXPECT_LT(handler.messages_done, static_cast<size_t>(row.messages));
             EXPECT_EQ(handler.writes_started, handler.write_done + (row.write_stalls ? 1 : 0));
             EXPECT_EQ(handler.write_done > 0, row.messages > 1);
             release.open();
@@ -1428,10 +1580,10 @@ TEST_F(TransportTest, AHealthyPeerOutlivesTheStallTimeout) {
         TestHandler handler(connection);
         connection.start(handler);
         const std::vector<uint8_t> message = pattern(1000);
-        int sent = 0;
+        size_t sent = 0;
         const int64_t end = now_us() + (3 * STALL_US);
         this->run_until([&] {
-            while (sent - handler.write_done < 16) {
+            while (sent - handler.messages_done < 16) {
                 handler.send(MessageKind::BINARY, message);
                 ++sent;
             }
@@ -1439,7 +1591,7 @@ TEST_F(TransportTest, AHealthyPeerOutlivesTheStallTimeout) {
         });
         EXPECT_TRUE(handler.closes.empty());
         EXPECT_TRUE(connection.is_open());
-        EXPECT_GT(handler.write_done, 100);
+        EXPECT_GT(handler.messages_done, 100U);
         connection.close(close_code::NORMAL);
         this->run_until([&] { return peer.done(); });
         ASSERT_EQ(peer.error(), "");
@@ -1535,6 +1687,44 @@ TEST_F(TransportTest, ExplicitCloseSendsTheCodeAndReportsNothing) {
     ASSERT_EQ(peer.error(), "");
     EXPECT_EQ(peer_error, websocket::error::closed);
     EXPECT_EQ(peer_close_code, APPLICATION_CODE);
+}
+
+// A close inside on_writable() drops the messages written there: the peer gets the close frame
+// alone, and nothing is reported
+TEST_F(TransportTest, CloseInsideOnWritableDropsTheMessagesWrittenThere) {
+    auto listener = this->listen();
+    const uint16_t port = listener->port();
+    error_code peer_error;
+    uint16_t peer_close_code = 0;
+
+    Peer peer(this->io, [&] {
+        asio::io_context peer_io;
+        PeerSocket ws(peer_io);
+        connect_peer(ws, port);
+        beast::flat_buffer buffer;
+        ws.read(buffer, peer_error);
+        peer_close_code = ws.reason().code;
+    });
+    this->run_until([&] { return !this->accepted.empty(); });
+    Connection& connection = this->accepted.front();
+    TestHandler handler(connection);
+    bool written = false;
+    handler.writable_hook = [&] {
+        written = connection.write(MessageKind::TEXT, bytes_of("one")) &&
+                  connection.write(MessageKind::BINARY, pattern(100));
+        connection.close(close_code::NORMAL);
+    };
+    connection.start(handler);
+    ASSERT_TRUE(connection.wait_writable());
+    this->run_until([&] { return peer.done(); });
+    while (this->io.poll() > 0) {}
+
+    ASSERT_EQ(peer.error(), "");
+    EXPECT_TRUE(written);
+    EXPECT_EQ(peer_error, websocket::error::closed);
+    EXPECT_EQ(peer_close_code, websocket::close_code::normal);
+    EXPECT_EQ(handler.write_done, 0);
+    EXPECT_TRUE(handler.closes.empty());
 }
 
 TEST_F(TransportTest, PeerCloseIsReportedOnceAndEndsTheConnection) {

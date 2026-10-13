@@ -39,6 +39,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -71,35 +72,10 @@ constexpr size_t CONTROL_PAYLOAD_MAX = 125;
 /// The longest a send waits for room at a time (SessionLink::write_frame()) before it checks for a
 /// close asked for; the longest httpd's task waits to answer a close
 constexpr int SEND_SLICE_MS = 200;
-/// A frame header the server sends: no mask, at most a 64-bit length (RFC 6455 section 5.2)
-constexpr size_t FRAME_HEADER_MAX = 10;
-constexpr uint8_t FIN = 0x80;
 /// Close codes a close frame never carries (RFC 6455 section 7.4.1)
 constexpr uint16_t CLOSE_NO_STATUS = 1005;
 constexpr uint16_t CLOSE_ABNORMAL = 1006;
 constexpr uint16_t CLOSE_TLS_HANDSHAKE = 1015;
-
-size_t frame_header(uint8_t opcode, size_t len, std::array<uint8_t, FRAME_HEADER_MAX>& header) {
-    constexpr size_t LEN_7_MAX = 125;
-    constexpr size_t LEN_16_MAX = 65535;
-    header[0] = FIN | opcode;
-    if (len <= LEN_7_MAX) {
-        header[1] = static_cast<uint8_t>(len);
-        return 2;
-    }
-    if (len <= LEN_16_MAX) {
-        header[1] = 126;
-        header[2] = static_cast<uint8_t>(len >> 8U);
-        header[3] = static_cast<uint8_t>(len);
-        return 4;
-    }
-    header[1] = 127;
-    const auto len64 = static_cast<uint64_t>(len);
-    for (size_t i = 0; i < 8; ++i) {
-        header[2 + i] = static_cast<uint8_t>(len64 >> (8U * (7 - i)));
-    }
-    return FRAME_HEADER_MAX;
-}
 
 /// What httpd's callbacks reach, as its global user context: held by the Listener and by itself
 /// while httpd runs, so a Listener destroyed while sessions stay open leaves it alive
@@ -273,9 +249,18 @@ protected:
         return select(this->fd_ + 1, nullptr, &writable, nullptr, &timeout);
     }
 
-    bool send_message(MessageKind kind, const uint8_t* data, size_t len) override {
-        return this->send_frame(kind == MessageKind::TEXT ? ws_opcode::TEXT : ws_opcode::BINARY,
-                                data, len);
+    // The batch's frames in one send, as it holds them
+    bool send_batch(const WsBatch& batch) override {
+        const std::lock_guard<std::timed_mutex> lock(this->frame_mutex_);
+        if (this->close_sent_ || this->frame_broken_) {
+            return false;
+        }
+        const std::span<const uint8_t> bytes = batch.bytes();
+        std::array<iovec, 1> parts{};
+        parts[0].iov_base = const_cast<uint8_t*>(bytes.data());
+        parts[0].iov_len = bytes.size();
+        return this->send_parts(parts.data(), parts.size(),
+                                now_us() + this->settings_.write_stall_us);
     }
 
     bool send_ping() override {
@@ -350,10 +335,7 @@ private:
         this->write_frame(ws_opcode::CLOSE, payload, echoed, deadline_us);
     }
 
-    /// Under frame_mutex_: writes one frame until it is all sent, deadline_us passes or a close is
-    /// asked for. The socket mutex is held only while lwIP copies what fits, so httpd's close of
-    /// the session waits no longer than that. A frame left part written breaks the stream: every
-    /// later frame, a close included, is refused, and the session just ends.
+    /// Under frame_mutex_: writes one frame (send_parts())
     bool write_frame(uint8_t opcode, const uint8_t* data, size_t len, int64_t deadline_us) {
         // RFC 6455 section 5.5.1: nothing follows a close frame
         if (this->close_sent_ || this->frame_broken_) {
@@ -362,20 +344,31 @@ private:
         if (opcode == ws_opcode::CLOSE) {
             this->close_sent_ = true;
         }
-        std::array<uint8_t, FRAME_HEADER_MAX> header{};
-        const size_t header_bytes = frame_header(opcode, len, header);
+        std::array<uint8_t, WS_FRAME_HEADER_MAX> header{};
+        const size_t header_bytes = ws_frame_header(opcode, len, header);
         // Header and payload in one call, so they leave in as few segments as fit
         std::array<iovec, 2> parts{};
         parts[0].iov_base = header.data();
         parts[0].iov_len = header_bytes;
         parts[1].iov_base = const_cast<uint8_t*>(data);
         parts[1].iov_len = len;
+        return this->send_parts(parts.data(), len > 0 ? 2 : 1, deadline_us);
+    }
+
+    /// Under frame_mutex_: sends whole frames until they are all sent, deadline_us passes or a
+    /// close is asked for. The socket mutex is held only while lwIP copies what fits, so httpd's
+    /// close of the session waits no longer than that. A frame left part written breaks the
+    /// stream: every later frame, a close included, is refused, and the session just ends.
+    bool send_parts(iovec* parts, size_t count, int64_t deadline_us) {
         msghdr message{};
-        message.msg_iov = parts.data();
-        message.msg_iovlen = len > 0 ? 2 : 1;
-        const size_t total = header_bytes + len;
+        message.msg_iov = parts;
+        message.msg_iovlen = static_cast<decltype(message.msg_iovlen)>(count);
+        size_t total = 0;
+        for (size_t i = 0; i < count; ++i) {
+            total += parts[i].iov_len;
+        }
         size_t left = total;
-        // A frame some of whose bytes went is broken by any failure from here
+        // Frames some of whose bytes went are broken by any failure from here
         const auto fail = [this, &left, total] {
             if (left < total) {
                 this->frame_broken_ = true;

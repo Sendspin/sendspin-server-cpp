@@ -91,6 +91,9 @@ set(SENDSPIN_SERVER_SOURCES
     src/visualizer_stream.cpp
     # parse_ws_url(), which every transport shares
     src/transport_url.cpp
+    # One write's messages as WebSocket frames back to back, for a transport that frames them
+    # itself (the ESP-IDF one)
+    src/ws_batch.cpp
 )
 
 set(SENDSPIN_SERVER_STB_SOURCES

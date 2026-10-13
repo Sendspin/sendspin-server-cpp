@@ -16,11 +16,11 @@
 /// @brief WsLink: one ESP-IDF WebSocket connection's state shared by its three tasks. The receive
 /// task (esp_websocket_client's for a dialed connection, httpd's for an accepted one) stamps and
 /// assembles inbound messages and pushes them into the loop's inbound ring, and reports the
-/// transport's close; the connection's writer task performs each write, wait for room, ping and
-/// the close, one at a time, so a slow peer blocks only its own writer, and raises their outcomes
-/// in the ring; the core task asks for them, and the ring delivers to the endpoint it binds. A
-/// dialed connection's writer also starts the client, and the writer tears the transport down
-/// last, so the receive task never outlives the link.
+/// transport's close; the connection's writer task performs each write (a batch of frames), wait
+/// for room, ping and the close, one at a time, so a slow peer blocks only its own writer, and
+/// raises their outcomes in the ring; the core task asks for them, and the ring delivers to the
+/// endpoint it binds. A dialed connection's writer also starts the client, and the writer tears the
+/// transport down last, so the receive task never outlives the link.
 
 #pragma once
 
@@ -29,9 +29,9 @@
 #include "freertos/task.h"
 #include "inbound_hold.h"
 #include "inbound_ring.h"
-#include "memory.h"
 #include "shared.h"
 #include "transport.h"
+#include "ws_batch.h"
 
 #include <atomic>
 #include <cstddef>
@@ -49,16 +49,6 @@ constexpr int WS_ROOM_POLL_MS = 100;
 /// @brief A link keeps up to this much of its message buffer once the message is pushed; a larger
 /// one's buffer is freed
 constexpr size_t WS_KEPT_MESSAGE_BYTES = 2048;
-
-/// @brief WebSocket opcodes (RFC 6455 section 5.2)
-namespace ws_opcode {
-constexpr uint8_t CONTINUATION = 0x0;
-constexpr uint8_t TEXT = 0x1;
-constexpr uint8_t BINARY = 0x2;
-constexpr uint8_t CLOSE = 0x8;
-constexpr uint8_t PING = 0x9;
-constexpr uint8_t PONG = 0xA;
-}  // namespace ws_opcode
 
 class WsLink : public InboundProducer, public EnableSharedFromThis<WsLink> {
 public:
@@ -85,8 +75,10 @@ public:
     void start_inbound();
 
     void request_room();
-    /// @brief payload is copied
-    void request_write(MessageKind kind, std::span<const uint8_t> payload);
+    /// @brief While no write is in flight: adds payload, copied, as one frame of the next write
+    void stage_write(MessageKind kind, std::span<const uint8_t> payload);
+    /// @brief Starts the write of the frames staged since the last
+    void request_write();
     void request_ping();
     /// @brief Final: ends the connection with a close frame carrying code, or drops it with
     /// nullopt, once the operation in progress returns. A message held for the ring, and every
@@ -174,7 +166,8 @@ protected:
     }
     /// @return > 0 when the socket has room, 0 when timeout_ms passed, < 0 on an error
     virtual int poll_room(int timeout_ms) = 0;
-    virtual bool send_message(MessageKind kind, const uint8_t* data, size_t len) = 0;
+    /// @brief Every frame of batch, in order, within the write stall
+    virtual bool send_batch(const WsBatch& batch) = 0;
     virtual bool send_ping() = 0;
     /// @brief Answers the last ping the receive task asked to answer (ask_pong())
     virtual bool send_pong() {
@@ -220,9 +213,9 @@ private:
     std::atomic<int> waking_writer_{0};
 
     std::atomic<uint32_t> requests_{0};
-    /// Core task, then the writer task once REQUEST_WRITE is seen; in PSRAM where there is one
-    ExternalBytes write_bytes_;
-    MessageKind write_kind_{MessageKind::BINARY};
+    /// Core task, then the writer task once REQUEST_WRITE is seen, which clears it as the write
+    /// completes
+    WsBatch write_batch_;
     /// Core task, then the writer task once REQUEST_CLOSE is seen
     std::optional<uint16_t> close_code_;
     std::atomic<bool> connected_{false};

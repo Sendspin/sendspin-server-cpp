@@ -93,6 +93,7 @@ add_executable(sendspin_server_cpp_tests
     test_wav_reader.cpp
     test_web_commands.cpp
     test_web_ui.cpp
+    test_ws_batch.cpp
     # server_cli's file readers, feeders, --one-group, timing figures and --web dashboard, tested
     # beside the library
     ${PROJECT_SOURCE_DIR}/examples/server_cli/audio_source.cpp
