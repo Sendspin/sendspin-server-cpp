@@ -13,40 +13,22 @@
 // limitations under the License.
 
 /// @file ws_batch.h
-/// @brief WsBatch: the messages of one write (Connection's write invariant) as unmasked WebSocket
-/// frames back to back, ready for one send, and read back frame by frame. Platform-free; the
-/// ESP-IDF transport (src/esp/) writes from it.
+/// @brief WsBatch: the messages of one write (Connection's write invariant) as WebSocket frames
+/// back to back, ready for one send: unmasked from an accepted connection, masked from a dialed
+/// one. Platform-free; the ESP-IDF transport (src/esp/) writes from it.
 
 #pragma once
 
 #include "memory.h"
 #include "transport.h"
+#include "ws_frame.h"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
 
 namespace sendspin::server {
-
-/// @brief WebSocket opcodes (RFC 6455 section 5.2)
-namespace ws_opcode {
-constexpr uint8_t CONTINUATION = 0x0;
-constexpr uint8_t TEXT = 0x1;
-constexpr uint8_t BINARY = 0x2;
-constexpr uint8_t CLOSE = 0x8;
-constexpr uint8_t PING = 0x9;
-constexpr uint8_t PONG = 0xA;
-}  // namespace ws_opcode
-
-/// @brief An unmasked frame header: at most a 64-bit length (RFC 6455 section 5.2)
-constexpr size_t WS_FRAME_HEADER_MAX = 10;
-
-/// @brief The header of a final, unmasked frame of len payload bytes
-/// @return the header's length
-size_t ws_frame_header(uint8_t opcode, size_t len,
-                       std::array<uint8_t, WS_FRAME_HEADER_MAX>& header);
 
 /// @brief One write's frames, in PSRAM where there is one. Written by core while no write is in
 /// flight, read by the writer while one is.
@@ -62,8 +44,10 @@ public:
         this->frames_ = 0;
     }
 
-    /// @brief Appends payload as one final text or binary frame
-    void append(MessageKind kind, std::span<const uint8_t> payload);
+    /// @brief Appends payload as one final text or binary frame, masked with mask when set (in
+    /// place over the copy, by aligned words)
+    void append(MessageKind kind, std::span<const uint8_t> payload,
+                const std::optional<WsMaskKey>& mask = std::nullopt);
 
     /// @brief Every frame, headers included, as one send writes them
     std::span<const uint8_t> bytes() const {
@@ -74,8 +58,8 @@ public:
         return this->frames_;
     }
 
-    /// @brief The frame at offset, a frame's start or bytes().size(), and offset moved past it;
-    /// nullopt at the end
+    /// @brief The unmasked frame at offset, a frame's start or bytes().size(), and offset moved
+    /// past it; nullopt at the end
     std::optional<Frame> next(size_t& offset) const;
 
 private:
