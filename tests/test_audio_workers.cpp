@@ -585,9 +585,9 @@ TEST(GroupStalls, ReportsAtMostEveryPeriodAndHoldsNothingBack) {
     EXPECT_NE(lines[0].find("0 rebases (0 ms in all) and 1 frames ready"), std::string::npos)
         << lines[0];
 
-    // The held-back frame, by the timer
+    // The held-back frame, by the timer; a regression hangs into the suite watchdog
     lines.clear();
-    for (int i = 0; i < 200 && lines.empty(); ++i) {
+    while (lines.empty()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         lines = s.taken();
     }

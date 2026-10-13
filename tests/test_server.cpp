@@ -354,11 +354,14 @@ TEST(ServerConnection, ActivatesASendspinCppClientAndKeepsItTimeSynced) {
     EXPECT_EQ(client.get_server_information()->name, "Test server");
 
     // Far above loopback delay and far below the error of a misplaced stamp, which the two
-    // processes' unrelated clock origins would make seconds to days
+    // processes' unrelated clock origins would make seconds to days; the client's clock is read
+    // on both sides of the server's, so a thread held up between the reads widens nothing
     constexpr int64_t TOLERANCE_US = 100000;
+    const int64_t before = client_clock_us();
     const int64_t mapped = client.get_client_time(server.now_us());
-    const int64_t local = client_clock_us();
-    EXPECT_LT(std::abs(mapped - local), TOLERANCE_US) << mapped - local;
+    const int64_t after = client_clock_us();
+    EXPECT_GT(mapped, before - TOLERANCE_US) << mapped - before;
+    EXPECT_LT(mapped, after + TOLERANCE_US) << mapped - after;
 
     recorder.wait_for("connected " + client.client_id());
     const std::vector<ClientInfo> clients = server.clients();

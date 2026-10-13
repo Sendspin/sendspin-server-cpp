@@ -14,7 +14,7 @@
 
 /// @file test_player_stream.cpp
 /// @brief PlayerStream driven over a fake group with the clock passed in: what its markers and
-/// cursor emit around a switch in place
+/// cursor emit around a switch in place, and how long its cursor holds a short chunk
 
 #include "player_stream.h"
 #include <gtest/gtest.h>
@@ -43,8 +43,8 @@ constexpr size_t PAYLOAD = 100;
 constexpr sched::EpochId EPOCH{1};
 const sched::AudioFormat PCM16{sched::Codec::PCM, 48000, 2, 16};
 
-/// A group playing a draining epoch whose last input sample is in LAST_CELL, with one ring per
-/// format
+/// A group playing a draining epoch whose last input sample is in LAST_CELL, or an epoch still
+/// taking input, with one ring per format
 class FakeGroup : public StreamSource {
 public:
     FakeGroup()
@@ -58,7 +58,7 @@ public:
         playback.run = sched::RunId{1};
         playback.epoch = EPOCH;
         playback.anchor = &this->anchor_;
-        playback.draining = true;
+        playback.draining = this->draining_;
         playback.last_cell = LAST_CELL;
         playback.input = InputFormat{48000, 2, SampleFormat::S16};
         return playback;
@@ -74,8 +74,9 @@ public:
 
     void on_stream_changed() override {}
 
-    /// Restarts ring at first and appends frames from first through last; -1 for none
-    static void fill(sched::FrameRing& ring, int64_t first, int64_t last) {
+    /// Restarts ring at first and appends frames from first through last; -1 for none. The last
+    /// is the instance's final frame unless the epoch goes on.
+    static void fill(sched::FrameRing& ring, int64_t first, int64_t last, bool final = true) {
         ring.restart(EPOCH, first);
         for (int64_t k = first; k <= last; ++k) {
             sched::Frame frame;
@@ -87,12 +88,15 @@ public:
             frame.payload.assign(PAYLOAD, 0);
             EXPECT_TRUE(ring.append(std::move(frame), START_US));
         }
-        ring.set_final_index(last);
+        if (final) {
+            ring.set_final_index(last);
+        }
     }
 
     sched::Anchor anchor_;
     sched::FrameRing ring16_;
     sched::FrameRing ring24_;
+    bool draining_{true};
 };
 
 /// What a marker at the head emits for the player role alone, and with which want
@@ -255,6 +259,53 @@ TEST(PlayerStreamPacking, WakesAChunkHeldForRoomWhenTheLedgerHasIt) {
     const sendspin::server::PackedChunk ninth = stream.take_chunk(&group, 16384, room);
     EXPECT_EQ(ninth.ts_us, T0 + (40 * sched::CELL_US));
     EXPECT_EQ(static_cast<int64_t>(ninth.plaintext.bytes.size()), CHUNK_BYTES);
+}
+
+// spec player/v1.md "Server Audio Send Constraints": a chunk short of n_target waits for more
+// frames only while its first frame keeps S_buf, or the player's min_buffer_ms with five cells and
+// `M_pump` to spare when that is more (pack_hold_slack_us()), from the client/state the player
+// reported. Two of five frames are produced, 800 ms into a buffered epoch that goes on.
+TEST(PlayerStreamPacking, HoldsAShortChunkNoLaterThanThePlayersMinBuffer) {
+    constexpr int64_t FIRST = 40;
+    constexpr int64_t MS = 1000;
+    struct Row {
+        const char* name;
+        uint32_t min_buffer_ms;
+        int64_t slack_us;
+    };
+    const Row rows[] = {
+        {"Control: a min_buffer_ms under S_buf holds to S_buf", 150, sched::BUFFERED_HOLD_SLACK_US},
+        {"a min_buffer_ms over S_buf holds to it", 600,
+         (600 * MS) + (sched::TARGET_CHUNK_CELLS * sched::CELL_US) +
+             sched::timing_defaults::PUMP_MARGIN_US},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        FakeGroup group;
+        group.draining_ = false;
+        FakeGroup::fill(group.ring16_, FIRST, FIRST + 1, false);
+        PlayerStream stream;
+        PlayerSupport support;
+        support.supported_formats = {{sendspin::server::Codec::PCM, 2, 48000, 16}};
+        support.buffer_capacity = 1000000;
+        stream.set_support(support);
+        stream.on_activation_written(true);
+        ClientState state;
+        state.available = true;
+        state.player = PlayerState{};
+        state.player->min_buffer_ms = row.min_buffer_ms;
+        stream.on_client_state(state);
+        stream.set_pending_kind(sched::TriggerKind::JOIN);
+        const MarkerPlan plan =
+            plan_marker(stream, &group, sched::RoleSet::of(sched::StreamRole::PLAYER), START_US);
+        ASSERT_EQ(plan.action, sched::StreamAction::START);
+        stream.commit_marker(&group, plan.action, plan.want, START_US);
+
+        stream.prepare(&group, 0, START_US);
+        const sched::AudioCandidate held = stream.candidate(&group, 16384, START_US);
+        EXPECT_FALSE(held.ready);
+        EXPECT_EQ(held.room_time_us, T0 + (FIRST * sched::CELL_US) - row.slack_us);
+    }
 }
 
 }  // namespace
