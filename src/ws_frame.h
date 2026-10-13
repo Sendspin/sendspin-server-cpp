@@ -71,7 +71,8 @@ std::array<uint8_t, CHACHA20_BLOCK_BYTES> chacha20_block(
 
 /// @brief Masking keys read off a ChaCha20 keystream under a key drawn once from the CSPRNG, so
 /// each is unpredictable (RFC 6455 section 5.3) at one block per sixteen keys, with no RNG call
-/// per frame. One generator per calling thread; generators sharing a seed take different streams.
+/// per frame. One generator per thread or per lock; generators sharing a seed take different
+/// streams.
 class WsMaskKeys {
 public:
     /// @param stream the nonce's first word: generators sharing seed differ in it
