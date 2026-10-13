@@ -49,6 +49,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -165,8 +166,8 @@ public:
         : port_(sendspin::server::test::free_port()), client_(make_config(this->port_)) {
         if (player) {
             sendspin::PlayerRoleConfig config;
-            config.audio_formats = {{Codec::PCM, 2, RATE, static_cast<uint8_t>(bits)}};
-            sendspin::PlayerRole& role = this->client_.add_player(config);
+            config.audio_formats.push_back({Codec::PCM, 2, RATE, static_cast<uint8_t>(bits)});
+            sendspin::PlayerRole& role = this->client_.add_player(std::move(config));
             this->sink_ = std::make_unique<Sink>(role, bits / 8 * 2, RATE);
             role.set_listener(this->sink_.get());
         }
