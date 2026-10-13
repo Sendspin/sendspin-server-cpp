@@ -165,12 +165,14 @@ DiscoveredClient service() {
 }
 
 // spec connection.md "Server Initiated Connections": `path` is required; what the network
-// reports is kept only within the TXT and DNS limits, with a bounded address list
+// reports is kept only within the TXT and DNS limits, with a bounded list of literal addresses
 TEST(DiscoveryValues, KeepsOnlyValidBrowseResults) {
     struct Row {
         const char* name;
         void (*edit)(DiscoveredClient&);
         bool kept;
+        // For a kept result: its addresses, when not those given
+        std::vector<std::string> addresses;
     };
     const Row rows[] = {
         {"Control: a complete result", [](DiscoveredClient&) {}, true},
@@ -187,6 +189,24 @@ TEST(DiscoveryValues, KeepsOnlyValidBrowseResults) {
         {"a host with a space", [](DiscoveredClient& c) { c.host = "kit chen.local."; }, false},
         {"a host with DEL", [](DiscoveredClient& c) { c.host = "kitchen\x7F.local."; }, false},
         {"no address", [](DiscoveredClient& c) { c.addresses.clear(); }, false},
+        // The dial's addresses, the first of them the Host header's for no host
+        {"Control: no host", [](DiscoveredClient& c) { c.host.clear(); }, true},
+        {"the root as the host", [](DiscoveredClient& c) { c.host = "."; }, false},
+        {"Control: IPv4 and IPv6 with a zone",
+         [](DiscoveredClient& c) { c.addresses = {"192.0.2.7", "fe80::1%en0"}; }, true},
+        {"an address with a line break",
+         [](DiscoveredClient& c) {
+             c.host.clear();
+             c.addresses = {"1.2.3.4\r\nX-Injected: 1"};
+         },
+         false},
+        {"an empty address", [](DiscoveredClient& c) { c.addresses = {""}; }, false},
+        {"a name as the address", [](DiscoveredClient& c) { c.addresses = {"kitchen.local"}; },
+         false},
+        {"a malformed address beside a literal one",
+         [](DiscoveredClient& c) { c.addresses = {"1.2.3.4\r\nX: y", "fffff::1", "192.0.2.8"}; },
+         true,
+         {"192.0.2.8"}},
         {"no port", [](DiscoveredClient& c) { c.port = 0; }, false},
         {"no path", [](DiscoveredClient& c) { c.path.clear(); }, false},
         {"a path without '/'", [](DiscoveredClient& c) { c.path = "sendspin"; }, false},
@@ -200,11 +220,17 @@ TEST(DiscoveryValues, KeepsOnlyValidBrowseResults) {
         SCOPED_TRACE(row.name);
         DiscoveredClient client = service();
         row.edit(client);
-        EXPECT_EQ(sendspin::server::validated(client).has_value(), row.kept);
+        const std::optional<DiscoveredClient> kept = sendspin::server::validated(client);
+        ASSERT_EQ(kept.has_value(), row.kept);
+        if (kept) {
+            EXPECT_EQ(kept->addresses, row.addresses.empty() ? client.addresses : row.addresses);
+        }
     }
     DiscoveredClient many = service();
     many.addresses.assign(sendspin::server::discovery_limits::MAX_ADDRESSES + 1, "192.0.2.1");
     many.addresses.front() = "192.0.2.9";
+    // Dropped before the cap, so it takes no literal address's place
+    many.addresses.insert(many.addresses.begin(), "kitchen.local");
     const std::optional<DiscoveredClient> kept = sendspin::server::validated(many);
     ASSERT_TRUE(kept);
     EXPECT_EQ(kept->addresses.size(), sendspin::server::discovery_limits::MAX_ADDRESSES);

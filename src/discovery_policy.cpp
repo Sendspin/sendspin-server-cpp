@@ -14,6 +14,8 @@
 
 #include "discovery_policy.h"
 
+#include "url_text.h"
+
 #include <algorithm>
 
 namespace sendspin::server {
@@ -101,14 +103,21 @@ std::optional<DiscoveredClient> validated(const DiscoveredClient& client) {
     const bool host_printable = std::all_of(client.host.begin(), client.host.end(), [](char c) {
         return static_cast<unsigned char>(c) >= FIRST_PRINTABLE && c != DELETE;
     });
+    // The root name: nothing is left once the dial drops a host's final dot
+    const bool root = client.host == ".";
     if (client.instance.empty() || client.instance.size() > discovery_limits::MAX_NAME_BYTES ||
-        client.host.size() > discovery_limits::MAX_NAME_BYTES || !host_printable ||
-        client.addresses.empty() || client.port == 0 ||
-        !is_valid_path(client.path, MAX_TXT_VALUE_BYTES) ||
+        client.host.size() > discovery_limits::MAX_NAME_BYTES || !host_printable || root ||
+        client.port == 0 || !is_valid_path(client.path, MAX_TXT_VALUE_BYTES) ||
         (client.name && client.name->size() > MAX_TXT_VALUE_BYTES)) {
         return std::nullopt;
     }
     DiscoveredClient kept = client;
+    // Each address is dialed as a literal, and the first goes into the Host header for no host
+    std::erase_if(kept.addresses,
+                  [](const std::string& address) { return !is_ip_address_text(address); });
+    if (kept.addresses.empty()) {
+        return std::nullopt;
+    }
     if (kept.addresses.size() > discovery_limits::MAX_ADDRESSES) {
         kept.addresses.resize(discovery_limits::MAX_ADDRESSES);
     }
