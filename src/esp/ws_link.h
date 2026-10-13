@@ -35,6 +35,7 @@
 #include "shared.h"
 #include "transport.h"
 #include "ws_batch.h"
+#include "ws_frame.h"
 
 #include <array>
 #include <atomic>
@@ -62,8 +63,8 @@ class WsLink : public InboundProducer, public EnableSharedFromThis<WsLink> {
 public:
     /// @param loop held for the link's life: the loop's destructor closes it, so a link holding it
     /// last destroys only what the loop left
-    /// @param masks a dialed connection's: every frame it sends is masked with a fresh key from
-    /// the hardware RNG (RFC 6455 section 5.3)
+    /// @param masks a dialed connection's: every frame it sends is masked with a fresh key
+    /// (RFC 6455 section 5.3) from a keystream the writer seeds from the hardware RNG as it starts
     WsLink(SharedPtr<LoopCore> loop, const TransportSettings& settings, bool masks);
     ~WsLink() override;
     WsLink(const WsLink&) = delete;
@@ -199,9 +200,9 @@ protected:
     /// @brief Any task: shuts the socket down with how (SHUT_WR, SHUT_RDWR) unless it is closed
     void shutdown_socket(int how);
 
-    /// @brief Any task: the masking key for the next frame sent, or nullopt for an accepted
+    /// @brief The masking key for the next frame sent from keys, or nullopt for an accepted
     /// connection's
-    std::optional<WsMaskKey> mask_key() const;
+    std::optional<WsMaskKey> mask_key(WsMaskKeys& keys) const;
 
     const TransportSettings settings_;
     std::string remote_endpoint_;
@@ -268,6 +269,11 @@ private:
     /// Core task, then the writer task once REQUEST_CLOSE is seen
     std::optional<uint16_t> close_code_;
     const bool masks_;
+    /// Seeded by the writer before open(), so before any room it reports and before the reader
+    /// starts; then core_keys_ is the core task's (stage_write()) and frame_keys_ is guarded by
+    /// frame_mutex_ (write_frame())
+    WsMaskKeys core_keys_;
+    WsMaskKeys frame_keys_;
     /// Held for one whole frame, so frames from the writer and the receive task never interleave;
     /// taken before socket_mutex_
     std::timed_mutex frame_mutex_;

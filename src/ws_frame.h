@@ -56,6 +56,37 @@ size_t ws_frame_header(uint8_t opcode, size_t len, std::array<uint8_t, WS_FRAME_
 /// words after a memcpy()
 void ws_mask_copy(uint8_t* dst, const uint8_t* src, size_t len, const WsMaskKey& key);
 
+/// @brief A ChaCha20 key's length (RFC 8439 section 2.3)
+constexpr size_t CHACHA20_KEY_BYTES = 32;
+/// @brief A ChaCha20 block's length (RFC 8439 section 2.3)
+constexpr size_t CHACHA20_BLOCK_BYTES = 64;
+
+/// @brief The ChaCha20 block function (RFC 8439 section 2.3): the keystream block for key, the
+/// block counter and the nonce's three words, little-endian as the RFC reads its bytes
+std::array<uint8_t, CHACHA20_BLOCK_BYTES> chacha20_block(
+    const std::array<uint8_t, CHACHA20_KEY_BYTES>& key, uint32_t counter,
+    const std::array<uint32_t, 3>& nonce);
+
+/// @brief Masking keys read off a ChaCha20 keystream under a key drawn once from the CSPRNG, so
+/// each is unpredictable (RFC 6455 section 5.3) at one block per sixteen keys, with no RNG call
+/// per frame. One generator per calling thread; generators sharing a seed take different streams.
+class WsMaskKeys {
+public:
+    /// @param stream the nonce's first word: generators sharing seed differ in it
+    void seed(const std::array<uint8_t, CHACHA20_KEY_BYTES>& seed, uint32_t stream);
+
+    /// @brief The next four keystream bytes; seed() comes first
+    WsMaskKey next();
+
+private:
+    std::array<uint8_t, CHACHA20_KEY_BYTES> key_{};
+    std::array<uint32_t, 3> nonce_{};
+    uint32_t counter_{0};
+    std::array<uint8_t, CHACHA20_BLOCK_BYTES> block_{};
+    /// The bytes of block_ taken; a full block refills at the next key
+    size_t taken_{CHACHA20_BLOCK_BYTES};
+};
+
 /// @brief A frame header as received
 struct WsFrameHeader {
     bool fin{false};

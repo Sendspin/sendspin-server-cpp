@@ -14,6 +14,8 @@
 
 #include "ws_frame.h"
 
+#include <algorithm>
+#include <bit>
 #include <cstring>
 
 namespace sendspin::server {
@@ -32,6 +34,11 @@ constexpr uint8_t LEN_16 = 126;
 constexpr uint8_t LEN_64 = 127;
 constexpr size_t LEN_64_BYTES = 8;
 constexpr uint64_t LEN_64_TOP_BIT = uint64_t{1} << 63U;
+
+uint32_t load_le32(const uint8_t* bytes) {
+    return uint32_t{bytes[0]} | (uint32_t{bytes[1]} << 8U) | (uint32_t{bytes[2]} << 16U) |
+           (uint32_t{bytes[3]} << 24U);
+}
 
 bool known_opcode(uint8_t opcode) {
     switch (opcode) {
@@ -118,6 +125,82 @@ void ws_mask_copy(uint8_t* dst, const uint8_t* src, size_t len, const WsMaskKey&
     for (; i < len; ++i) {
         dst[i] ^= key[i % key.size()];
     }
+}
+
+std::array<uint8_t, CHACHA20_BLOCK_BYTES> chacha20_block(
+    const std::array<uint8_t, CHACHA20_KEY_BYTES>& key, uint32_t counter,
+    const std::array<uint32_t, 3>& nonce) {
+    constexpr size_t WORDS = CHACHA20_BLOCK_BYTES / sizeof(uint32_t);
+    // RFC 8439 section 2.3: the constants, then the key, the counter and the nonce
+    constexpr std::array<uint32_t, 4> CONSTANTS{0x61707865, 0x3320646e, 0x79622d32, 0x6b206574};
+    constexpr size_t KEY_AT = CONSTANTS.size();
+    constexpr size_t COUNTER_AT = KEY_AT + (CHACHA20_KEY_BYTES / sizeof(uint32_t));
+    constexpr size_t DOUBLE_ROUNDS = 10;
+    // Section 2.3: a column round, then a diagonal round, each four quarter rounds
+    constexpr std::array<std::array<uint8_t, 4>, 8> QUARTER_ROUNDS{{{0, 4, 8, 12},
+                                                                    {1, 5, 9, 13},
+                                                                    {2, 6, 10, 14},
+                                                                    {3, 7, 11, 15},
+                                                                    {0, 5, 10, 15},
+                                                                    {1, 6, 11, 12},
+                                                                    {2, 7, 8, 13},
+                                                                    {3, 4, 9, 14}}};
+    // Section 2.1: the quarter round's rotations
+    constexpr std::array<int, 4> ROTATIONS{16, 12, 8, 7};
+    std::array<uint32_t, WORDS> state{};
+    std::copy(CONSTANTS.begin(), CONSTANTS.end(), state.begin());
+    for (size_t i = 0; i < CHACHA20_KEY_BYTES / sizeof(uint32_t); ++i) {
+        state[KEY_AT + i] = load_le32(key.data() + (i * sizeof(uint32_t)));
+    }
+    state[COUNTER_AT] = counter;
+    std::copy(nonce.begin(), nonce.end(), state.begin() + COUNTER_AT + 1);
+    std::array<uint32_t, WORDS> x = state;
+    for (size_t round = 0; round < DOUBLE_ROUNDS; ++round) {
+        for (const std::array<uint8_t, 4>& q : QUARTER_ROUNDS) {
+            uint32_t& a = x[q[0]];
+            uint32_t& b = x[q[1]];
+            uint32_t& c = x[q[2]];
+            uint32_t& d = x[q[3]];
+            a += b;
+            d = std::rotl(d ^ a, ROTATIONS[0]);
+            c += d;
+            b = std::rotl(b ^ c, ROTATIONS[1]);
+            a += b;
+            d = std::rotl(d ^ a, ROTATIONS[2]);
+            c += d;
+            b = std::rotl(b ^ c, ROTATIONS[3]);
+        }
+    }
+    std::array<uint8_t, CHACHA20_BLOCK_BYTES> block{};
+    for (size_t i = 0; i < WORDS; ++i) {
+        const uint32_t word = x[i] + state[i];
+        for (size_t b = 0; b < sizeof(uint32_t); ++b) {
+            block[(i * sizeof(uint32_t)) + b] = static_cast<uint8_t>(word >> (8U * b));
+        }
+    }
+    return block;
+}
+
+void WsMaskKeys::seed(const std::array<uint8_t, CHACHA20_KEY_BYTES>& seed, uint32_t stream) {
+    this->key_ = seed;
+    this->nonce_ = {stream, 0, 0};
+    this->counter_ = 0;
+    this->taken_ = CHACHA20_BLOCK_BYTES;
+}
+
+WsMaskKey WsMaskKeys::next() {
+    if (this->taken_ == CHACHA20_BLOCK_BYTES) {
+        this->block_ = chacha20_block(this->key_, this->counter_, this->nonce_);
+        // Past 2^32 blocks the nonce moves on, so the keystream never repeats
+        if (++this->counter_ == 0) {
+            ++this->nonce_[1];
+        }
+        this->taken_ = 0;
+    }
+    WsMaskKey key{};
+    std::memcpy(key.data(), this->block_.data() + this->taken_, key.size());
+    this->taken_ += key.size();
+    return key;
 }
 
 WsHeaderParse ws_parse_frame_header(std::span<const uint8_t> bytes, bool peer_masks) {

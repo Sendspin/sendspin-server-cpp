@@ -39,6 +39,9 @@ constexpr uint16_t CLOSE_ABNORMAL = 1006;
 constexpr uint16_t CLOSE_TLS_HANDSHAKE = 1015;
 constexpr size_t STATUS_CODE_BYTES = 2;
 constexpr int64_t US_PER_MS = 1000;
+/// The keystreams of the core task's and the frame lock holder's masking keys
+constexpr uint32_t CORE_KEY_STREAM = 0;
+constexpr uint32_t FRAME_KEY_STREAM = 1;
 
 void skip_sent(msghdr& message, size_t sent) {
     while (sent > 0 && message.msg_iovlen > 0) {
@@ -116,7 +119,7 @@ void WsLink::request_room() {
 }
 
 void WsLink::stage_write(MessageKind kind, std::span<const uint8_t> payload) {
-    this->write_batch_.append(kind, payload, this->mask_key());
+    this->write_batch_.append(kind, payload, this->mask_key(this->core_keys_));
 }
 
 void WsLink::drop_staged() {
@@ -293,6 +296,14 @@ void WsLink::writer_entry(SharedPtr<WsLink> self) {
 }
 
 void WsLink::writer_main() {
+    if (this->masks_) {
+        // One RNG draw per connection: esp_random() spaces its reads, so a draw per frame would
+        // stall the core task
+        std::array<uint8_t, CHACHA20_KEY_BYTES> seed{};
+        esp_fill_random(seed.data(), seed.size());
+        this->core_keys_.seed(seed, CORE_KEY_STREAM);
+        this->frame_keys_.seed(seed, FRAME_KEY_STREAM);
+    }
     if (this->open()) {
         constexpr uint32_t OPERATIONS = REQUEST_ROOM | REQUEST_WRITE | REQUEST_PING | REQUEST_PONG;
         while (!this->close_requested()) {
@@ -410,14 +421,11 @@ void WsLink::shutdown_socket(int how) {
     }
 }
 
-std::optional<WsMaskKey> WsLink::mask_key() const {
+std::optional<WsMaskKey> WsLink::mask_key(WsMaskKeys& keys) const {
     if (!this->masks_) {
         return std::nullopt;
     }
-    const uint32_t random = esp_random();
-    WsMaskKey key{};
-    std::memcpy(key.data(), &random, key.size());
-    return key;
+    return keys.next();
 }
 
 bool WsLink::send_frame(uint8_t opcode, const uint8_t* data, size_t len) {
@@ -434,7 +442,7 @@ bool WsLink::write_frame(uint8_t opcode, const uint8_t* data, size_t len, int64_
         this->close_sent_ = true;
     }
     std::array<uint8_t, WS_FRAME_HEADER_MAX> header{};
-    const std::optional<WsMaskKey> mask = this->mask_key();
+    const std::optional<WsMaskKey> mask = this->mask_key(this->frame_keys_);
     const size_t header_bytes = ws_frame_header(opcode, len, header, mask);
     std::array<uint8_t, WS_CONTROL_PAYLOAD_MAX> masked{};
     if (mask && len > 0) {
