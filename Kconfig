@@ -10,9 +10,6 @@ menu "sendspin-server"
         # on earlier versions the symbol does not exist, the select is ignored, and the upgrade's
         # GET reaches the URI handler instead
         select HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
-        # esp_websocket_client's own option: sends take a lock of their own, not the one its task
-        # holds while the receive handler waits for a free inbound slot
-        select ESP_WS_CLIENT_SEPARATE_TX_LOCK
 
     config SENDSPIN_SERVER_MEMORY_STATS
         bool "Log memory statistics"

@@ -5,15 +5,14 @@
 # set before project() or an environment variable of the same name:
 #   SENDSPIN_SERVER_ARDUINOJSON_SOURCE_DIR: ArduinoJson
 # The IDF components the project adds: esphome/noise-c (with its esphome/libsodium),
-# espressif/esp-dsp, espressif/esp_websocket_client, micro-flac (the v0.3.0 tag, with the encoder)
-# and micro-resampler (third_party/micro-resampler). The component's Kconfig turns on the httpd and
-# esp_websocket_client options the transport needs.
+# espressif/esp-dsp, micro-flac (the v0.3.0 tag, with the encoder) and micro-resampler
+# (third_party/micro-resampler). The component's Kconfig turns on the httpd options the transport
+# needs.
 
 include(${CMAKE_CURRENT_LIST_DIR}/sources.cmake)
 
 set(_priv_requires lwip pthread esp_timer esp_hw_support heap freertos mbedtls esp_http_server
-    tcp_transport esp-tls espressif__esp_websocket_client esphome__noise-c esphome__libsodium
-    espressif__esp-dsp micro-flac micro-resampler)
+    esphome__noise-c esphome__libsodium espressif__esp-dsp micro-flac micro-resampler)
 
 if(CMAKE_BUILD_EARLY_EXPANSION)
     idf_component_register(PRIV_REQUIRES ${_priv_requires})
@@ -70,11 +69,6 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-missing-field-initializers 
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=pthread_mutex_init"
                       "-Wl,--wrap=pthread_cond_init")
 set_source_files_properties(${_root}/src/stb_implementation.cpp PROPERTIES COMPILE_OPTIONS "-w")
-
-# src/esp/dial_esp.cpp gives its socket transport the socket getter esp_transport_set_func() does
-# not take, through tcp_transport's private header (the same struct on ESP-IDF 5.5.5 and 6.0.2)
-idf_component_get_property(_tcp_transport_dir tcp_transport COMPONENT_DIR)
-target_include_directories(${COMPONENT_LIB} PRIVATE "${_tcp_transport_dir}/private_include")
 
 # esphome__noise-c is built with one pattern (NNpsk0), no name tables and no AES-GCM. The server
 # looks its Noise_KKpsk2 protocols up by name and must offer both of the spec's suites (spec
