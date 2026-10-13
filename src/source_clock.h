@@ -47,7 +47,8 @@ constexpr int64_t SOURCE_CLOCK_ENGAGE_US = 2000;
 /// Quality")
 constexpr double SOURCE_CLOCK_MAX_PPM = 500.0;
 /// @brief The loop's gains: ppm per microsecond of averaged phase error, and per microsecond-second
-/// of its integral
+/// of its integral. A natural frequency of about 0.039 rad/s and damping of about 0.65: lock within
+/// about 150 s, slow enough to average a source's timestamp jitter
 constexpr double SOURCE_CLOCK_KP = 0.05;
 constexpr double SOURCE_CLOCK_KI = 0.0015;
 

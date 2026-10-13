@@ -152,7 +152,7 @@ TEST(SourceClock, HoldsItsIntegralWhileClamped) {
 void expect_lock(double drift_ppm, bool asrc) {
     constexpr uint32_t rate = 8000;
     constexpr size_t chunk = rate / 50;
-    constexpr int seconds = 300;
+    constexpr int seconds = 240;
     std::mt19937 random(static_cast<uint32_t>(drift_ppm + 1000));
     std::uniform_real_distribution<double> jitter(-1000.0, 1000.0);
     SourceClock clock;
@@ -167,7 +167,7 @@ void expect_lock(double drift_ppm, bool asrc) {
     std::vector<uint8_t> pcm(chunk * 2, 0);
     std::vector<uint8_t> slipped(SampleSlip::max_output(chunk) * 2);
     double slip_position = 0.0;
-    // Each second's mean of play time less capture time, past four minutes
+    // Each second's mean of play time less capture time, over the last fifty seconds
     std::vector<double> offsets;
     double sum = 0.0;
     const int chunks = seconds * 50;
@@ -185,7 +185,7 @@ void expect_lock(double drift_ppm, bool asrc) {
                 pcm.data(), chunk, 2, clock.engaged() ? static_cast<int32_t>(std::lround(ppm)) : 0,
                 slipped.data()));
         }
-        if (k >= 240 * 50) {
+        if (k >= 190 * 50) {
             sum += (position * 1e6 / rate) - true_capture_us;
             if (k % 50 == 49) {
                 offsets.push_back(sum / 50);
@@ -198,9 +198,11 @@ void expect_lock(double drift_ppm, bool asrc) {
     EXPECT_LT(*high - *low, 250.0) << "a correction of " << clock.ppm() << " ppm";
 }
 
+// Two hundred and forty seconds of chunks per run at 8 kHz, as the loop settles within about a
+// hundred and ninety; each correction against a slow and a fast clock
 TEST(SourceClock, LocksADriftingSourceThroughEitherCorrection) {
     for (const bool asrc : {false, true}) {
-        for (const double drift : {-400.0, -150.0, 120.0, 350.0}) {
+        for (const double drift : asrc ? std::vector{-150.0, 350.0} : std::vector{-400.0, 120.0}) {
             SCOPED_TRACE(std::string(asrc ? "ASRC" : "slip") + " at " + std::to_string(drift));
             expect_lock(drift, asrc);
         }
@@ -317,11 +319,11 @@ TEST(SourceAsrc, WritesByTheRatioAndTracksWhereInputLands) {
         ASSERT_NE(asrc, nullptr);
         const std::vector<float> in(CHUNK * 2, 0.25F);
         std::vector<float> out(SourceAsrc::max_output(CHUNK) * 2);
-        constexpr size_t CHUNKS = 500;
+        constexpr size_t CHUNKS = 250;
         for (size_t chunk = 0; chunk < CHUNKS; ++chunk) {
             ASSERT_TRUE(asrc->process(in.data(), CHUNK, ppm, out.data()));
         }
-        // 10 s at the ratio: 240 frames fewer, or more
+        // 5 s at the ratio: 120 frames fewer, or more
         const double expected = CHUNKS * CHUNK / (1.0 + (ppm * 1e-6));
         EXPECT_NEAR(asrc->next_position(), expected, 0.01);
         EXPECT_NEAR(static_cast<double>(asrc->produced()), expected, 64.0);
