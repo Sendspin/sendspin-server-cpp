@@ -155,6 +155,17 @@ TEST(WsHandshake, ChecksTheResponse) {
         {"Upgrade to another protocol",
          ok_status + "Upgrade: h2c\r\nConnection: Upgrade\r\n" + accept + "\r\n",
          WsUpgradeStatus::REJECTED, 0},
+        {"another protocol's Upgrade line, then websocket's",
+         ok_status + "Upgrade: h2c\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" + accept +
+             "\r\n",
+         WsUpgradeStatus::REJECTED, 0},
+        {"two Upgrade lines of websocket",
+         ok_status + "Upgrade: websocket\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+             accept + "\r\n",
+         WsUpgradeStatus::REJECTED, 0},
+        {"Upgrade as a list",
+         ok_status + "Upgrade: websocket, h2c\r\nConnection: Upgrade\r\n" + accept + "\r\n",
+         WsUpgradeStatus::REJECTED, 0},
         {"no Connection", ok_status + "Upgrade: websocket\r\n" + accept + "\r\n",
          WsUpgradeStatus::REJECTED, 0},
         {"Connection without upgrade",
