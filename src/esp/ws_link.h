@@ -181,6 +181,9 @@ protected:
     /// interrupted; past WS_SEND_SLICE_MS in all, waiting for it and sending, the close goes
     /// unanswered.
     void answer_close(const uint8_t* payload, size_t len);
+    /// @brief The peer broke the protocol: a close frame with close_code::PROTOCOL_ERROR, bounded
+    /// as answer_close()'s, fails the connection (RFC 6455 section 7.1.7), reported closed
+    void fail_protocol();
     /// @brief Receive task: asks the writer to call send_pong()
     void ask_pong();
 
@@ -242,6 +245,9 @@ private:
     bool send_pong();
     /// One whole frame, waiting for the frame lock while the receive task answers a close
     bool send_frame(uint8_t opcode, const uint8_t* data, size_t len);
+    /// Receive task: a close frame carrying body, within WS_SEND_SLICE_MS of waiting for the frame
+    /// lock and sending
+    void close_within_slice(const uint8_t* body, size_t len);
     /// Under frame_mutex_: writes one control frame (send_parts()), masked when the link masks
     bool write_frame(uint8_t opcode, const uint8_t* data, size_t len, int64_t deadline_us);
     /// Under frame_mutex_: sends whole frames until they are all sent, deadline_us passes or a

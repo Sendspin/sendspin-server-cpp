@@ -289,7 +289,7 @@ private:
         while (true) {
             const WsHeaderParse parse = ws_parse_frame_header(this->buffered(), false);
             if (parse.status == WsHeaderStatus::INVALID) {
-                this->report_closed(CloseReason::PROTOCOL_VIOLATION);
+                this->fail_protocol();
                 return;
             }
             if (parse.status == WsHeaderStatus::INCOMPLETE) {
@@ -321,7 +321,7 @@ private:
                 continue;
             }
             if (header.payload_bytes > this->settings_.read_message_max) {
-                this->report_closed(CloseReason::PROTOCOL_VIOLATION);
+                this->fail_protocol();
                 return;
             }
             const auto len = static_cast<size_t>(header.payload_bytes);

@@ -166,7 +166,7 @@ bool WsLink::begin_frame(uint8_t opcode, size_t payload_bytes) {
         this->assembly_.begin(opcode, payload_bytes, this->settings_.read_message_max);
     if (step == WsFrameStep::VIOLATION) {
         this->dropping_ = true;
-        this->report_closed(CloseReason::PROTOCOL_VIOLATION);
+        this->fail_protocol();
         return false;
     }
     if (step == WsFrameStep::OPENS && this->hold_.begin_message() == nullptr) {
@@ -224,11 +224,6 @@ void WsLink::store_ping(const uint8_t* payload, size_t len) {
 }
 
 void WsLink::answer_close(const uint8_t* payload, size_t len) {
-    const int64_t deadline_us = now_us() + static_cast<int64_t>(WS_SEND_SLICE_MS) * US_PER_MS;
-    std::unique_lock<std::timed_mutex> lock(this->frame_mutex_, std::defer_lock);
-    if (!lock.try_lock_for(std::chrono::milliseconds(WS_SEND_SLICE_MS))) {
-        return;
-    }
     // A code a close frame never carries is answered with none
     size_t echoed = 0;
     if (len >= STATUS_CODE_BYTES) {
@@ -237,7 +232,24 @@ void WsLink::answer_close(const uint8_t* payload, size_t len) {
             echoed = STATUS_CODE_BYTES;
         }
     }
-    this->write_frame(ws_opcode::CLOSE, payload, echoed, deadline_us);
+    this->close_within_slice(payload, echoed);
+}
+
+void WsLink::fail_protocol() {
+    const std::array<uint8_t, STATUS_CODE_BYTES> body{
+        static_cast<uint8_t>(close_code::PROTOCOL_ERROR >> 8U),
+        static_cast<uint8_t>(close_code::PROTOCOL_ERROR)};
+    this->close_within_slice(body.data(), body.size());
+    this->report_closed(CloseReason::PROTOCOL_VIOLATION);
+}
+
+void WsLink::close_within_slice(const uint8_t* body, size_t len) {
+    const int64_t deadline_us = now_us() + static_cast<int64_t>(WS_SEND_SLICE_MS) * US_PER_MS;
+    std::unique_lock<std::timed_mutex> lock(this->frame_mutex_, std::defer_lock);
+    if (!lock.try_lock_for(std::chrono::milliseconds(WS_SEND_SLICE_MS))) {
+        return;
+    }
+    this->write_frame(ws_opcode::CLOSE, body, len, deadline_us);
 }
 
 void WsLink::signal_core() {

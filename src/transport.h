@@ -61,6 +61,7 @@ enum class CloseReason : uint8_t {
 namespace close_code {
 constexpr uint16_t NORMAL = 1000;
 constexpr uint16_t GOING_AWAY = 1001;
+constexpr uint16_t PROTOCOL_ERROR = 1002;
 }  // namespace close_code
 
 /// @brief The largest Noise message (Noise Protocol Framework section 3), and so the largest
