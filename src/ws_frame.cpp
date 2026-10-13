@@ -34,6 +34,40 @@ constexpr uint8_t LEN_16 = 126;
 constexpr uint8_t LEN_64 = 127;
 constexpr size_t LEN_64_BYTES = 8;
 constexpr uint64_t LEN_64_TOP_BIT = uint64_t{1} << 63U;
+constexpr size_t CLOSE_CODE_BYTES = 2;
+
+struct CloseCodes {
+    uint16_t low;
+    uint16_t high;
+};
+/// The status codes a close frame may carry (RFC 6455 sections 7.4.1 and 7.4.2, and the IANA
+/// registry of section 11.7): not 1004 (reserved), 1005, 1006 or 1015 (never sent), nor the
+/// unassigned 1016 to 2999
+constexpr std::array<CloseCodes, 3> SENDABLE_CLOSE_CODES{
+    {{1000, 1003}, {1007, 1014}, {3000, 4999}}};
+
+/// A UTF-8 form by its lead byte: how many continuation bytes follow and the range of the first,
+/// which rules out overlong forms, surrogates and code points past U+10FFFF (RFC 3629 section 4)
+struct Utf8Form {
+    uint8_t lead_low;
+    uint8_t lead_high;
+    uint8_t continuations;
+    uint8_t second_low;
+    uint8_t second_high;
+};
+constexpr uint8_t CONTINUATION_LOW = 0x80;
+constexpr uint8_t CONTINUATION_HIGH = 0xBF;
+constexpr std::array<Utf8Form, 9> UTF8_FORMS{{
+    {0x00, 0x7F, 0, 0, 0},
+    {0xC2, 0xDF, 1, CONTINUATION_LOW, CONTINUATION_HIGH},
+    {0xE0, 0xE0, 2, 0xA0, CONTINUATION_HIGH},
+    {0xE1, 0xEC, 2, CONTINUATION_LOW, CONTINUATION_HIGH},
+    {0xED, 0xED, 2, CONTINUATION_LOW, 0x9F},
+    {0xEE, 0xEF, 2, CONTINUATION_LOW, CONTINUATION_HIGH},
+    {0xF0, 0xF0, 3, 0x90, CONTINUATION_HIGH},
+    {0xF1, 0xF3, 3, CONTINUATION_LOW, CONTINUATION_HIGH},
+    {0xF4, 0xF4, 3, CONTINUATION_LOW, 0x8F},
+}};
 
 uint32_t load_le32(const uint8_t* bytes) {
     return uint32_t{bytes[0]} | (uint32_t{bytes[1]} << 8U) | (uint32_t{bytes[2]} << 16U) |
@@ -54,7 +88,43 @@ bool known_opcode(uint8_t opcode) {
     }
 }
 
+/// Whether bytes are UTF-8 (RFC 3629 section 4)
+bool ws_utf8_valid(std::span<const uint8_t> bytes) {
+    size_t i = 0;
+    while (i < bytes.size()) {
+        const uint8_t lead = bytes[i++];
+        const auto* form = std::find_if(
+            UTF8_FORMS.begin(), UTF8_FORMS.end(),
+            [lead](const Utf8Form& f) { return lead >= f.lead_low && lead <= f.lead_high; });
+        if (form == UTF8_FORMS.end() || bytes.size() - i < form->continuations) {
+            return false;
+        }
+        for (size_t k = 0; k < form->continuations; ++k, ++i) {
+            const uint8_t low = k == 0 ? form->second_low : CONTINUATION_LOW;
+            const uint8_t high = k == 0 ? form->second_high : CONTINUATION_HIGH;
+            if (bytes[i] < low || bytes[i] > high) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 }  // namespace
+
+bool ws_close_payload_valid(std::span<const uint8_t> payload) {
+    if (payload.empty()) {
+        return true;
+    }
+    if (payload.size() < CLOSE_CODE_BYTES || payload.size() > WS_CONTROL_PAYLOAD_MAX) {
+        return false;
+    }
+    const auto code = static_cast<uint16_t>((payload[0] << 8U) | payload[1]);
+    const bool sendable =
+        std::any_of(SENDABLE_CLOSE_CODES.begin(), SENDABLE_CLOSE_CODES.end(),
+                    [code](const CloseCodes& c) { return code >= c.low && code <= c.high; });
+    return sendable && ws_utf8_valid(payload.subspan(CLOSE_CODE_BYTES));
+}
 
 size_t ws_frame_header(uint8_t opcode, size_t len, std::array<uint8_t, WS_FRAME_HEADER_MAX>& header,
                        const std::optional<WsMaskKey>& mask) {

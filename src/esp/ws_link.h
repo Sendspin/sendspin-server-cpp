@@ -176,11 +176,13 @@ protected:
 
     /// @brief A ping's payload, for the pong the writer sends (ask_pong())
     void store_ping(const uint8_t* payload, size_t len);
-    /// @brief The close frame that answers the peer's, echoing its status code (RFC 6455 section
-    /// 5.5.1), unless a close was sent already. A frame the writer has begun cannot be
-    /// interrupted; past WS_SEND_SLICE_MS in all, waiting for it and sending, the close goes
-    /// unanswered.
-    void answer_close(const uint8_t* payload, size_t len);
+    /// @brief The peer's close: a close frame echoing its status code answers it (RFC 6455 section
+    /// 5.5.1), unless a close was sent already, and it is reported closed. A frame the writer has
+    /// begun cannot be interrupted; past WS_SEND_SLICE_MS in all, waiting for it and sending, the
+    /// close goes unanswered.
+    /// @return false when the payload is malformed (ws_close_payload_valid()): fail_protocol()
+    /// instead
+    bool answer_close(const uint8_t* payload, size_t len);
     /// @brief The peer broke the protocol: a close frame with close_code::PROTOCOL_ERROR, bounded
     /// as answer_close()'s, fails the connection (RFC 6455 section 7.1.7), reported closed
     void fail_protocol();

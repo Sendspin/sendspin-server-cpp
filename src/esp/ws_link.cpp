@@ -33,10 +33,6 @@ namespace {
 
 /// How long an ending writer task waits between looks at a wake_writer() still in progress
 constexpr TickType_t WAKING_WRITER_POLL_TICKS = 1;
-/// Close codes a close frame never carries (RFC 6455 section 7.4.1)
-constexpr uint16_t CLOSE_NO_STATUS = 1005;
-constexpr uint16_t CLOSE_ABNORMAL = 1006;
-constexpr uint16_t CLOSE_TLS_HANDSHAKE = 1015;
 constexpr size_t STATUS_CODE_BYTES = 2;
 constexpr int64_t US_PER_MS = 1000;
 /// The keystreams of the core task's and the frame lock holder's masking keys
@@ -223,16 +219,14 @@ void WsLink::store_ping(const uint8_t* payload, size_t len) {
     this->pong_bytes_ = len;
 }
 
-void WsLink::answer_close(const uint8_t* payload, size_t len) {
-    // A code a close frame never carries is answered with none
-    size_t echoed = 0;
-    if (len >= STATUS_CODE_BYTES) {
-        const auto code = static_cast<uint16_t>((payload[0] << 8U) | payload[1]);
-        if (code != CLOSE_NO_STATUS && code != CLOSE_ABNORMAL && code != CLOSE_TLS_HANDSHAKE) {
-            echoed = STATUS_CODE_BYTES;
-        }
+bool WsLink::answer_close(const uint8_t* payload, size_t len) {
+    if (!ws_close_payload_valid(std::span<const uint8_t>(payload, len))) {
+        this->fail_protocol();
+        return false;
     }
-    this->close_within_slice(payload, echoed);
+    this->close_within_slice(payload, std::min(len, STATUS_CODE_BYTES));
+    this->report_closed(CloseReason::PEER_CLOSED);
+    return true;
 }
 
 void WsLink::fail_protocol() {

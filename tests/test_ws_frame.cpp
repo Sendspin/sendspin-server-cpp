@@ -14,7 +14,8 @@
 
 /// @file test_ws_frame.cpp
 /// @brief WebSocket framing for the ESP-IDF transport, on the host: a received header's parse
-/// with its rejections, a message's assembly from its frames, the masking and the masking keys.
+/// with its rejections, a close payload's check, a message's assembly from its frames, the masking
+/// and the masking keys.
 
 #include "ws_frame.h"
 #include <gtest/gtest.h>
@@ -33,6 +34,7 @@ using sendspin::server::chacha20_block;
 using sendspin::server::CHACHA20_BLOCK_BYTES;
 using sendspin::server::CHACHA20_KEY_BYTES;
 using sendspin::server::MessageKind;
+using sendspin::server::ws_close_payload_valid;
 using sendspin::server::ws_frame_header;
 using sendspin::server::WS_FRAME_HEADER_MAX;
 using sendspin::server::ws_mask_copy;
@@ -143,6 +145,61 @@ TEST(WsFrame, ParsesAReceivedHeader) {
         EXPECT_EQ(parse.header.payload_bytes, row.payload_bytes);
         EXPECT_EQ(parse.header.header_bytes, row.header_bytes);
         EXPECT_EQ(parse.header.mask, row.mask);
+    }
+}
+
+// RFC 6455 sections 5.5.1 and 7.4: a close payload is empty or a status code an endpoint may send
+// with a UTF-8 reason (RFC 3629 section 4)
+TEST(WsFrame, ChecksAClosePayload) {
+    struct Row {
+        std::string name;
+        std::vector<uint8_t> payload;
+        bool valid;
+    };
+    // Code 1000 and a reason of n ASCII bytes
+    const auto with_reason = [](size_t n) {
+        std::vector<uint8_t> payload{0x03, 0xE8};
+        payload.resize(payload.size() + n, 'r');
+        return payload;
+    };
+    const Row rows[] = {
+        {"Control: empty", {}, true},
+        {"Control: 1000", {0x03, 0xE8}, true},
+        {"Control: 1000 with a multibyte reason, U+00E9 U+20AC U+1F600",
+         {0x03, 0xE8, 'o', 'k', 0xC3, 0xA9, 0xE2, 0x82, 0xAC, 0xF0, 0x9F, 0x98, 0x80},
+         true},
+        {"Control: 1000 with a 123-byte reason", with_reason(123), true},
+        {"Control: 1003", {0x03, 0xEB}, true},
+        {"Control: 1007", {0x03, 0xEF}, true},
+        {"Control: 1014", {0x03, 0xF6}, true},
+        {"Control: 3000", {0x0B, 0xB8}, true},
+        {"Control: 4999", {0x13, 0x87}, true},
+        {"Control: U+D7FF and U+10FFFF",
+         {0x03, 0xE8, 0xED, 0x9F, 0xBF, 0xF4, 0x8F, 0xBF, 0xBF},
+         true},
+        {"a 1-byte body", {0x03}, false},
+        {"999", {0x03, 0xE7}, false},
+        {"1004", {0x03, 0xEC}, false},
+        {"1005", {0x03, 0xED}, false},
+        {"1006", {0x03, 0xEE}, false},
+        {"1015", {0x03, 0xF7}, false},
+        {"1016", {0x03, 0xF8}, false},
+        {"2999", {0x0B, 0xB7}, false},
+        {"5000", {0x13, 0x88}, false},
+        {"overlong NUL", {0x03, 0xE8, 0xC0, 0x80}, false},
+        {"overlong three-byte form", {0x03, 0xE8, 0xE0, 0x9F, 0xBF}, false},
+        {"overlong four-byte form", {0x03, 0xE8, 0xF0, 0x8F, 0xBF, 0xBF}, false},
+        {"surrogate U+D800", {0x03, 0xE8, 0xED, 0xA0, 0x80}, false},
+        {"past U+10FFFF", {0x03, 0xE8, 0xF4, 0x90, 0x80, 0x80}, false},
+        {"lead byte past F4", {0x03, 0xE8, 0xF5, 0x80, 0x80, 0x80}, false},
+        {"truncated sequence", {0x03, 0xE8, 0xE2, 0x82}, false},
+        {"lone continuation", {0x03, 0xE8, 0x80}, false},
+        {"continuation byte out of range", {0x03, 0xE8, 0xC3, 0xC3}, false},
+        {"a 124-byte reason", with_reason(124), false},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        EXPECT_EQ(ws_close_payload_valid(row.payload), row.valid);
     }
 }
 

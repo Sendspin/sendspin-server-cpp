@@ -14,7 +14,8 @@
 
 /// @file ws_frame.h
 /// @brief WebSocket framing for a transport that frames itself (the ESP-IDF one): a frame's
-/// header written and parsed, and client-to-server masking (RFC 6455 sections 5.2 and 5.3).
+/// header written and parsed, client-to-server masking and a close frame's payload checked (RFC
+/// 6455 sections 5.2, 5.3 and 5.5.1).
 /// Platform-free and host-tested.
 
 #pragma once
@@ -41,6 +42,10 @@ constexpr uint8_t PONG = 0xA;
 
 /// @brief A control frame's largest payload (RFC 6455 section 5.5)
 constexpr size_t WS_CONTROL_PAYLOAD_MAX = 125;
+
+/// @brief Whether a received close frame's payload is well formed (RFC 6455 section 5.5.1): empty,
+/// or a status code an endpoint may send (section 7.4) followed by a UTF-8 reason
+bool ws_close_payload_valid(std::span<const uint8_t> payload);
 
 /// @brief A frame's masking key (RFC 6455 section 5.3)
 using WsMaskKey = std::array<uint8_t, 4>;

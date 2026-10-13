@@ -149,8 +149,7 @@ public:
                     this->ask_pong();
                 } else if (frame.type == HTTPD_WS_TYPE_CLOSE) {
                     // httpd closes the session once this returns
-                    this->answer_close(payload.data(), frame.len);
-                    this->report_closed(CloseReason::PEER_CLOSED);
+                    return this->answer_close(payload.data(), frame.len) ? ESP_OK : ESP_FAIL;
                 }
                 return ESP_OK;
             }

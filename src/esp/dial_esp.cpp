@@ -315,7 +315,6 @@ private:
                     this->ask_pong();
                 } else if (header.opcode == ws_opcode::CLOSE) {
                     this->answer_close(payload.data(), len);
-                    this->report_closed(CloseReason::PEER_CLOSED);
                     return;
                 }
                 continue;
