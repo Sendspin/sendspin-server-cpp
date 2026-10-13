@@ -198,15 +198,25 @@ std::string ws_accept_value(std::string_view key) {
     return base64_encode(digest.data(), digest.size());
 }
 
+std::string ws_host_value(const DialTarget& target) {
+    std::string host;
+    if (target.host.find(':') == std::string::npos) {
+        host = target.host;
+    } else {
+        // RFC 3986 section 3.2.2: an IPv6 literal is bracketed
+        const std::string_view literal = target.host;
+        host = "[" + std::string(literal.substr(0, literal.find('%'))) + "]";
+    }
+    host += ":" + std::to_string(target.port);
+    return host;
+}
+
 std::string ws_upgrade_request(const DialTarget& target, std::string_view key) {
-    // RFC 3986 section 3.2.2: an IPv6 literal is bracketed
-    const bool bracketed = target.host.find(':') != std::string::npos;
     std::string request;
     request += "GET ";
     request += target.path;
     request += " HTTP/1.1\r\nHost: ";
-    request += bracketed ? "[" + target.host + "]" : target.host;
-    request += ":" + std::to_string(target.port);
+    request += ws_host_value(target);
     request += "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ";
     request += key;
     request += "\r\nSec-WebSocket-Version: 13\r\n\r\n";

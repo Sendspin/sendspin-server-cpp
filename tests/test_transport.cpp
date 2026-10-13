@@ -596,8 +596,14 @@ TEST_F(TransportTest, DialedConnectionRoundTripsTextAndBinary) {
     struct Row {
         const char* name;
         bool by_address;
+        /// For by_address
+        const char* host;
+        const char* host_header;
     };
-    for (const Row row : {Row{"url", false}, Row{"addresses", true}}) {
+    // RFC 6874 section 4: a zone stays out of the Host header
+    for (const Row row : {Row{"url", false, "", "127.0.0.1"},
+                          Row{"addresses", true, "sendspin.invalid", "sendspin.invalid"},
+                          Row{"zoned host", true, "fe80::1%lo0", "[fe80::1]"}}) {
         SCOPED_TRACE(row.name);
         asio::io_context peer_io;
         tcp::acceptor acceptor(peer_io, {LOOPBACK, 0});
@@ -624,8 +630,8 @@ TEST_F(TransportTest, DialedConnectionRoundTripsTextAndBinary) {
 
         DialTarget target;
         if (row.by_address) {
-            // A name that cannot resolve: only the address list can reach the peer
-            target.host = "sendspin.invalid";
+            // A host never resolved: only the address list can reach the peer
+            target.host = row.host;
             target.port = port;
             target.path = "/sendspin";
             target.addresses = {"127.0.0.1"};
@@ -645,8 +651,7 @@ TEST_F(TransportTest, DialedConnectionRoundTripsTextAndBinary) {
 
         ASSERT_EQ(peer.error(), "");
         EXPECT_EQ(target_seen, "/sendspin");
-        EXPECT_EQ(host_seen, row.by_address ? "sendspin.invalid:" + std::to_string(port)
-                                            : "127.0.0.1:" + std::to_string(port));
+        EXPECT_EQ(host_seen, std::string(row.host_header) + ":" + std::to_string(port));
         EXPECT_EQ(handler.messages[0].kind, MessageKind::TEXT);
         EXPECT_EQ(handler.messages[0].payload, bytes_of("time"));
         EXPECT_EQ(handler.messages[1].kind, MessageKind::BINARY);

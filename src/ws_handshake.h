@@ -43,8 +43,12 @@ std::string ws_handshake_key(const std::array<uint8_t, WS_KEY_NONCE_BYTES>& nonc
 /// @brief The Sec-WebSocket-Accept a server answers key with (RFC 6455 section 4.2.2)
 std::string ws_accept_value(std::string_view key);
 
-/// @brief The upgrade GET for target with key: Host as host:port (an IPv6 literal bracketed),
-/// and no subprotocol or extension offered
+/// @brief The Host header's value for target: host:port, an IPv6 literal bracketed and without
+/// its zone (RFC 6874 section 4: a ZoneID has only local significance)
+std::string ws_host_value(const DialTarget& target);
+
+/// @brief The upgrade GET for target with key: Host as ws_host_value(), and no subprotocol or
+/// extension offered
 std::string ws_upgrade_request(const DialTarget& target, std::string_view key);
 
 enum class WsUpgradeStatus : uint8_t {

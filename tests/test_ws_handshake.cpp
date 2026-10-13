@@ -73,8 +73,8 @@ TEST(WsHandshake, KeyAndAcceptMatchTheRfcExample) {
     EXPECT_EQ(ws_accept_value(SAMPLE_KEY), SAMPLE_ACCEPT);
 }
 
-// RFC 6455 section 4.1: the request line, Host with the port (an IPv6 literal bracketed), the
-// upgrade headers and version 13
+// RFC 6455 section 4.1: the request line, Host with the port (an IPv6 literal bracketed, its
+// zone left out as RFC 6874 section 4 requires), the upgrade headers and version 13
 TEST(WsHandshake, BuildsTheUpgradeRequest) {
     DialTarget target;
     target.host = "speaker.local";
@@ -87,6 +87,9 @@ TEST(WsHandshake, BuildsTheUpgradeRequest) {
     target.host = "fe80::1";
     target.port = 80;
     target.path = "/";
+    EXPECT_EQ(ws_upgrade_request(target, SAMPLE_KEY).substr(0, 39),
+              "GET / HTTP/1.1\r\nHost: [fe80::1]:80\r\nUpg");
+    target.host = "fe80::1%en0";
     EXPECT_EQ(ws_upgrade_request(target, SAMPLE_KEY).substr(0, 39),
               "GET / HTTP/1.1\r\nHost: [fe80::1]:80\r\nUpg");
 }

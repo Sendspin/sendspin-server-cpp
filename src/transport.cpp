@@ -20,6 +20,7 @@
 #include "ring.h"
 #include "thread_setup.h"
 #include "transport_asio.h"
+#include "ws_handshake.h"
 #include <boost/asio/bind_allocator.hpp>
 #include <boost/asio/defer.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -1530,12 +1531,8 @@ private:
             this->finish_failed(CloseReason::FAILED);
             return;
         }
-        std::string host = this->target_.host.find(':') == std::string::npos
-                               ? this->target_.host
-                               : "[" + this->target_.host + "]";
-        host += ":" + std::to_string(this->target_.port);
         this->connection_->ws().async_handshake(
-            host, this->target_.path,
+            ws_host_value(this->target_), this->target_.path,
             [self = this->shared_from_this()](const error_code& handshake_ec) {
                 self->on_handshake(handshake_ec);
             });
