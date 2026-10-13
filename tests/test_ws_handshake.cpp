@@ -106,6 +106,13 @@ TEST(WsHandshake, ChecksTheResponse) {
         size_t response_bytes;
     };
     const std::string ok = ok_status + ok_headers + "\r\n";
+    // A response of exactly n bytes, padded with a header
+    const auto response_of = [&](size_t n) {
+        const std::string unpadded = ok_status + "X-Pad: \r\n" + ok_headers + "\r\n";
+        return ok_status + "X-Pad: " + std::string(n - unpadded.size(), 'x') + "\r\n" + ok_headers +
+               "\r\n";
+    };
+    const std::string longest = response_of(WS_UPGRADE_RESPONSE_MAX);
     const Row rows[] = {
         {"Control: accepted", ok, WsUpgradeStatus::ACCEPTED, ok.size()},
         {"Control: frames after the response are not part of it", ok + "\x82\x01z",
@@ -115,6 +122,8 @@ TEST(WsHandshake, ChecksTheResponse) {
          "sec-websocket-accept:  " +
              std::string(SAMPLE_ACCEPT) + " \r\nServer: test\r\n\r\n",
          WsUpgradeStatus::ACCEPTED, 0},
+        {"Control: a response of WS_UPGRADE_RESPONSE_MAX bytes, a frame after it",
+         longest + "\x82\x01z", WsUpgradeStatus::ACCEPTED, longest.size()},
         {"no blank line yet", ok_status + ok_headers, WsUpgradeStatus::INCOMPLETE, 0},
         {"nothing yet", "", WsUpgradeStatus::INCOMPLETE, 0},
         {"OK instead of 101", "HTTP/1.1 200 OK\r\n" + ok_headers + "\r\n",
@@ -149,6 +158,8 @@ TEST(WsHandshake, ChecksTheResponse) {
          WsUpgradeStatus::REJECTED, 0},
         {"no blank line within the cap", ok_status + "X-Pad: " + padding, WsUpgradeStatus::REJECTED,
          0},
+        {"a response one byte over the cap", response_of(WS_UPGRADE_RESPONSE_MAX + 1),
+         WsUpgradeStatus::REJECTED, 0},
         {"a blank line past the cap",
          ok_status + "X-Pad: " + padding + "\r\n" + ok_headers + "\r\n", WsUpgradeStatus::REJECTED,
          0},

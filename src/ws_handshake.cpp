@@ -215,8 +215,9 @@ std::string ws_upgrade_request(const DialTarget& target, std::string_view key) {
 
 WsUpgradeCheck check_upgrade_response(std::string_view received, std::string_view key) {
     WsUpgradeCheck check;
+    // Found within the cap, the blank line ends within it
     const size_t blank = received.substr(0, WS_UPGRADE_RESPONSE_MAX).find(BLANK_LINE);
-    if (blank == std::string_view::npos || blank + BLANK_LINE.size() > WS_UPGRADE_RESPONSE_MAX) {
+    if (blank == std::string_view::npos) {
         if (received.size() >= WS_UPGRADE_RESPONSE_MAX) {
             check.status = WsUpgradeStatus::REJECTED;
         }

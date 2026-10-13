@@ -169,10 +169,11 @@ TEST(WsFrame, MaskCopyXorsEachByteWithItsKeyByte) {
             for (size_t i = 0; i < len; ++i) {
                 expected[i] = source[start + i] ^ key[i % 4];
             }
-            std::vector<uint8_t> copied(len + 1, 0xEE);
+            std::vector<uint8_t> copied(len + 2, 0xEE);
             ws_mask_copy(copied.data() + 1, source.data() + start, len, key);
-            EXPECT_EQ(std::vector<uint8_t>(copied.begin() + 1, copied.end()), expected);
-            EXPECT_EQ(copied[0], 0xEE);
+            EXPECT_EQ(std::vector<uint8_t>(copied.begin() + 1, copied.end() - 1), expected);
+            EXPECT_EQ(copied.front(), 0xEE);
+            EXPECT_EQ(copied.back(), 0xEE);
 
             std::vector<uint8_t> in_place(
                 source.begin(), source.begin() + static_cast<std::ptrdiff_t>(start + len));
