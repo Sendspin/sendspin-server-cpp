@@ -926,6 +926,8 @@ void Connection::Impl::start_write() {
     if (this->batch_count_ == 0) {
         return;
     }
+    // After a close inside on_writable(): the network close it posted would make the network half
+    // ignore the write, but close_noexcept() may have set closed_ without posting one
     if (this->closed_) {
         this->clear_batch();
         return;
