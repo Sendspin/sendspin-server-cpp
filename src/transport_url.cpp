@@ -81,7 +81,7 @@ std::optional<std::string> ip_literal_host(std::string_view literal) {
     if (!address_characters) {
         return std::nullopt;
     }
-    // An IPv6 address in an RFC 4291 section 2.2 text form
+    // An IPv6 address in an RFC 4291 section 2.2 text form, as the system's inet_pton reads it
     std::string host(address);
     std::array<uint8_t, IPV6_ADDRESS_BYTES> bytes{};
     if (inet_pton(AF_INET6, host.c_str(), bytes.data()) != 1) {

@@ -499,7 +499,8 @@ TEST(TransportUrl, ParsesWebSocketUrls) {
         {"ws://[fe%80::1%en0]/p", false, "", 0, ""},
         {"ws://[fe80::1%25en%250]/p", false, "", 0, ""},
         {"ws://[fe80::1%%en0]/p", false, "", 0, ""},
-        // An address that is empty or holds a character besides hex digits, ':' and '.'
+        // An address that is empty or holds a character besides hex digits, ':' and '.'; lwIP's
+        // inet_pton accepts the prefix before such a character, so only ESP-IDF needs the check
         {"ws://[%en0]/p", false, "", 0, ""},
         {"ws://[fe80::g]/p", false, "", 0, ""},
         // RFC 3986 section 3.2.2: a bracketed address is IPv6, in an RFC 4291 section 2.2 form
