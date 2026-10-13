@@ -163,6 +163,10 @@ TEST(WsHandshake, ChecksTheResponse) {
          ok_status + "Upgrade: websocket\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
              accept + "\r\n",
          WsUpgradeStatus::REJECTED, 0},
+        {"whitespace before a field's colon",
+         ok_status + "Upgrade : h2c\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" + accept +
+             "\r\n",
+         WsUpgradeStatus::REJECTED, 0},
         {"Upgrade as a list",
          ok_status + "Upgrade: websocket, h2c\r\nConnection: Upgrade\r\n" + accept + "\r\n",
          WsUpgradeStatus::REJECTED, 0},

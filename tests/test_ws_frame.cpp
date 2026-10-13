@@ -215,8 +215,9 @@ TEST(WsFrame, ChecksAClosePayload) {
     }
 }
 
-// RFC 6455 section 8.1: a complete text message is UTF-8 over its frames' payloads together, so a
-// form split across two frames is whole; a binary message is any bytes
+// RFC 6455 section 8.1: a complete text message is UTF-8 over its frames' payloads joined, as
+// WsLink::end_frame() checks it, so a form split across two frames is whole; a binary message is
+// any bytes
 TEST(WsFrame, ChecksATextMessage) {
     struct Row {
         std::string name;

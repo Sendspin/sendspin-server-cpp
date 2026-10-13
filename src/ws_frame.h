@@ -53,7 +53,7 @@ bool ws_utf8_valid(std::span<const uint8_t> bytes);
 std::optional<uint16_t> ws_close_payload_fault(std::span<const uint8_t> payload);
 
 /// @brief Whether a complete message's payload fits its kind: a text message's is UTF-8 (RFC 6455
-/// section 8.1); one that is not fails the connection with close_code::INVALID_PAYLOAD
+/// section 8.1)
 bool ws_message_valid(MessageKind kind, std::span<const uint8_t> payload);
 
 /// @brief A frame's masking key (RFC 6455 section 5.3)

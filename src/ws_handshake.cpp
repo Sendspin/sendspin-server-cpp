@@ -254,6 +254,10 @@ WsUpgradeCheck check_upgrade_response(std::string_view received, std::string_vie
             return check;
         }
         const std::string_view name = line.substr(0, colon);
+        // RFC 9110 section 5.1: no whitespace between a field's name and its colon
+        if (name.back() == ' ' || name.back() == '\t') {
+            return check;
+        }
         const std::string_view value = trimmed(line.substr(colon + 1));
         if (equals_ignoring_case(name, "Upgrade")) {
             // RFC 6455 section 4.1 step 2: one line, exactly the token
