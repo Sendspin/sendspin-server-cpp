@@ -272,13 +272,17 @@ WsHeaderParse ws_parse_frame_header(std::span<const uint8_t> bytes, bool peer_ma
     if (bytes.size() < at) {
         return parse;
     }
+    // Section 5.2: a length in the minimal number of bytes
     if (len7 == LEN_16) {
         header.payload_bytes = (uint64_t{bytes[2]} << 8U) | bytes[3];
+        if (header.payload_bytes <= LEN_7_MAX) {
+            return invalid();
+        }
     } else if (len7 == LEN_64) {
         for (size_t i = 0; i < LEN_64_BYTES; ++i) {
             header.payload_bytes = (header.payload_bytes << 8U) | bytes[2 + i];
         }
-        if ((header.payload_bytes & LEN_64_TOP_BIT) != 0) {
+        if ((header.payload_bytes & LEN_64_TOP_BIT) != 0 || header.payload_bytes <= LEN_16_MAX) {
             return invalid();
         }
     } else {

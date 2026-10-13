@@ -158,7 +158,8 @@ struct WsHeaderParse {
 /// @brief Parses the header at the start of bytes, as the endpoint receiving it: a server's peer
 /// masks every frame and a client's never does (RFC 6455 section 5.1). A reserved bit (no
 /// extension is negotiated), an unknown opcode, a fragmented or longer control frame (section
-/// 5.5), a 64-bit length with its top bit set or the wrong masking is INVALID.
+/// 5.5), a length not in its fewest bytes or a 64-bit one with its top bit set (section 5.2) or
+/// the wrong masking is INVALID.
 WsHeaderParse ws_parse_frame_header(std::span<const uint8_t> bytes, bool peer_masks);
 
 }  // namespace sendspin::server
