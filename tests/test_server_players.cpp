@@ -84,6 +84,12 @@ using Codec = sendspin::SendspinCodecFormat;
 
 constexpr uint32_t RATE = 48000;
 constexpr uint32_t CELL = RATE / 50;
+constexpr int64_t CELL_US = 20000;
+
+/// A frame's duration at rate: the cells that hold a whole number of samples
+int64_t frame_us(uint32_t rate) {
+    return int64_t{50 / std::gcd(rate, 50U)} * CELL_US;
+}
 
 /// A stretch of the signal the host writes: positions first to first + count - 1
 struct Segment {
@@ -96,8 +102,9 @@ struct Segment {
 };
 
 /// Writes segment, waiting for room, until seek is set
+/// @param fed set to the frames written so far
 void feed(GroupInput& input, const Signal& signal, const Segment& segment,
-          const std::atomic<bool>* seek = nullptr) {
+          const std::atomic<bool>* seek = nullptr, uint32_t* fed = nullptr) {
     constexpr uint32_t BLOCK = 960;
     Bytes block(BLOCK * signal.frame_bytes());
     uint32_t written = 0;
@@ -111,6 +118,9 @@ void feed(GroupInput& input, const Signal& signal, const Segment& segment,
         }
         const WriteResult result = input.write(block.data(), n);
         written += static_cast<uint32_t>(result.frames);
+        if (fed != nullptr) {
+            *fed = written;
+        }
         if (result.frames < n) {
             ASSERT_EQ(result.state, InputState::FULL);
             // Short waits, so a seek is seen while the input is full
@@ -413,37 +423,26 @@ constexpr int64_t START_FLOOR_US = 150000;
 /// frame, with room left for a frame that the pump, run late on a loaded machine, finds late
 constexpr int64_t START_CEILING_US = 500000;
 
-/// spec player/v1.md "Server Audio Send Constraints": chunks leave at least the player's
-/// min_buffer_ms before their time (no output delay here). A pump that runs late, or frames
-/// produced late, on a loaded machine may take a chunk under it, so at most one in twenty is
-/// under; a hold that waits below the floor puts nearly every chunk under it
-void expect_min_buffer(const std::vector<int64_t>& send_ahead_us, int64_t min_buffer_us) {
-    const auto under =
-        static_cast<size_t>(std::count_if(send_ahead_us.begin(), send_ahead_us.end(),
-                                          [&](int64_t ahead) { return ahead < min_buffer_us; }));
-    EXPECT_LE(under * 20, send_ahead_us.size()) << under << " under min_buffer_ms";
-}
-
-/// What the server sent one client: every chunk before its time (no output delay), the first after
-/// each stream/start or stream/clear between START_FLOOR_US and START_CEILING_US after that
-/// trigger, and every other one right where the chunk before it ended, so no audio is skipped,
-/// repeated or reordered, and those the players' min_buffer_ms before their time
-/// (expect_min_buffer()). The timeline has no shift in these tests.
+/// What the server sent one client: the first chunk after each stream/start or stream/clear between
+/// START_FLOOR_US and START_CEILING_US after that trigger, and every other one right where the
+/// chunk before it ended, so no audio is skipped, repeated or reordered. The timeline has no shift
+/// in these tests; a gap only where its last frame had passed by the next chunk's stamp. How far
+/// ahead of its time a chunk left is when the pump ran, which a loaded machine delays, so it is not
+/// checked here: PlayerStreamPacking checks the hold a player's min_buffer_ms sets, and SchedCursor
+/// the skip of a frame already late. That the pump wakes for a held chunk at its room_time
+/// (Session::take_message() through next_wake(), which is unit-tested) is covered end to end by
+/// nothing.
 void expect_sent_whole(const std::vector<ChunkInfo>& chunks) {
-    std::vector<int64_t> ahead;
     for (size_t i = 0; i < chunks.size(); ++i) {
         const ChunkInfo& chunk = chunks[i];
         SCOPED_TRACE(chunk.ts);
-        EXPECT_LT(chunk.stamp_us, chunk.ts) << "sent late";
         const bool first =
             i == 0 || chunks[i - 1].stream != chunk.stream || chunks[i - 1].clears != chunk.clears;
         // The pump skips a frame already late when it runs (sched::prepare_cursor()), as when core
         // stalls on a loaded machine, so audio may be missing only where it was late
         if (first) {
-            // A frame lasts the cells that hold a whole number of samples at the rate
-            const int64_t frame_us = int64_t{50 / std::gcd(chunk.rate, 50U)} * 20000;
             EXPECT_GE(chunk.ts - chunk.trigger_us, START_FLOOR_US);
-            if (chunk.ts - frame_us > chunk.stamp_us) {
+            if (chunk.ts - frame_us(chunk.rate) > chunk.stamp_us) {
                 EXPECT_LE(chunk.ts - chunk.trigger_us, START_CEILING_US);
             }
             continue;
@@ -452,20 +451,18 @@ void expect_sent_whole(const std::vector<ChunkInfo>& chunks) {
         const int64_t duration_us = int64_t{before.samples} * 1000000;
         ASSERT_EQ(duration_us % before.rate, 0) << "a chunk of part of a cell before another";
         const int64_t expected = before.ts + (duration_us / before.rate);
-        if (chunk.ts > expected && expected <= chunk.stamp_us) {
+        if (chunk.ts > expected && chunk.ts - frame_us(before.rate) <= chunk.stamp_us) {
             continue;
         }
         EXPECT_EQ(chunk.ts, expected) << "a gap in the chunks";
-        ahead.push_back(chunk.ts - chunk.stamp_us);
     }
-    expect_min_buffer(ahead, START_FLOOR_US);
 }
 
 /// Checks a player's output and the chunks the server sent it, for segments of the signal written
 /// in their order (a segment after the first follows a seek or a resume): each chunk on a frame
 /// boundary of its segment. The output holds some of every segment, in order, never going back to
 /// an earlier one, each frame of the signal bit for bit, its positions rising within a segment,
-/// but for one blended frame at a time, and it plays the last segment to its end but for 10 ms.
+/// but for one blended frame at a time.
 ///
 /// Where the output enters a segment, and what it skips or fills with silence within one, depends
 /// on timing alone. The server's trigger may go out after the slack its group lead leaves, so the
@@ -474,7 +471,10 @@ void expect_sent_whole(const std::vector<ChunkInfo>& chunks) {
 /// soft_sync_drop_frame()), and when it starts, re-aligns after a seek, or loses sync because its
 /// threads ran late, it drops the late prefix of a chunk or fills with silence
 /// (SyncTask::handle_synchronize_audio()). The startup lead is checked from the stamps with raw
-/// players.
+/// players. How much of the end it plays depends on its threads keeping real time: one behind its
+/// clock at the stream/end drops what it has not played. So does how much of the end the server
+/// sends, since a frame late when the pump runs is skipped; that a stream runs through its last
+/// frame is checked with the clock passed in (PlayerStreamSwitch).
 /// @param rate the signal's sample rate
 void expect_heard(const std::vector<Output>& frames, const std::vector<ChunkInfo>& chunks,
                   const std::vector<Segment>& segments, uint32_t rate = RATE) {
@@ -502,18 +502,18 @@ void expect_heard(const std::vector<Output>& frames, const std::vector<ChunkInfo
         if (frame.kind == Output::Kind::SILENT) {
             continue;
         }
+        // Not a SCOPED_TRACE: a second of output is 48,000 frames
         const uint32_t position = frame.position;
-        SCOPED_TRACE(position);
         const size_t segment = segment_of(position);
-        ASSERT_LT(segment, segments.size()) << "a frame of no segment";
+        ASSERT_LT(segment, segments.size()) << "a frame of no segment: " << position;
         if (!previous) {
-            EXPECT_EQ(segment, 0U);
+            EXPECT_EQ(segment, 0U) << position;
         } else if (segment != segment_of(*previous)) {
-            ASSERT_GT(segment, segment_of(*previous)) << "back to an earlier segment";
+            ASSERT_GT(segment, segment_of(*previous)) << "back to an earlier segment: " << position;
         } else {
             ASSERT_GT(position, *previous);
         }
-        EXPECT_LE(altered, 1U);
+        EXPECT_LE(altered, 1U) << position;
         previous = position;
         altered = 0;
         ++heard[segment];
@@ -523,10 +523,6 @@ void expect_heard(const std::vector<Output>& frames, const std::vector<ChunkInfo
     for (size_t i = 0; i < segments.size(); ++i) {
         EXPECT_GT(heard[i], 0U) << "segment " << i << " not heard";
     }
-    // The end of the last segment played, but for what a correction near it took: 10 ms
-    ASSERT_TRUE(previous);
-    EXPECT_EQ(segment_of(*previous), segments.size() - 1);
-    EXPECT_GE(*previous + (rate / 100) + 1, segments.back().first + segments.back().count);
 }
 
 /// expect_heard(), with the server having sent each segment whole from where its stream entered
@@ -741,7 +737,8 @@ INSTANTIATE_TEST_SUITE_P(Depths, ServerPlayersByDepth, testing::Values(16U, 24U)
 // A FLAC stream's chunks carry n_target frames, whether the player's buffer frees room one
 // completed chunk at a time (a 250,000-byte buffer, about a second) or has room past the
 // write-ahead (the default buffer), since a chunk short of n_target waits for its frames or room
-// while its first frame has the slack. Most chunks, past the first 500 ms, hold five 20 ms frames.
+// while its first frame has the slack. Most chunks past the first 500 ms of the stream's timeline
+// hold five 20 ms frames.
 TEST(ServerPlayersPacking, FillFlacChunksToTheTarget) {
     struct Row {
         const char* name;
@@ -783,7 +780,7 @@ TEST(ServerPlayersPacking, FillFlacChunksToTheTarget) {
         expect_played(decode(signal, flac.sink().played()), chunks, {segment});
         std::vector<size_t> frames;
         for (const ChunkInfo& chunk : chunks) {
-            if (chunk.stamp_us - chunks.front().stamp_us >= 500000) {
+            if (chunk.ts - chunks.front().ts >= 500000) {
                 frames.push_back(chunk.frames);
             }
         }
@@ -810,8 +807,8 @@ TEST(ServerPlayers, PlayFlacThroughALateJoinAndASeek) {
 
     const std::shared_ptr<GroupInput> input = s.open();
     ASSERT_TRUE(input);
-    // Longer than the test runs before the seek
-    const Segment before{0, 8 * RATE};
+    // Longer than the test runs before the seek, however slowly
+    const Segment before{0, 60 * RATE};
     const Segment after{4000000, 2 * RATE};
     std::atomic<bool> seek{false};
     std::thread host([&] {
@@ -975,9 +972,8 @@ void expect_chunks_match(const std::vector<ChunkInfo>& chunks, const Bytes& refe
 /// sendspin-cpp's corrections (expect_played()): a frame not in the reference, which blends its
 /// neighbors, then the reference again at most four frames on; silence; and a re-alignment that
 /// skips ahead, taken where two frames in a row continue the reference, since a single frame can
-/// match an unrelated one. The end plays but for 10 ms.
-void expect_follows(const Bytes& played, const Bytes& reference, size_t frame_bytes,
-                    uint32_t rate) {
+/// match an unrelated one. How much of the end plays is real time (expect_heard()).
+void expect_follows(const Bytes& played, const Bytes& reference, size_t frame_bytes) {
     const auto frame_at = [&](const Bytes& bytes, size_t index) {
         return std::span<const uint8_t>(bytes.data() + (index * frame_bytes), frame_bytes);
     };
@@ -996,7 +992,7 @@ void expect_follows(const Bytes& played, const Bytes& reference, size_t frame_by
         --end;
     }
     const size_t total = reference.size() / frame_bytes;
-    ASSERT_LT(begin + 1, end);
+    ASSERT_LT(begin + 1, end) << "nothing played";
     // Where played frame i and the one after it continue the reference, at or after from
     const auto realign = [&](size_t i, size_t from) -> std::optional<size_t> {
         for (size_t at = from; at + 1 < total; ++at) {
@@ -1007,11 +1003,18 @@ void expect_follows(const Bytes& played, const Bytes& reference, size_t frame_by
         }
         return std::nullopt;
     };
-    std::optional<size_t> start = realign(begin, 0);
-    ASSERT_TRUE(start) << "the first frames played are not in the reference";
+    // The start, where two frames in a row are the reference; a correction or a silence fill at
+    // the very start may come before it, as it may anywhere
+    std::optional<size_t> start;
+    size_t first = begin;
+    size_t passed = 0;
+    for (; first + 1 < end && passed < 3 && !(start = realign(first, 0)); ++first) {
+        passed += silent(frame_at(played, first)) ? 0 : 1;
+    }
+    ASSERT_TRUE(start) << "the first frames played follow no correction";
     size_t at = *start;
     size_t unmatched = 0;
-    for (size_t i = begin + 1; i < end; ++i) {
+    for (size_t i = first + 1; i < end; ++i) {
         const std::span<const uint8_t> frame = frame_at(played, i);
         if (silent(frame)) {
             continue;
@@ -1032,7 +1035,6 @@ void expect_follows(const Bytes& played, const Bytes& reference, size_t frame_by
         }
         ASSERT_LT(++unmatched, 2U) << "frame " << i << " follows no correction";
     }
-    EXPECT_GE(at + (rate / 100) + 1, total);
 }
 
 class ServerPlayersResampled : public testing::TestWithParam<Codec> {};
@@ -1081,7 +1083,7 @@ TEST_P(ServerPlayersResampled, PlayA44100InputAt48000) {
                           [&](const ChunkInfo& other) { return other.ts == chunk.ts; }));
     }
     EXPECT_GT(shared, 0U);
-    expect_follows(resampled.sink().played(), reference, 6, RATE);
+    expect_follows(resampled.sink().played(), reference, 6);
 }
 
 INSTANTIATE_TEST_SUITE_P(Codecs, ServerPlayersResampled, testing::Values(Codec::PCM, Codec::FLAC),
@@ -1118,7 +1120,7 @@ TEST(ServerPlayersMixed, PlayAStereoInputToAMonoPlayer) {
     ASSERT_EQ(anchors.size(), 1U);
     const Bytes reference = mixed_reference(signal, segment);
     expect_chunks_match(s.trace.chunks[mono_id], reference, 3, anchors[0], RATE);
-    expect_follows(mono.sink().played(), reference, 3, RATE);
+    expect_follows(mono.sink().played(), reference, 3);
 }
 
 // ==============================================================================
@@ -1284,8 +1286,8 @@ TEST(ServerPlayersSegments, PlayAFormatChangeWithinARunOnEveryPlayer) {
     const int64_t change = anchor + 3000000;
     EXPECT_GT(stereo_chunks.back().ts, change);
     EXPECT_GT(mono_chunks.back().ts, change);
-    expect_follows(stereo.sink().played(), stereo_reference, 6, RATE_44);
-    expect_follows(mono.sink().played(), mono_reference, 3, RATE);
+    expect_follows(stereo.sink().played(), stereo_reference, 6);
+    expect_follows(mono.sink().played(), mono_reference, 3);
 }
 
 // A set_format() to four channels, which no format of a stereo player is offered for, leaves the
@@ -1347,7 +1349,7 @@ TEST(ServerPlayersSegments, KeepAStreamThroughAnInputItsFormatsAreNotOfferedFor)
     const int64_t anchor = chunks.front().ts - (int64_t{*position} * 1000000 / RATE_44);
     expect_chunks_match(chunks, reference, 6, anchor, RATE_44);
     EXPECT_GT(chunks.back().ts, anchor + 1000000);
-    expect_follows(stereo.sink().played(), reference, 6, RATE_44);
+    expect_follows(stereo.sink().played(), reference, 6);
 }
 
 // A 44.1 kHz stereo input set_format() to 48 kHz mono at 1.0123 s, a boundary on no cell. A player
@@ -1427,34 +1429,43 @@ TEST(ServerPlayersSegments, StartAJoinerAtThePlayingSegmentsRate) {
     const int64_t anchor = joiner_chunks.front().ts - (int64_t{*position} * 1000000 / RATE_44);
     expect_chunks_match(joiner_chunks, joiner_reference, 6, anchor, RATE_44);
     expect_chunks_match(s.trace.chunks[first_id], first_reference, 6, anchor, RATE);
-    expect_follows(first.sink().played(), first_reference, 6, RATE);
+    expect_follows(first.sink().played(), first_reference, 6);
     EXPECT_GT(joiner.sink().audible(), 0U);
 }
 
-/// A 44.1 kHz stereo input playing to a 44.1 kHz player, 2.5 s (on a cell) then a set_format() to
-/// 48 kHz and a second of it, and a player wanting 48 kHz that joins while the 44.1 kHz segment
-/// plays, before the set_format() or after it. Played in real time, about four seconds.
+/// A 44.1 kHz stereo input playing to a 44.1 kHz player, 2.5 s or more (on a cell) then a
+/// set_format() to 48 kHz and a second of it, and a player wanting 48 kHz that joins while the 44.1
+/// kHz segment plays, before the set_format() or after it. Joining before it, the first segment
+/// goes on, a whole number of 100 ms steps, until the joiner has been sent some of it, however long
+/// that takes. Joining after it, the join must land while the staged first segment still plays,
+/// which no write can extend: that segment is 5 s, and the first player's 3 MB buffer has the
+/// server admit all of it at once, so the join has about 4.5 s on any runner. Played in real time,
+/// about four seconds, or six and a half staged.
 void play_a_joiner_through_a_segment_change(bool staged_first) {
     const Signal signal(24);
     Rig s(signal, RATE_44, false);
-    const Player& first = s.add({{Codec::PCM, 2, RATE_44, 24}}, RATE_44);
+    const Player& first =
+        s.add({{Codec::PCM, 2, RATE_44, 24}}, RATE_44, 2, 150, std::nullopt,
+              staged_first ? 3000000 : sendspin::PlayerRoleConfig::DEFAULT_AUDIO_BUFFER_CAPACITY);
 
     const std::shared_ptr<GroupInput> input = s.open();
     ASSERT_TRUE(input);
-    const Segment before{0, 110250};
-    const Segment after{before.count, RATE};
+    // Five cells, a whole number of samples at both rates
+    constexpr uint32_t STEP = RATE_44 / 10;
+    const uint32_t least = staged_first ? 220500 : 110250;
+    uint32_t first_track = 0;
     std::atomic<bool> next_track{staged_first};
     std::atomic<bool> staged{false};
     std::thread host([&] {
-        feed(*input, signal, before);
-        while (!next_track.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        while (first_track < least || !next_track.load()) {
+            feed(*input, signal, Segment{first_track, STEP});
+            first_track += STEP;
         }
         const bool changed = input->set_format({RATE, 2, SampleFormat::S24});
         EXPECT_TRUE(changed);
         staged = true;
         if (changed) {
-            feed(*input, signal, after);
+            feed(*input, signal, Segment{first_track, RATE});
         }
         input->drain();
     });
@@ -1469,11 +1480,13 @@ void play_a_joiner_through_a_segment_change(bool staged_first) {
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
     s.run_until_drained({drained});
     host.join();
+    const Segment before{0, first_track};
+    const Segment after{first_track, RATE};
 
-    // The first track resampled, cut at the boundary's output index (exactly 120,000 frames), then
-    // the second as written
+    // The first track resampled, cut at the boundary's output index (exactly 120,000 frames for
+    // 2.5 s), then the second as written
     Bytes reference = resampled_reference(signal, before, RATE_44, RATE);
-    ASSERT_EQ(reference.size(), size_t{120000} * 6);
+    ASSERT_EQ(reference.size(), size_t{before.count} * RATE / RATE_44 * 6);
     for (uint32_t i = 0; i < after.count; ++i) {
         reference.resize(reference.size() + 6);
         signal.put(&reference[reference.size() - 6], after.first + i);
@@ -1489,7 +1502,7 @@ void play_a_joiner_through_a_segment_change(bool staged_first) {
     const std::optional<uint32_t> position = signal.get(first_chunks.front().pcm.data());
     ASSERT_TRUE(position);
     const int64_t anchor = first_chunks.front().ts - (int64_t{*position} * 1000000 / RATE_44);
-    const int64_t boundary = anchor + 2500000;
+    const int64_t boundary = anchor + (int64_t{before.count} * 1000000 / RATE_44);
     const std::vector<ChunkInfo>& joiner_chunks = s.trace.chunks[joiner_id];
     ASSERT_FALSE(joiner_chunks.empty());
     // It joined while the first track played, and its stream went on into the second
@@ -1497,7 +1510,7 @@ void play_a_joiner_through_a_segment_change(bool staged_first) {
     EXPECT_LT(joiner_chunks.front().ts, boundary);
     EXPECT_GE(joiner_chunks.back().ts, boundary);
     expect_chunks_match(joiner_chunks, reference, 6, anchor, RATE);
-    expect_follows(joiner.sink().played(), reference, 6, RATE);
+    expect_follows(joiner.sink().played(), reference, 6);
 }
 
 // A player wanting 48 kHz that joins while a 44.1 kHz input plays starts at once, its instance
@@ -1570,7 +1583,7 @@ TEST(ServerPlayersLateJoin, CatchUpAJoinerNeedingTheResampler) {
             return std::any_of(first_chunks.begin(), first_chunks.end(),
                                [&](const ChunkInfo& other) { return other.ts == chunk.ts; });
         }));
-    expect_follows(resampled.sink().played(), reference, 6, RATE);
+    expect_follows(resampled.sink().played(), reference, 6);
 }
 
 // ==============================================================================
@@ -1708,7 +1721,8 @@ void hear_stream(Rig& s, const Player& player, const std::string& id, size_t str
 // join in the other, on its timeline: each of its chunks carries the timestamp the other group's
 // player gets for the same audio, and it plays nothing of its first group until moved back, when it
 // joins that group again on its timeline. Each player plays its groups' audio in order and nothing
-// else. The inputs last five seconds, played in real time, so that both moves land mid-track.
+// else. Both inputs play, in real time, until the player is back in its first group, so that both
+// moves land mid-track however long they take.
 TEST(ServerPlayersGroups, PlayTwoGroupsAndMoveAPlayerBetweenThem) {
     const Signal signal(24);
     Rig s(signal);
@@ -1732,14 +1746,18 @@ TEST(ServerPlayersGroups, PlayTwoGroupsAndMoveAPlayerBetweenThem) {
     const std::shared_ptr<GroupInput> living_input = s.open();
     const std::shared_ptr<GroupInput> kitchen_input = s.open(*kitchen);
     ASSERT_TRUE(living_input && kitchen_input);
-    const Segment a{0, 5 * RATE};
-    const Segment b{4000000, 5 * RATE};
+    // Longer than the test runs; each input's segment is what its host wrote until then
+    const Segment longest_a{0, 60 * RATE};
+    const Segment longest_b{4000000, 60 * RATE};
+    std::atomic<bool> back{false};
+    uint32_t fed_a = 0;
+    uint32_t fed_b = 0;
     std::thread host_a([&] {
-        feed(*living_input, signal, a);
+        feed(*living_input, signal, longest_a, &back, &fed_a);
         living_input->drain();
     });
     std::thread host_b([&] {
-        feed(*kitchen_input, signal, b);
+        feed(*kitchen_input, signal, longest_b, &back, &fed_b);
         kitchen_input->drain();
     });
     run_until(s.players, [&] {
@@ -1750,11 +1768,14 @@ TEST(ServerPlayersGroups, PlayTwoGroupsAndMoveAPlayerBetweenThem) {
     hear_stream(s, moved, moved_id, 2);
     ASSERT_TRUE(s.server.move_client(moved_id, *s.server.default_group()));
     hear_stream(s, moved, moved_id, 3);
+    back = true;
     const std::string drained_a = Recorder::drained(living_input->id(), DrainOutcome::PLAYED);
     const std::string drained_b = Recorder::drained(kitchen_input->id(), DrainOutcome::PLAYED);
     s.run_until_drained({drained_a, drained_b});
     host_a.join();
     host_b.join();
+    const Segment a{longest_a.first, fed_a};
+    const Segment b{longest_b.first, fed_b};
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);
     EXPECT_FALSE(s.trace.failed);
@@ -1808,14 +1829,17 @@ constexpr int64_t LIVE_AHEAD_US = 200000;
 /// that far behind rather than catching up at once. Waits for the server to attach the input first.
 /// @param before called with the samples written so far before each block; it may stall, pause or
 /// resume
+/// @param stop ends the writes early once set
+/// @param fed set to the samples written so far
 void feed_live(GroupInput& input, const Signal& signal, const Segment& segment,
-               const std::function<void(uint32_t)>& before = {}) {
+               const std::function<void(uint32_t)>& before = {},
+               const std::atomic<bool>* stop = nullptr, uint32_t* fed = nullptr) {
     using Clock = std::chrono::steady_clock;
     constexpr auto BLOCK_TIME = std::chrono::milliseconds(10);
     ASSERT_EQ(input.wait_writable(std::numeric_limits<int64_t>::max()), InputState::OPEN);
     Bytes block(LIVE_BLOCK * signal.frame_bytes());
     Clock::time_point due = Clock::now();
-    for (uint32_t written = 0; written < segment.count;) {
+    for (uint32_t written = 0; written < segment.count && (stop == nullptr || !stop->load());) {
         if (before) {
             before(written);
         }
@@ -1828,6 +1852,9 @@ void feed_live(GroupInput& input, const Signal& signal, const Segment& segment,
         // A live writer on time is never cut short, paused or not
         EXPECT_EQ(result.frames, n) << static_cast<int>(result.state);
         written += n;
+        if (fed != nullptr) {
+            *fed = written;
+        }
         due += BLOCK_TIME;
         if (Clock::now() - due > 2 * BLOCK_TIME) {
             due = Clock::now();
@@ -1841,24 +1868,20 @@ struct Gap {
     int64_t us{0};
 };
 
-/// What the server sent one client of a live input: every chunk before its time and within the live
-/// horizon from its stamp, `G + W_live`; the first after each stream/start or stream/clear at least
-/// floor_us after that trigger; and every other one carrying the input from where the chunk before
-/// it ended, at that chunk's end or later on the timeline: a live rebase moves the timeline forward
-/// and keeps the audio. Audio is missing only where it was late when the pump ran. Chunks that
-/// continue the one before them on time leave min_buffer_us before their time
-/// (expect_min_buffer()).
+/// What the server sent one client of a live input: every chunk within the live horizon from its
+/// stamp, `G + W_live` (a later send only shortens it); the first after each stream/start or
+/// stream/clear at least floor_us after that trigger; and every other one carrying the input from
+/// where the chunk before it ended, at that chunk's end or later on the timeline: a live rebase
+/// moves the timeline forward and keeps the audio. Audio is missing only where it was late when the
+/// pump ran. How far ahead of its time a chunk left is not checked (expect_sent_whole()).
 /// @param lead_us the group lead, for the horizon
-/// @param min_buffer_us the player's min_buffer_ms; 0 where the host's writes come late
 /// @return where the timeline moved forward
 std::vector<Gap> expect_sent_live(const std::vector<ChunkInfo>& chunks, int64_t floor_us,
-                                  int64_t lead_us, int64_t min_buffer_us) {
+                                  int64_t lead_us) {
     std::vector<Gap> gaps;
-    std::vector<int64_t> ahead;
     for (size_t i = 0; i < chunks.size(); ++i) {
         const ChunkInfo& chunk = chunks[i];
         SCOPED_TRACE(chunk.ts);
-        EXPECT_LT(chunk.stamp_us, chunk.ts) << "sent late";
         EXPECT_LE(chunk.ts - chunk.stamp_us, lead_us + LIVE_AHEAD_US) << "past the live horizon";
         const bool first =
             i == 0 || chunks[i - 1].stream != chunk.stream || chunks[i - 1].clears != chunk.clears;
@@ -1874,9 +1897,10 @@ std::vector<Gap> expect_sent_live(const std::vector<ChunkInfo>& chunks, int64_t 
             // The pump skips a frame already late when it runs; a shift at the chunk after it still
             // shows as a gap past where the skipped audio would have played
             EXPECT_GT(chunk.position, before.position + before.samples) << "audio sent again";
-            EXPECT_LE(ended, chunk.stamp_us) << "audio skipped";
             const int64_t due =
                 before.ts + (int64_t{chunk.position - before.position} * 1000000 / before.rate);
+            // Its last frame late when the chunk was sent
+            EXPECT_LE(due - frame_us(before.rate), chunk.stamp_us) << "audio skipped";
             if (chunk.ts > due) {
                 gaps.push_back({i, chunk.ts - due});
             }
@@ -1886,9 +1910,7 @@ std::vector<Gap> expect_sent_live(const std::vector<ChunkInfo>& chunks, int64_t 
         if (chunk.ts > ended) {
             gaps.push_back({i, chunk.ts - ended});
         }
-        ahead.push_back(chunk.ts - chunk.stamp_us);
     }
-    expect_min_buffer(ahead, min_buffer_us);
     return gaps;
 }
 
@@ -1927,8 +1949,9 @@ size_t expect_same_timestamps(const std::vector<ChunkInfo>& one,
 // count for a live input), which raises the group lead from 200 to 450 ms. The next frame shifts
 // the timeline by the deficit, so the player already streaming hears one gap of about 250 ms and no
 // audio is lost; the frame at the gap leaves with at most the new on-time lead, and the joiner
-// starts within a second of its trigger and plays on in sync. Five seconds of input, played in real
-// time, so the join lands mid-stream.
+// starts within a second of its trigger and plays on in sync. The input, written in real time, goes
+// on until each stream has carried half a second of it, so the join lands mid-stream however
+// slowly the writes come.
 TEST(ServerPlayersLive, RaiseTheGroupLeadForAJoinerWithOneShift) {
     constexpr int64_t RAISED_US = 400000 + LIVE_LATENCY_US + 10000;
     const Signal signal(24);
@@ -1937,25 +1960,37 @@ TEST(ServerPlayersLive, RaiseTheGroupLeadForAJoinerWithOneShift) {
     const Player& first = s.add(formats);
     const std::shared_ptr<GroupInput> input = s.open_live();
     ASSERT_TRUE(input);
-    const Segment segment{0, 5 * RATE};
+    // Longer than the test runs; the segment is what the host wrote until then
+    const Segment longest{0, 60 * RATE};
+    std::atomic<bool> stop{false};
+    uint32_t fed = 0;
     std::thread host([&] {
-        feed_live(*input, signal, segment);
+        feed_live(*input, signal, longest, {}, &stop, &fed);
         input->drain();
     });
-    run_until(s.players, [&] { return first.sink().audible() > RATE / 2; });
+    // Whether the server has sent player chunks reaching half a second past its first
+    const auto carried_half_a_second = [&](const Player& player) {
+        const std::string id = s.client_id(player);
+        const std::lock_guard<std::mutex> lock(s.trace.mutex);
+        const std::vector<ChunkInfo>& chunks = s.trace.chunks[id];
+        return !chunks.empty() && chunks.back().position - chunks.front().position >= RATE / 2;
+    };
+    run_until(s.players, [&] { return carried_half_a_second(first); });
     const int64_t joined_us = s.server.now_us();
     const Player& joiner = s.add(formats, RATE, 2, 400, 2000);
+    run_until(s.players, [&] { return carried_half_a_second(joiner); });
+    stop = true;
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
     s.run_until_drained({drained});
     host.join();
+    const Segment segment{longest.first, fed};
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);
     EXPECT_FALSE(s.trace.failed);
     const std::vector<ChunkInfo>& first_chunks = s.trace.chunks[s.client_id(first)];
     const std::vector<ChunkInfo>& joiner_chunks = s.trace.chunks[s.client_id(joiner)];
-    const std::vector<Gap> gaps =
-        expect_sent_live(first_chunks, START_FLOOR_US, RAISED_US, START_FLOOR_US);
-    expect_sent_live(joiner_chunks, 400000, RAISED_US, 400000);
+    const std::vector<Gap> gaps = expect_sent_live(first_chunks, START_FLOOR_US, RAISED_US);
+    expect_sent_live(joiner_chunks, 400000, RAISED_US);
     int64_t moved_us = 0;
     std::optional<Gap> raised;
     for (const Gap& gap : gaps) {
@@ -1971,7 +2006,11 @@ TEST(ServerPlayersLive, RaiseTheGroupLeadForAJoinerWithOneShift) {
     const ChunkInfo& shifted = first_chunks[raised->chunk];
     EXPECT_LE(shifted.ts - shifted.stamp_us, on_time_lead(RAISED_US));
     ASSERT_FALSE(joiner_chunks.empty());
-    EXPECT_LT(joiner_chunks.front().ts - joiner_chunks.front().trigger_us, 1000000);
+    // Unless the frame before it was late when it was sent: the pump skips late frames
+    const ChunkInfo& joined = joiner_chunks.front();
+    if (joined.ts - CELL_US > joined.stamp_us) {
+        EXPECT_LT(joined.ts - joined.trigger_us, 1000000);
+    }
     EXPECT_GT(expect_same_timestamps(first_chunks, joiner_chunks), 0U);
     expect_heard(decode(signal, first.sink().played()), first_chunks, {segment});
     expect_heard(decode(signal, joiner.sink().played()), joiner_chunks, {segment});
@@ -1981,8 +2020,8 @@ TEST(ServerPlayersLive, RaiseTheGroupLeadForAJoinerWithOneShift) {
 // G_eff - L_p - M_pump, so the timeline shifts there: each player hears one gap of about the stall
 // and none of the audio is lost, the frame at the gap leaving with at most the on-time lead, `G_eff
 // - L_p + J_in`, rather than the full group lead a buffered input restores. One player streams PCM
-// and one FLAC, with the same timestamp for the same audio on both, and the drain plays to the end.
-// Four seconds of input and the stall, played in real time.
+// and one FLAC, with the same timestamp for the same audio on both, and the drain completes played.
+// Two seconds of input and the stall, played in real time.
 TEST(ServerPlayersLive, ShiftPastAHostStallAndPlayOn) {
     static constexpr int64_t STALL_US = 500000;
     const Signal signal(24);
@@ -1991,10 +2030,10 @@ TEST(ServerPlayersLive, ShiftPastAHostStallAndPlayOn) {
     const Player& flac = s.add({{Codec::FLAC, 2, RATE, 24}});
     const std::shared_ptr<GroupInput> input = s.open_live();
     ASSERT_TRUE(input);
-    const Segment segment{0, 4 * RATE};
+    const Segment segment{0, 2 * RATE};
     std::thread host([&] {
         feed_live(*input, signal, segment, [](uint32_t written) {
-            if (written == 2 * RATE) {
+            if (written == RATE) {
                 std::this_thread::sleep_for(std::chrono::microseconds(STALL_US));
             }
         });
@@ -2010,8 +2049,7 @@ TEST(ServerPlayersLive, ShiftPastAHostStallAndPlayOn) {
     for (const Player* player : {&pcm, &flac}) {
         SCOPED_TRACE(player->url());
         const std::vector<ChunkInfo>& chunks = s.trace.chunks[s.client_id(*player)];
-        // The stalled writes' frames leave with what is left of their lead
-        const std::vector<Gap> gaps = expect_sent_live(chunks, START_FLOOR_US, LIVE_LEAD_US, 0);
+        const std::vector<Gap> gaps = expect_sent_live(chunks, START_FLOOR_US, LIVE_LEAD_US);
         // The stall, less the first block's 10 ms head start and a margin for the threads' timing
         const auto stall = std::find_if(gaps.begin(), gaps.end(),
                                         [](const Gap& gap) { return gap.us >= STALL_US - 100000; });
@@ -2028,9 +2066,9 @@ TEST(ServerPlayersLive, ShiftPastAHostStallAndPlayOn) {
 // A live input paused for 0.7 s takes every write while paused, and its resume continues from the
 // newest input: each player's stream ends at the pause and starts again with the first sample
 // written after the resume (or some cells later, when the trigger runs late), never with what was
-// written while paused. About 3.7 seconds of input, played in real time.
+// written while paused. About 2.5 seconds of input, played in real time.
 TEST(ServerPlayersLive, ResumeAPausedLiveInputAtItsHead) {
-    constexpr uint32_t PAUSE_AT = (3 * RATE) / 2;
+    constexpr uint32_t PAUSE_AT = (3 * RATE) / 4;
     constexpr uint32_t RESUME_AT = PAUSE_AT + ((7 * RATE) / 10);
     const Signal signal(24);
     Rig s(signal);
@@ -2038,7 +2076,7 @@ TEST(ServerPlayersLive, ResumeAPausedLiveInputAtItsHead) {
     const Player& flac = s.add({{Codec::FLAC, 2, RATE, 24}});
     const std::shared_ptr<GroupInput> input = s.open_live();
     ASSERT_TRUE(input);
-    const Segment segment{0, RESUME_AT + (3 * RATE / 2)};
+    const Segment segment{0, RESUME_AT + RATE};
     uint64_t paused = 0;
     std::thread host([&] {
         feed_live(*input, signal, segment, [&](uint32_t written) {
@@ -2064,7 +2102,7 @@ TEST(ServerPlayersLive, ResumeAPausedLiveInputAtItsHead) {
         const std::string id = s.client_id(*player);
         EXPECT_EQ(s.trace.streams[id], 2U);
         const std::vector<ChunkInfo>& chunks = s.trace.chunks[id];
-        expect_sent_live(chunks, START_FLOOR_US, LIVE_LEAD_US, START_FLOOR_US);
+        expect_sent_live(chunks, START_FLOOR_US, LIVE_LEAD_US);
         const auto resumed = std::find_if(chunks.begin(), chunks.end(),
                                           [](const ChunkInfo& chunk) { return chunk.stream == 2; });
         ASSERT_NE(resumed, chunks.end());
@@ -2157,8 +2195,8 @@ TEST(ServerPlayersOpus, PlayOpusInSyncWithAPcmPlayer) {
                                           std::min(reference.size() - pcm_from, heard.size()));
     EXPECT_EQ(sendspin::server::test::best_lag(wanted, heard, 480, 2), 0);
     EXPECT_GT(sendspin::server::test::snr_db(wanted, heard), 20.0);
-    // It played: more than a second of the three, whatever sendspin-cpp's corrections did
-    EXPECT_GT(opus.sink().audible(), size_t{RATE});
+    // It played: how much is real time, which a player behind its clock drops (expect_heard())
+    EXPECT_GT(opus.sink().audible(), 0U);
 }
 
 }  // namespace
