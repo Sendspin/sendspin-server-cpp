@@ -1,0 +1,26 @@
+menu "sendspin-server"
+
+    # The ESP-IDF transport's needs (src/esp/)
+    config SENDSPIN_SERVER_TRANSPORT
+        bool
+        default y
+        # Accepted connections: WebSocket upgrades on esp_http_server
+        select HTTPD_WS_SUPPORT
+        # On ESP-IDF >= 5.5.5 / 6.0.1, httpd reports a completed upgrade only through this callback;
+        # on earlier versions the symbol does not exist, the select is ignored, and the upgrade's
+        # GET reaches the URI handler instead
+        select HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
+        # esp_websocket_client's own option: sends take a lock of their own, not the one its task
+        # holds while the receive handler waits for a free inbound slot
+        select ESP_WS_CLIENT_SEPARATE_TX_LOCK
+
+    config SENDSPIN_SERVER_MEMORY_STATS
+        bool "Log memory statistics"
+        default n
+        help
+            Logs the internal RAM and PSRAM free and every task's stack high-water mark at the
+            server's start (on the task calling start()), and on the core task as each connection
+            is ready and closes and as a group starts playing. The stacks need
+            FREERTOS_USE_TRACE_FACILITY.
+
+endmenu

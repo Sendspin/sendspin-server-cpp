@@ -1,0 +1,270 @@
+---
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    name: Pre-commit checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - uses: esphome/pre-commit-action@43cd1109c09c544d97196f7730ee5b2e0cc6d81e # v3.0.1 fork with pinned actions/cache
+
+  lint:
+    name: Static analysis
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy libssl-dev pkg-config libavahi-client-dev
+
+      - name: Run clang-tidy
+        run: ./script/clang-tidy.sh
+
+  # Every host job compiles through ccache. It restores its newest cache, but only pushes to main
+  # save one, so PR runs reuse main's objects without filling the repository's cache quota.
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86-64
+            os: ubuntu-24.04
+            install: sudo apt-get update && sudo apt-get install -y ccache libssl-dev pkg-config libavahi-client-dev
+          - name: macOS arm64
+            os: macos-15
+            install: brew install ccache openssl@3
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 300M
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies
+        run: ${{ matrix.install }}
+
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-build-${{ matrix.os }}-${{ github.sha }}
+          restore-keys: ccache-build-${{ matrix.os }}-
+
+      - name: Configure CMake
+        # The library and the server_cli example, without sanitizers
+        run: cmake -B build -DSENDSPIN_SERVER_ENABLE_WERROR=ON .
+
+      - name: Build
+        run: |
+          ccache --zero-stats
+          cmake --build build --parallel
+          ccache --show-stats
+
+      - name: Save ccache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-build-${{ matrix.os }}-${{ github.sha }}
+
+  test-linux:
+    name: Unit tests (Linux x86-64, ASan)
+    runs-on: ubuntu-24.04
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 300M
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache libssl-dev pkg-config libavahi-client-dev
+
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-test-linux-${{ github.sha }}
+          restore-keys: ccache-test-linux-
+
+      - name: Configure CMake
+        run: cmake -B build-asan -DSENDSPIN_SERVER_ENABLE_WERROR=ON -DSENDSPIN_SERVER_BUILD_TESTS=ON -DSENDSPIN_SERVER_ENABLE_SANITIZERS=ON .
+
+      - name: Build
+        run: |
+          ccache --zero-stats
+          cmake --build build-asan --parallel
+          ccache --show-stats
+
+      - name: Save ccache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-test-linux-${{ github.sha }}
+
+      - name: Run tests
+        run: ctest --test-dir build-asan --output-on-failure
+
+  # The host suite under the embedded profile (src/profile.h), the limits the ESP-IDF build uses
+  test-embedded:
+    name: Unit tests (Linux x86-64, ASan, embedded profile)
+    runs-on: ubuntu-24.04
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 300M
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache libssl-dev pkg-config libavahi-client-dev
+
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-test-embedded-${{ github.sha }}
+          restore-keys: ccache-test-embedded-
+
+      - name: Configure CMake
+        run: cmake -B build-embedded -DSENDSPIN_SERVER_ENABLE_WERROR=ON -DSENDSPIN_SERVER_BUILD_TESTS=ON -DSENDSPIN_SERVER_ENABLE_SANITIZERS=ON -DSENDSPIN_SERVER_EMBEDDED_PROFILE=ON .
+
+      - name: Build
+        run: |
+          ccache --zero-stats
+          cmake --build build-embedded --parallel
+          ccache --show-stats
+
+      - name: Save ccache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-test-embedded-${{ github.sha }}
+
+      - name: Run tests
+        run: ctest --test-dir build-embedded --output-on-failure
+
+  test-tsan:
+    name: Unit tests (Linux x86-64, TSan)
+    runs-on: ubuntu-24.04
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 300M
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache libssl-dev pkg-config libavahi-client-dev
+
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-test-tsan-${{ github.sha }}
+          restore-keys: ccache-test-tsan-
+
+      - name: Configure CMake
+        run: cmake -B build-tsan -DSENDSPIN_SERVER_ENABLE_WERROR=ON -DSENDSPIN_SERVER_BUILD_TESTS=ON -DSENDSPIN_SERVER_ENABLE_TSAN=ON .
+
+      - name: Build
+        run: |
+          ccache --zero-stats
+          cmake --build build-tsan --parallel
+          ccache --show-stats
+
+      - name: Save ccache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-test-tsan-${{ github.sha }}
+
+      - name: Reduce mmap randomization
+        # ThreadSanitizer aborts at startup with "unexpected memory mapping" under the 32-bit mmap
+        # randomization the runner kernel defaults to
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Run tests
+        # A report fails the test that made it
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build-tsan --output-on-failure
+
+  test-macos:
+    name: Unit tests (macOS arm64, ASan)
+    runs-on: macos-15
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 300M
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies
+        run: brew install ccache openssl@3
+
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-test-macos-${{ github.sha }}
+          restore-keys: ccache-test-macos-
+
+      - name: Configure CMake
+        run: cmake -B build-asan -DSENDSPIN_SERVER_ENABLE_WERROR=ON -DSENDSPIN_SERVER_BUILD_TESTS=ON -DSENDSPIN_SERVER_ENABLE_SANITIZERS=ON .
+
+      - name: Build
+        run: |
+          ccache --zero-stats
+          cmake --build build-asan --parallel
+          ccache --show-stats
+
+      - name: Save ccache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-test-macos-${{ github.sha }}
+
+      - name: Run tests
+        run: ctest --test-dir build-asan --output-on-failure
+
+  ci:
+    name: CI
+    needs: [pre-commit, lint, build, test-linux, test-embedded, test-tsan, test-macos]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Verify all jobs passed
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "One or more jobs failed or were cancelled"
+            exit 1
+          fi

@@ -1,0 +1,568 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025-2026 Kevin Ahrendt
+
+// ESP32-S3 SIMD implementation with four-accumulator optimization (32 samples per loop)
+// Supports any length that is a multiple of 8
+
+#if defined(__XTENSA__) && (defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ESP32S3))
+
+    // Saturate a folded max-tap sum once, matching apply_max_taps(): \acc holds the wrapped
+    // \base + tap_sum, and the tap sum itself cannot wrap (FilterDesign caps the tap count; see
+    // dotprod_maxtap.h), so the add overflowed iff \base and the tap sum share a sign that
+    // \acc does not. Clobbers \t0-\t2
+    .macro MAXTAP_SATURATE acc, base, t0, t1, t2
+    sub     \t0, \acc, \base       // tap sum
+    xor     \t1, \base, \acc
+    xor     \t0, \t0, \acc
+    and     \t1, \t1, \t0          // negative iff the add overflowed
+    srai    \t0, \base, 31          // 0 or -1 by the sign of base
+    movi.n  \t2, -1
+    srli    \t2, \t2, 1             // INT32_MAX
+    xor     \t2, \t2, \t0          // INT32_MAX or INT32_MIN
+    movltz  \acc, \t2, \t1
+    .endm
+
+    .text
+    .align 4
+
+    // Function: xtensa_dotprod_s16_q15_shift_simd_ch2
+    // Computes dot product for 2-channel (stereo) audio with block shifts using SIMD,
+    // then folds in the pre-extracted max-tap MACs while both accumulators are live
+    // Parameters:
+    //   a2: delay_line (int16_t*) - any alignment supported
+    //   a3: coeffs (q15_t*) - must be 16-byte aligned
+    //   a4: length (bits 0-15, must be multiple of 8) | max tap count (bits 16-19)
+    //   a5: shifts (uint8_t*) - shifts for each block of 8
+    //   a6: output (int32_t*) - pointer to two int32 outputs (one for each channel)
+    //   a7: max_tap_entries - 8-byte {int32 coeff, uint16 index_reversed, pad} records,
+    //       ignored when the packed tap count is 0
+
+    .global xtensa_dotprod_s16_q15_shift_simd_ch2
+    .type   xtensa_dotprod_s16_q15_shift_simd_ch2, @function
+xtensa_dotprod_s16_q15_shift_simd_ch2:
+    entry   sp, 32
+
+    // Initialize channel accumulator
+    movi.n  a12, 0              // Accumulator for first channel
+    movi.n  a13, 0              // Accumulator for second channel
+
+    // Unpack args; keep the sample base for max-tap indexing (a2 advances)
+    mov.n   a14, a2             // a14 = delay_line base
+    extui   a15, a4, 16, 4      // a15 = max tap count (0-6)
+    extui   a4, a4, 0, 16       // a4 = filter length
+
+    // Calculate loop count for 16-sample batches
+    srli        a8, a4, 4       // a8 = length / 16
+
+    // Preload first samples from potentially misaligned delay_line
+    ee.ld.128.usar.ip  q0, a2, 16
+    ee.vld.128.ip      q1, a2, 16
+    ee.src.q.ld.ip     q2, a2, 16, q0, q1
+    ee.src.q.ld.ip     q3, a2, 16, q1, q2
+    // After this, q0 and q1 are aligned with interleaved samples!
+    // Now I can combine q2 and q3 in a similar way and have q2 store the aligned data
+
+    l8ui                a9, a5, 0       // Load shift for batch 1
+    ee.vld.128.ip       q4, a3, 16      // Preload first 8 coefficients
+    ee.vunzip.16  q0, q1    // Deinterleave first set of samples
+    ee.zero.accx            // Clear vector accumulator
+
+    // Calculate remainder: (length % 16) / 8 = 0 or 1 extra batch
+    // (length in a4 is dead after this)
+    extui   a4, a4, 3, 1            // a4 = 0 or 1 remainder batch
+
+    // Skip main loop if fewer than 16 samples
+    beqz    a8, .L_ch2_remainder
+
+    // Main loop (16 samples per iteration)
+    loopnez a8, .L_simd_loop_end
+.L_simd_loop:
+    // Batch 1
+    ee.vmulas.s16.accx.ld.ip.qup   q0, a2, 16, q0, q4, q2, q3
+    // Now q2 has the aligned next 8 samples!
+    l8ui a10, a5, 1          // Load shift for next batch
+    ee.srs.accx a11, a9, 0
+    ee.vld.128.ip     q5, a3, 16    // Load taps for next batch
+    ee.zero.accx
+    add a12, a12, a11   // Add to first channel accumulator
+
+
+    ee.vmulas.s16.accx.ld.ip.qup   q1, a2, 16, q1, q4, q3, q0
+    // Now q2 and q3 are aligned with 16 samples
+    addi.n a5, a5, 2        // Increment shift pointer
+    ee.srs.accx a11, a9, 0
+    ee.vunzip.16  q2, q3    // Deinterleave the next set of samples
+    ee.zero.accx
+    add a13, a13, a11   // Add to second channel accumulator
+
+
+    // Batch 2
+    ee.vmulas.s16.accx.ld.ip.qup   q2, a2, 16, q2, q5, q0, q1
+    // Now q0 has the aligned next 8 samples!
+    l8ui a9, a5, 0          // Load shift for next batch
+    ee.srs.accx a11, a10, 0
+    ee.vld.128.ip  q4, a3, 16    // Load taps for next batch
+    ee.zero.accx
+    add a12, a12, a11   // Add to first channel accumulator
+
+
+    ee.vmulas.s16.accx.ld.ip.qup   q3, a2, 16, q3, q5, q1, q2
+    // Now q0 and q1 are aligned with 16 samples
+    ee.srs.accx a11, a10, 0
+    ee.vunzip.16  q0, q1    // Deinterleave the next set of samples
+    ee.zero.accx
+    add a13, a13, a11   // Add to second channel accumulator
+
+
+.L_simd_loop_end:
+
+.L_ch2_remainder:
+    // Check if there's a remainder batch (8 samples)
+    beqz    a4, .L_done
+
+    // Process remaining 8 interleaved samples (one batch for each channel)
+    // State at this point:
+    //   q0, q1: deinterleaved samples ready for processing
+    //   q4: coefficients already loaded
+    //   a9: shift value already loaded
+
+    // Channel 0: q0 × q4
+    ee.vmulas.s16.accx   q0, q4
+    ee.srs.accx a11, a9, 0
+    ee.zero.accx
+    add a12, a12, a11   // Add to first channel accumulator
+
+    // Channel 1: q1 × q4
+    ee.vmulas.s16.accx   q1, q4
+    ee.srs.accx a11, a9, 0
+    add a13, a13, a11   // Add to second channel accumulator
+
+.L_done:
+    // Fold in the pre-extracted max taps for both channels:
+    // acc_ch += (coeff * (sample_ch << 16)) >> 32 per entry, then saturate
+    // once, matching apply_max_taps() exactly (sample low bits are zero, so
+    // the single mulsh per channel is bit-exact)
+    beqz    a15, .L_ch2_store
+    mov.n   a8, a12             // a8/a5 = dot products before the max taps
+    mov.n   a5, a13
+    loopnez a15, .L_ch2_maxtap_end
+.L_ch2_maxtap:
+    l16ui   a9, a7, 4           // index_reversed
+    l32i    a10, a7, 0          // Q31 coefficient
+    addx4   a9, a9, a14         // &delay_line[2 * index] (4 bytes per frame)
+    addi.n  a7, a7, 8
+    l16si   a11, a9, 0          // left sample
+    l16si   a9, a9, 2           // right sample
+    slli    a11, a11, 16        // promote to Q31
+    slli    a9, a9, 16
+    mulsh   a11, a10, a11
+    mulsh   a9, a10, a9
+    add.n   a12, a12, a11
+    add.n   a13, a13, a9
+.L_ch2_maxtap_end:
+    MAXTAP_SATURATE a12, a8, a9, a10, a11
+    MAXTAP_SATURATE a13, a5, a9, a10, a11
+
+.L_ch2_store:
+    s32i a12, a6, 0
+    s32i a13, a6, 4
+
+    retw.n
+
+    .size   xtensa_dotprod_s16_q15_shift_simd_ch2, . - xtensa_dotprod_s16_q15_shift_simd_ch2
+
+    // Function: xtensa_dotprod_s16_q15_shift_simd_ch2_batch
+    // Runs the ch2 shift kernel body for up to 4 consecutive outputs in one
+    // call, amortizing the call and dispatch overhead across the batch
+    // Parameters:
+    //   a2: sample_ptrs (const int16_t* const*) - one delay-line pointer per output
+    //   a3: coeffs (q15_t*) - first row, must be 16-byte aligned
+    //   a4: length (bits 0-15, must be multiple of 8) | max tap count (bits 16-19) |
+    //       output count (bits 20-22, 1-4) | fixed-row flag (bit 23)
+    //   a5: shifts (uint8_t*) - shifts for the first row
+    //   a6: output (int32_t*) - two int32 outputs (one per channel) per batch entry
+    //   a7: max_tap_entries - 8-byte records for the first row, ignored when
+    //       the packed tap count is 0
+    //
+    // With the fixed-row flag clear the coefficient, shift, and max-tap rows
+    // advance one bank row per output (the aligned fixed-mode visit order is
+    // sequential); with it set every output reuses the first row
+    // (single-phase banks)
+
+    .align  4
+    .global xtensa_dotprod_s16_q15_shift_simd_ch2_batch
+    .type   xtensa_dotprod_s16_q15_shift_simd_ch2_batch, @function
+xtensa_dotprod_s16_q15_shift_simd_ch2_batch:
+    entry   sp, 48
+
+    // Outer-loop state, spilled to locals (sp+0..31; sp+32..47 is the base
+    // save area): the kernel body clobbers every register except a6/a7
+    extui   a8, a4, 20, 3
+    s32i    a4, sp, 0           // Packed length/taps/flags word
+    s32i    a2, sp, 4           // sample_ptrs cursor
+    s32i    a3, sp, 8           // Coefficient row
+    s32i    a5, sp, 12          // Shift row
+    s32i    a7, sp, 16          // Max-tap row (fixed-row rewind)
+    s32i    a8, sp, 20          // Outputs remaining
+
+.L_ch2b_output:
+    l32i    a2, sp, 4
+    l32i    a3, sp, 8
+    l32i    a5, sp, 12
+    l32i    a2, a2, 0           // a2 = delay_line for this output
+
+    // ---- Kernel body (mirrors xtensa_dotprod_s16_q15_shift_simd_ch2) ----
+    movi.n  a12, 0              // Accumulator for first channel
+    movi.n  a13, 0              // Accumulator for second channel
+
+    mov.n   a14, a2             // a14 = delay_line base
+    extui   a15, a4, 16, 4      // a15 = max tap count (0-6)
+    extui   a4, a4, 0, 16       // a4 = filter length
+
+    srli        a8, a4, 4       // a8 = length / 16
+
+    ee.ld.128.usar.ip  q0, a2, 16
+    ee.vld.128.ip      q1, a2, 16
+    ee.src.q.ld.ip     q2, a2, 16, q0, q1
+    ee.src.q.ld.ip     q3, a2, 16, q1, q2
+
+    l8ui                a9, a5, 0       // Load shift for batch 1
+    ee.vld.128.ip       q4, a3, 16      // Preload first 8 coefficients
+    ee.vunzip.16  q0, q1    // Deinterleave first set of samples
+    ee.zero.accx            // Clear vector accumulator
+
+    extui   a4, a4, 3, 1            // a4 = 0 or 1 remainder batch
+
+    beqz    a8, .L_ch2b_remainder
+
+    loopnez a8, .L_ch2b_loop_end
+.L_ch2b_loop:
+    ee.vmulas.s16.accx.ld.ip.qup   q0, a2, 16, q0, q4, q2, q3
+    l8ui a10, a5, 1          // Load shift for next batch
+    ee.srs.accx a11, a9, 0
+    ee.vld.128.ip     q5, a3, 16    // Load taps for next batch
+    ee.zero.accx
+    add a12, a12, a11   // Add to first channel accumulator
+
+    ee.vmulas.s16.accx.ld.ip.qup   q1, a2, 16, q1, q4, q3, q0
+    addi.n a5, a5, 2        // Increment shift pointer
+    ee.srs.accx a11, a9, 0
+    ee.vunzip.16  q2, q3    // Deinterleave the next set of samples
+    ee.zero.accx
+    add a13, a13, a11   // Add to second channel accumulator
+
+    ee.vmulas.s16.accx.ld.ip.qup   q2, a2, 16, q2, q5, q0, q1
+    l8ui a9, a5, 0          // Load shift for next batch
+    ee.srs.accx a11, a10, 0
+    ee.vld.128.ip  q4, a3, 16    // Load taps for next batch
+    ee.zero.accx
+    add a12, a12, a11   // Add to first channel accumulator
+
+    ee.vmulas.s16.accx.ld.ip.qup   q3, a2, 16, q3, q5, q1, q2
+    ee.srs.accx a11, a10, 0
+    ee.vunzip.16  q0, q1    // Deinterleave the next set of samples
+    ee.zero.accx
+    add a13, a13, a11   // Add to second channel accumulator
+
+.L_ch2b_loop_end:
+
+.L_ch2b_remainder:
+    beqz    a4, .L_ch2b_maxtap_check
+
+    // Channel 0: q0 × q4
+    ee.vmulas.s16.accx   q0, q4
+    ee.srs.accx a11, a9, 0
+    ee.zero.accx
+    add a12, a12, a11   // Add to first channel accumulator
+
+    // Channel 1: q1 × q4
+    ee.vmulas.s16.accx   q1, q4
+    ee.srs.accx a11, a9, 0
+    add a13, a13, a11   // Add to second channel accumulator
+
+.L_ch2b_maxtap_check:
+    beqz    a15, .L_ch2b_store
+    mov.n   a8, a12             // a8/a3 = dot products before the max taps
+    mov.n   a3, a13
+    loopnez a15, .L_ch2b_maxtap_end
+.L_ch2b_maxtap:
+    l16ui   a9, a7, 4           // index_reversed
+    l32i    a10, a7, 0          // Q31 coefficient
+    addx4   a9, a9, a14         // &delay_line[2 * index] (4 bytes per frame)
+    addi.n  a7, a7, 8
+    l16si   a11, a9, 0          // left sample
+    l16si   a9, a9, 2           // right sample
+    slli    a11, a11, 16        // promote to Q31
+    slli    a9, a9, 16
+    mulsh   a11, a10, a11
+    mulsh   a9, a10, a9
+    add.n   a12, a12, a11
+    add.n   a13, a13, a9
+.L_ch2b_maxtap_end:
+    MAXTAP_SATURATE a12, a8, a9, a10, a11
+    MAXTAP_SATURATE a13, a3, a9, a10, a11
+
+.L_ch2b_store:
+    s32i    a12, a6, 0
+    s32i    a13, a6, 4
+    // ---- End kernel body ----
+
+    // Advance to the next output
+    addi.n  a6, a6, 8
+    l32i    a8, sp, 20
+    l32i    a4, sp, 0
+    addi.n  a8, a8, -1
+    s32i    a8, sp, 20
+    beqz    a8, .L_ch2b_done
+
+    l32i    a9, sp, 4
+    addi.n  a9, a9, 4
+    s32i    a9, sp, 4
+
+    bbsi    a4, 23, .L_ch2b_fixed_row
+
+    // Sequential rows: coeffs += 2*length, shifts += length/8; the max-tap
+    // loop above already advanced a7 by 8*count (== the entry row stride)
+    extui   a9, a4, 0, 16
+    l32i    a10, sp, 8
+    l32i    a11, sp, 12
+    addx2   a10, a9, a10
+    srli    a9, a9, 3
+    add.n   a11, a11, a9
+    s32i    a10, sp, 8
+    s32i    a11, sp, 12
+    j       .L_ch2b_output
+
+.L_ch2b_fixed_row:
+    l32i    a7, sp, 16          // Rewind max taps to the shared row
+    j       .L_ch2b_output
+
+.L_ch2b_done:
+    retw.n
+
+    .size   xtensa_dotprod_s16_q15_shift_simd_ch2_batch, . - xtensa_dotprod_s16_q15_shift_simd_ch2_batch
+
+    // Function: xtensa_dotprod_s16_q15_shift_simd_ch2_dual
+    // Computes BOTH blend rows' stereo dot products for up to 4 outputs in
+    // one call. Each output's interleaved delay line is loaded, aligned, and
+    // deinterleaved once, then multiplied against two coefficient rows (the
+    // ASRC blend pair) by alternating the rows' coefficient blocks against
+    // the single ACCX; each row's block shifts and max-tap records apply to
+    // its own accumulator pair.
+    // Parameters:
+    //   a2: sample_ptrs (const int16_t* const*) - one delay-line pointer per output
+    //   a3: coeffs_a (q15_t*) - row A coefficients, must be 16-byte aligned
+    //   a4: length (bits 0-15, must be multiple of 8) | max tap count (bits 16-19) |
+    //       output count (bits 20-22, 1-4)
+    //   a5: shifts_a (uint8_t*) - row A shifts
+    //   a6: output (int32_t*) - [row A left, row A right, row B left,
+    //       row B right] per output
+    //   a7: extra (const Q15DualRowExtra*) - {coeffs_b, shifts_b, entries_a,
+    //       entries_b}; the entries pointers are ignored when the packed tap
+    //       count is 0
+    //
+    // The row pair is FIXED across the batch (the near-unity ASRC case: the
+    // blend pair is stable for many consecutive outputs); only the sample
+    // pointer differs per output.
+
+    .align  4
+    .global xtensa_dotprod_s16_q15_shift_simd_ch2_dual
+    .type   xtensa_dotprod_s16_q15_shift_simd_ch2_dual, @function
+xtensa_dotprod_s16_q15_shift_simd_ch2_dual:
+    entry   sp, 48
+
+    // Outer-loop state, spilled to locals (sp+0..31; sp+32..47 is the base
+    // save area): the kernel body clobbers every register except a7
+    extui   a8, a4, 20, 3
+    s32i    a4, sp, 0           // Packed length/taps/count word
+    s32i    a2, sp, 4           // sample_ptrs cursor
+    s32i    a3, sp, 8           // Row A coefficient base
+    s32i    a5, sp, 12          // Row A shift base
+    s32i    a6, sp, 16          // Output cursor
+    s32i    a8, sp, 20          // Outputs remaining
+
+.L_ch2d_output:
+    l32i    a2, sp, 4
+    l32i    a3, sp, 8
+    l32i    a5, sp, 12
+    l32i    a2, a2, 0           // a2 = delay_line for this output
+    l32i    a4, a7, 0           // a4 = row B coefficient base
+    l32i    a6, a7, 4           // a6 = row B shift base
+    s32i    a2, sp, 24          // Delay base (max-tap indexing)
+
+    movi.n  a12, 0              // Row A left accumulator
+    movi.n  a13, 0              // Row A right accumulator
+    movi.n  a14, 0              // Row B left accumulator
+    movi.n  a15, 0              // Row B right accumulator
+
+    l32i    a8, sp, 0
+    extui   a8, a8, 0, 16       // a8 = filter length
+    extui   a9, a8, 3, 1
+    s32i    a9, sp, 28          // Remainder batch flag (0 or 1)
+    srli    a8, a8, 4           // a8 = length / 16
+
+    // Preload first samples from potentially misaligned delay_line
+    ee.ld.128.usar.ip  q0, a2, 16
+    ee.vld.128.ip      q1, a2, 16
+    ee.src.q.ld.ip     q2, a2, 16, q0, q1
+    ee.src.q.ld.ip     q3, a2, 16, q1, q2
+
+    l8ui            a9, a5, 0       // Row A shift for batch 0
+    l8ui            a10, a6, 0      // Row B shift for batch 0
+    ee.vld.128.ip   q4, a3, 16      // Row A coefficients for batch 0
+    ee.vld.128.ip   q5, a4, 16      // Row B coefficients for batch 0
+    ee.vunzip.16    q0, q1          // Deinterleave first set of samples
+    ee.zero.accx
+
+    beqz    a8, .L_ch2d_remainder
+
+    // Main loop (16 samples = 8 frames per batch, 2 batches per iteration;
+    // coefficient vectors double-buffer q4/q5 <-> q6/q7 and each batch's
+    // shift serves both channels of its row)
+    loopnez a8, .L_ch2d_loop_end
+.L_ch2d_loop:
+    // Batch 0, row A: q0/q1 x q4
+    ee.vmulas.s16.accx  q0, q4
+    ee.vld.128.ip   q6, a3, 16
+    ee.srs.accx a11, a9, 0
+    ee.zero.accx
+    add     a12, a12, a11
+    ee.vmulas.s16.accx  q1, q4
+    ee.srs.accx a11, a9, 0
+    l8ui    a9, a5, 1
+    ee.zero.accx
+    add     a13, a13, a11
+    // Batch 0, row B: q0/q1 x q5, queues -> q2,q3 aligned, q0,q1 raw
+    ee.vmulas.s16.accx.ld.ip.qup   q0, a2, 16, q0, q5, q2, q3
+    ee.vld.128.ip   q7, a4, 16
+    ee.srs.accx a11, a10, 0
+    ee.zero.accx
+    add     a14, a14, a11
+    ee.vmulas.s16.accx.ld.ip.qup   q1, a2, 16, q1, q5, q3, q0
+    ee.srs.accx a11, a10, 0
+    l8ui    a10, a6, 1
+    ee.vunzip.16    q2, q3          // Deinterleave the next set of samples
+    ee.zero.accx
+    add     a15, a15, a11
+
+    // Batch 1: q2/q3 x (q6, q7), queues -> q0,q1 aligned, q2,q3 raw
+    ee.vmulas.s16.accx  q2, q6
+    addi.n  a5, a5, 2
+    ee.vld.128.ip   q4, a3, 16
+    ee.srs.accx a11, a9, 0
+    ee.zero.accx
+    add     a12, a12, a11
+    ee.vmulas.s16.accx  q3, q6
+    ee.srs.accx a11, a9, 0
+    l8ui    a9, a5, 0
+    ee.zero.accx
+    add     a13, a13, a11
+    ee.vmulas.s16.accx.ld.ip.qup   q2, a2, 16, q2, q7, q0, q1
+    addi.n  a6, a6, 2
+    ee.vld.128.ip   q5, a4, 16
+    ee.srs.accx a11, a10, 0
+    ee.zero.accx
+    add     a14, a14, a11
+    ee.vmulas.s16.accx.ld.ip.qup   q3, a2, 16, q3, q7, q1, q2
+    ee.srs.accx a11, a10, 0
+    l8ui    a10, a6, 0
+    ee.vunzip.16    q0, q1
+    ee.zero.accx
+    add     a15, a15, a11
+.L_ch2d_loop_end:
+
+.L_ch2d_remainder:
+    l32i    a8, sp, 28
+    beqz    a8, .L_ch2d_maxtap
+
+    // Remainder batch (8 frames): q0/q1 x (q4, q5)
+    ee.vmulas.s16.accx  q0, q4
+    ee.srs.accx a11, a9, 0
+    ee.zero.accx
+    add     a12, a12, a11
+    ee.vmulas.s16.accx  q1, q4
+    ee.srs.accx a11, a9, 0
+    ee.zero.accx
+    add     a13, a13, a11
+    ee.vmulas.s16.accx  q0, q5
+    ee.srs.accx a11, a10, 0
+    ee.zero.accx
+    add     a14, a14, a11
+    ee.vmulas.s16.accx  q1, q5
+    ee.srs.accx a11, a10, 0
+    ee.zero.accx
+    add     a15, a15, a11
+
+.L_ch2d_maxtap:
+    // Fold in each row's pre-extracted max taps for both channels (see the
+    // single-output kernel); row A accumulates into a12/a13, row B into
+    // a14/a15, each saturated once
+    l32i    a4, sp, 0
+    extui   a4, a4, 16, 4       // a4 = max tap count (0-6)
+    beqz    a4, .L_ch2d_store
+    l32i    a2, sp, 24          // Delay base
+    l32i    a3, a7, 8           // Row A entries
+    mov.n   a5, a12             // a5/a6 = row A dot products before the max taps
+    mov.n   a6, a13
+    loopnez a4, .L_ch2d_maxtap_a_end
+.L_ch2d_maxtap_a:
+    l16ui   a9, a3, 4           // index_reversed
+    l32i    a10, a3, 0          // Q31 coefficient
+    addx4   a9, a9, a2          // &delay_line[2 * index] (4 bytes per frame)
+    addi.n  a3, a3, 8
+    l16si   a11, a9, 0          // left sample
+    l16si   a9, a9, 2           // right sample
+    slli    a11, a11, 16        // promote to Q31
+    slli    a9, a9, 16
+    mulsh   a11, a10, a11
+    mulsh   a9, a10, a9
+    add.n   a12, a12, a11
+    add.n   a13, a13, a9
+.L_ch2d_maxtap_a_end:
+    MAXTAP_SATURATE a12, a5, a9, a10, a11
+    MAXTAP_SATURATE a13, a6, a9, a10, a11
+    l32i    a3, a7, 12          // Row B entries
+    mov.n   a5, a14             // a5/a6 = row B dot products before the max taps
+    mov.n   a6, a15
+    loopnez a4, .L_ch2d_maxtap_b_end
+.L_ch2d_maxtap_b:
+    l16ui   a9, a3, 4
+    l32i    a10, a3, 0
+    addx4   a9, a9, a2
+    addi.n  a3, a3, 8
+    l16si   a11, a9, 0
+    l16si   a9, a9, 2
+    slli    a11, a11, 16
+    slli    a9, a9, 16
+    mulsh   a11, a10, a11
+    mulsh   a9, a10, a9
+    add.n   a14, a14, a11
+    add.n   a15, a15, a9
+.L_ch2d_maxtap_b_end:
+    MAXTAP_SATURATE a14, a5, a9, a10, a11
+    MAXTAP_SATURATE a15, a6, a9, a10, a11
+
+.L_ch2d_store:
+    l32i    a8, sp, 16
+    l32i    a9, sp, 20
+    s32i    a12, a8, 0
+    s32i    a13, a8, 4
+    s32i    a14, a8, 8
+    s32i    a15, a8, 12
+    addi.n  a8, a8, 16
+    addi.n  a9, a9, -1
+    s32i    a8, sp, 16
+    s32i    a9, sp, 20
+    beqz    a9, .L_ch2d_done
+
+    l32i    a10, sp, 4
+    addi.n  a10, a10, 4
+    s32i    a10, sp, 4
+    j       .L_ch2d_output
+
+.L_ch2d_done:
+    retw.n
+
+    .size   xtensa_dotprod_s16_q15_shift_simd_ch2_dual, . - xtensa_dotprod_s16_q15_shift_simd_ch2_dual
+
+#endif

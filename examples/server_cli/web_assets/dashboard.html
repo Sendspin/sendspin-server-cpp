@@ -1,0 +1,738 @@
+<!doctype html>
+<!--
+  Copyright 2026 Sendspin Contributors
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+
+  server_cli's dashboard (--web): one page with no external resources, embedded in server_cli.
+  Every string from the server goes into the page through textContent or a form value, never as
+  markup: client names, device text and log lines come from the network.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sendspin server</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f4f5f7; --card: #ffffff; --fg: #1c1e21; --muted: #646a73; --line: #d9dce1;
+  --accent: #2563eb; --accent-fg: #ffffff; --ok: #15803d; --warn: #b45309; --bad: #b91c1c;
+  --chip: #eef0f3; --input: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111317; --card: #1b1e24; --fg: #e6e8eb; --muted: #9aa1ab; --line: #2e333b;
+    --accent: #5b8cff; --accent-fg: #0b0d10; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+    --chip: #262a31; --input: #14171c;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+.chips { display: contents; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { position: sticky; top: 0; z-index: 2; background: var(--card); border-bottom: 1px solid var(--line);
+  padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+header h1 { font-size: 17px; margin: 0; }
+main { max-width: 1100px; margin: 0 auto; padding: 12px; display: grid; gap: 12px; }
+@media (min-width: 900px) { main { grid-template-columns: 1fr 1fr; } .wide { grid-column: 1 / -1; } }
+section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+section > h2 { font-size: 15px; margin: 0 0 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin: 8px 0; }
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0; }
+.grow { flex: 1 1 140px; min-width: 0; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+.chip { background: var(--chip); border-radius: 999px; padding: 1px 8px; font-size: 12px; white-space: nowrap; }
+.chip.ok { color: var(--ok); } .chip.warn { color: var(--warn); } .chip.bad { color: var(--bad); }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); display: inline-block; }
+.dot.on { background: var(--ok); }
+button, select, input { font: inherit; color: var(--fg); background: var(--input); border: 1px solid var(--line);
+  border-radius: 6px; padding: 5px 9px; min-height: 34px; }
+button { cursor: pointer; background: var(--chip); }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+input[type=range] { padding: 0; flex: 1 1 160px; min-width: 100px; }
+input[type=color] { padding: 0 2px; width: 44px; }
+input[type=checkbox] { min-height: auto; }
+label { display: inline-flex; gap: 4px; align-items: center; }
+.name { font-weight: 600; word-break: break-word; }
+.warnbar { color: var(--warn); font-size: 13px; }
+#toast { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); max-width: 92vw; z-index: 3;
+  background: var(--fg); color: var(--bg); padding: 8px 12px; border-radius: 8px; display: none; }
+#log { height: 260px; overflow: auto; background: var(--input); border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px; margin: 0; white-space: pre-wrap; word-break: break-word; }
+canvas { width: 100%; height: 220px; display: block; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+td, th { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--line); }
+.files li { list-style: none; display: flex; gap: 6px; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.files { padding: 0; margin: 6px 0; max-height: 360px; overflow: auto; }
+.legend span { display: inline-flex; gap: 4px; align-items: center; margin-right: 10px; font-size: 12px; }
+.swatch { width: 14px; height: 3px; display: inline-block; }
+</style>
+</head>
+<body>
+<header>
+  <span id="conn" class="dot" title="Disconnected"></span>
+  <h1 id="title">Sendspin server</h1>
+  <span id="serverinfo" class="muted small"></span>
+  <label class="small"><input type="checkbox" id="onegroup"> One group</label>
+  <span id="exposed" class="warnbar"></span>
+</header>
+<main>
+  <section class="wide">
+    <h2>Groups</h2>
+    <div id="groups"></div>
+  </section>
+  <section class="wide">
+    <h2>Clients <span class="grow"></span>
+      <input id="connecturl" class="grow" placeholder="ws://192.168.1.20:8928/sendspin" aria-label="Client URL">
+      <button id="connectbtn">Connect</button></h2>
+    <div id="clients"></div>
+    <div id="noclients" class="muted">No clients yet.</div>
+  </section>
+  <section id="pairingsection" class="wide" hidden>
+    <h2>Pairing</h2>
+    <div id="pairing"></div>
+  </section>
+  <section id="filessection" hidden>
+    <h2>Files <span class="grow"></span>
+      <label class="small">to <select id="filegroup" aria-label="Group to play to"></select></label></h2>
+    <div class="row"><button id="fileup">Up</button><span id="filepath" class="mono grow"></span></div>
+    <ul id="files" class="files"></ul>
+    <div id="filenote" class="muted small"></div>
+  </section>
+  <section>
+    <h2>Time-reply hold <span class="muted small" id="timingnote"></span></h2>
+    <canvas id="chart" aria-label="Time-reply hold per client"></canvas>
+    <div id="legend" class="legend"></div>
+    <table><thead><tr><th>Client</th><th>replies</th><th>p50 ms</th><th>p99 ms</th><th>max ms</th></tr></thead>
+      <tbody id="timingtable"></tbody></table>
+    <div class="muted small">The server's hold of each time reply, from the request's receive stamp to the reply's stamp, per interval. Time-sync state is not reported by the server's public API.</div>
+  </section>
+  <section class="wide">
+    <h2>Event log <span class="grow"></span>
+      <input id="logfilter" placeholder="Filter" aria-label="Filter the log">
+      <label class="small"><input type="checkbox" id="logfollow" checked> Follow</label></h2>
+    <pre id="log"></pre>
+  </section>
+</main>
+<div id="toast" role="status"></div>
+<script>
+"use strict";
+// ---------------------------------------------------------------- DOM helpers
+// Text goes in through textContent only; attributes through setAttribute or properties.
+function el(tag, props, children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (key === "text") node.textContent = value;
+    else if (key === "class") node.className = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else if (key in node) node[key] = value;
+    else node.setAttribute(key, value);
+  }
+  for (const child of children || []) {
+    if (child !== null && child !== undefined && child !== false) {
+      node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+    }
+  }
+  return node;
+}
+const $ = (id) => document.getElementById(id);
+function chip(text, kind) { return el("span", {class: "chip" + (kind ? " " + kind : ""), text}); }
+function seconds(s) {
+  if (!isFinite(s)) return "?";
+  const m = Math.floor(s / 60), r = Math.floor(s % 60);
+  return m + ":" + String(r).padStart(2, "0");
+}
+let toastTimer = 0;
+function toast(text) {
+  const t = $("toast");
+  t.textContent = text;
+  t.style.display = "block";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.style.display = "none"; }, 4000);
+}
+
+// ---------------------------------------------------------------- in-place updates
+// The page is built once per client, group and file row and then only patched: a state push
+// writes a text, property or value only where it differs, and never replaces or detaches a
+// control, so focus, an open select, a chosen file, an open <details> and scroll positions survive.
+function setText(node, text) {
+  text = String(text);
+  if (node.textContent !== text) node.textContent = text;
+}
+function setProp(node, key, value) {
+  if (node[key] !== value) node[key] = value;
+}
+const focused = (node) => document.activeElement === node;
+// A pointer held on a slider, so a push does not move it under the finger
+let pointerDown = false;
+addEventListener("pointerdown", () => { pointerDown = true; });
+addEventListener("pointerup", () => { pointerDown = false; });
+addEventListener("pointercancel", () => { pointerDown = false; });
+const held = (slider) => focused(slider) && pointerDown;
+// An update skipped for a focused control is applied by render() once focus leaves it
+let deferred = false;
+document.addEventListener("focusout", () => {
+  if (deferred) { deferred = false; setTimeout(render, 0); }
+});
+// A form value the server reports: left alone while the field has focus, or while it holds an
+// edit the user has not sent (its value differs from the one this page last wrote)
+const written = new WeakMap();
+function setValue(input, value) {
+  if (focused(input)) { deferred = true; return; }
+  if (written.has(input) && input.value !== written.get(input)) return;
+  if (input.value !== value) input.value = value;
+  written.set(input, value);
+}
+function setSlider(slider, value) {
+  if (held(slider)) { deferred = true; return false; }
+  setProp(slider, "value", value);
+  return true;
+}
+// Sets a select's options, as [value, text] pairs, and its value (undefined keeps the user's
+// choice). A focused select may be open, so it is not touched until it loses focus.
+const optionKeys = new WeakMap();
+function setSelect(select, options, value) {
+  if (focused(select)) { deferred = true; return; }
+  const key = JSON.stringify(options);
+  if (optionKeys.get(select) !== key) {
+    const keep = value !== undefined ? value : select.value;
+    select.replaceChildren(...options.map(([v, text]) => el("option", {value: v, text})));
+    optionKeys.set(select, key);
+    if (options.some(([v]) => v === keep)) select.value = keep;
+    else select.selectedIndex = options.length ? 0 : -1;
+  }
+  if (value !== undefined && select.value !== value && options.some(([v]) => v === value)) select.value = value;
+}
+// Patches a container of chips to the given [text, kind] list (null entries skipped)
+function setChips(container, list) {
+  list = list.filter(Boolean);
+  while (container.children.length > list.length) container.lastElementChild.remove();
+  list.forEach(([text, kind], index) => {
+    let node = container.children[index];
+    if (!node) { node = el("span"); container.append(node); }
+    setProp(node, "className", "chip" + (kind ? " " + kind : ""));
+    setText(node, text);
+  });
+}
+// Keeps one component ({root, update(item)}) per key in container, in the items' order. A kept
+// component is updated in place and moved only when the order changed.
+function reconcile(container, components, items, keyOf, create) {
+  const keys = items.map((item) => String(keyOf(item)));
+  const live = new Set(keys);
+  for (const [key, component] of components) {
+    if (!live.has(key)) { component.root.remove(); components.delete(key); }
+  }
+  items.forEach((item, index) => {
+    let component = components.get(keys[index]);
+    if (!component) { component = create(); components.set(keys[index], component); }
+    component.update(item);
+    const at = container.children[index];
+    if (at !== component.root) container.insertBefore(component.root, at || null);
+  });
+}
+
+// ---------------------------------------------------------------- connection
+let ws = null, nextId = 1, retry = 1000;
+const pending = new Map();
+let state = null;
+// The volume this page last set for each group; the server reports none
+const groupVolume = new Map();
+let server = {};
+function connect() {
+  const scheme = location.protocol === "https:" ? "wss://" : "ws://";
+  ws = new WebSocket(scheme + location.host + "/ws");
+  ws.onopen = () => { retry = 1000; $("conn").className = "dot on"; $("conn").title = "Connected"; };
+  ws.onclose = () => {
+    $("conn").className = "dot"; $("conn").title = "Disconnected, retrying";
+    for (const [, p] of pending) p.reject(new Error("disconnected"));
+    pending.clear();
+    setTimeout(connect, retry);
+    retry = Math.min(retry * 2, 10000);
+  };
+  ws.onmessage = (event) => {
+    let message;
+    try { message = JSON.parse(event.data); } catch (e) { return; }
+    handle(message);
+  };
+}
+// Sends a command; resolves with its data, or rejects with its error, which is also shown
+function send(cmd, args) {
+  return new Promise((resolve, reject) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { toast("Not connected"); reject(new Error("not connected")); return; }
+    const id = nextId++;
+    pending.set(id, {resolve, reject});
+    ws.send(JSON.stringify(Object.assign({id, cmd}, args || {})));
+  }).catch((error) => { toast(cmd + ": " + error.message); throw error; });
+}
+// Fire and forget: the error is shown by send()
+function act(cmd, args) { send(cmd, args).catch(() => {}); }
+function handle(message) {
+  switch (message.type) {
+    case "result": {
+      const p = pending.get(message.id);
+      if (!p) return;
+      pending.delete(message.id);
+      if (message.ok) p.resolve(message.data || {}); else p.reject(new Error(message.error));
+      break;
+    }
+    case "snapshot":
+      server = message.server;
+      $("title").textContent = server.name || "Sendspin server";
+      document.title = (server.name || "Sendspin") + " dashboard";
+      $("serverinfo").textContent = "sendspin-server-cpp, clients on port " + server.listen_port;
+      $("exposed").textContent = server.loopback_only ? "" :
+        "No password: anyone on the network who reaches this page controls the server.";
+      timingInterval = message.timing_interval_s;
+      timing = message.timing.slice();
+      $("log").replaceChildren();
+      logLines = [];
+      for (const line of message.log) addLog(line);
+      drawTiming();
+      break;
+    case "state":
+      state = message;
+      render();
+      break;
+    case "log": addLog(message.line); break;
+    case "timing":
+      timing.push(message.point);
+      if (timing.length > 300) timing.shift();
+      drawTiming();
+      break;
+    case "pairing": onPairing(message); break;
+  }
+}
+
+// ---------------------------------------------------------------- state
+function clientName(id) {
+  const c = state ? state.clients.find((x) => x.client_id === id) : null;
+  return c ? c.name : (id ? id.slice(0, 10) + "..." : "?");
+}
+function trust(c) {
+  if (c.pairing) return ["pairing", "warn"];
+  if (c.credential_mismatch) return ["pairing lost", "bad"];
+  if (c.paired) return ["paired", "ok"];
+  if (!c.unpaired_access) return ["pairing required", "warn"];
+  return c.approved ? ["approved", "ok"] : ["not approved", "bad"];
+}
+const groupCards = new Map(), clientCards = new Map();
+function render() {
+  if (!state) return;
+  setProp($("onegroup"), "checked", state.one_group);
+  setProp($("onegroup"), "disabled", state.one_group_fixed);
+  setProp($("onegroup").parentElement, "title", state.one_group_fixed ? "Set by --one-group" : "Keep every client in the server's group");
+  reconcile($("groups"), groupCards, state.groups, (g) => g.id, groupCard);
+  reconcile($("clients"), clientCards, state.clients, (c) => c.client_id || c.url, clientCard);
+  setProp($("noclients"), "hidden", state.clients.length !== 0);
+  setProp($("filessection"), "hidden", !state.media);
+  setSelect($("filegroup"), state.groups.map((g) => [String(g.id), g.name]));
+  if (state.media && !filesLoaded) { filesLoaded = true; listFiles(""); }
+  drawTiming();
+}
+
+// A group's card; built once, then update(g) patches it for each push
+function groupCard() {
+  const self = {g: null};
+  const id = () => self.g.id;
+  const title = el("span", {class: "name"});
+  const chips = el("span", {class: "chips"});
+  // Playback: standard input, a file, or nothing; one of the three rows shows
+  const liveChips = el("span", {class: "chips"});
+  const liveText = el("span", {class: "muted"});
+  const liveRow = el("div", {class: "row small"}, [liveChips, liveText]);
+  const fileTitle = el("span", {class: "grow"});
+  const fileChips = el("span", {class: "chips"});
+  const fileLatency = el("span", {class: "muted small"});
+  const fileRow = el("div", {class: "row"}, [fileTitle, fileChips, fileLatency]);
+  const time = el("span", {class: "mono"});
+  const slider = el("input", {type: "range", min: "0", step: "0.1", "aria-label": "Position",
+    oninput: (e) => { time.textContent = seconds(Number(e.target.value)) + " / " + seconds(self.g.playback.duration_s); },
+    onchange: (e) => { e.target.blur(); act("seek", {group: id(), seconds: Number(e.target.value)}); }});
+  const seekRow = el("div", {class: "row"}, [slider, time]);
+  const noneRow = el("div", {class: "muted small", text: "Nothing playing."});
+  const loop = el("input", {type: "checkbox", onchange: (e) => act("loop", {group: id(), on: e.target.checked})});
+  const live = el("button", {text: "Play stdin", onclick: () => act("live", {group: id()})});
+  // Volume and mute: the server reports no group volume, so the one this page set last, if any
+  const volumeText = el("span", {class: "small mono"});
+  const volume = el("input", {type: "range", min: "0", max: "100", step: "1", "aria-label": "Group volume",
+    oninput: (e) => { volumeText.textContent = e.target.value; },
+    onchange: (e) => {
+      e.target.blur();
+      const group = id(), value = Number(e.target.value);
+      send("volume", {group, volume: value}).then(() => { groupVolume.set(group, value); render(); }).catch(() => {});
+    }});
+  const members = el("span", {class: "chips"});
+  const noMembers = el("span", {class: "muted", text: "none"});
+  const name = el("input", {class: "grow", "aria-label": "Group name", maxLength: 1024});
+  const root = el("div", {class: "card"}, [
+    el("div", {class: "row"}, [title, chips]),
+    liveRow, fileRow, seekRow, noneRow,
+    el("div", {class: "row"}, [
+      el("button", {text: "Resume", onclick: () => act("resume", {group: id()})}),
+      el("button", {text: "Pause", onclick: () => act("pause", {group: id()})}),
+      el("button", {text: "Stop", onclick: () => act("stop", {group: id()})}),
+      el("button", {text: "Next", onclick: () => act("next", {group: id()})}),
+      el("label", {}, [loop, "Loop"]),
+      live,
+    ]),
+    el("div", {class: "row"}, [
+      el("span", {class: "small", text: "Volume"}), volume, volumeText,
+      el("button", {text: "Mute", onclick: () => act("mute", {group: id(), muted: true})}),
+      el("button", {text: "Unmute", onclick: () => act("mute", {group: id(), muted: false})}),
+    ]),
+    el("div", {class: "row"}, [el("span", {class: "small muted", text: "Members:"}), el("div", {class: "small"}, [members, noMembers])]),
+    el("div", {class: "row"}, [el("label", {class: "small", text: "Name"}), name,
+      el("button", {text: "Rename", onclick: () => { name.blur(); act("rename_group", {group: id(), name: name.value}); }})]),
+    artworkRow(id),
+  ]);
+  function update(g) {
+    self.g = g;
+    const p = g.playback;
+    setText(title, g.name);
+    setChips(chips, [g.server_group ? ["server's group"] : null, g.playing ? ["playing", "ok"] : ["stopped"],
+      [g.members.length + " member(s)"]]);
+    setProp(liveRow, "hidden", !(p && p.live));
+    setProp(fileRow, "hidden", !(p && !p.live));
+    setProp(seekRow, "hidden", !(p && !p.live));
+    setProp(noneRow, "hidden", !!p);
+    if (p && p.source) {
+      setChips(liveChips, [["source " + clientName(p.source) + ", live"], [p.phase], p.paused ? ["paused", "warn"] : null]);
+      setText(liveText, "latency " + p.latency_ms + " ms");
+    } else if (p && p.live) {
+      setChips(liveChips, [["standard input, live"], [p.phase], p.paused ? ["paused", "warn"] : null, p.ended ? ["ended"] : null]);
+      setText(liveText, p.written + " samples written, " + p.dropped + " dropped, latency " + p.latency_ms + " ms");
+    } else if (p) {
+      setText(fileTitle, p.title || "?");
+      setChips(fileChips, [[p.phase], p.paused ? ["paused", "warn"] : null]);
+      setText(fileLatency, "latency " + p.latency_ms + " ms");
+      if (held(slider)) {
+        deferred = true;
+      } else {
+        setProp(slider, "max", String(Math.max(p.duration_s, 0.001)));
+        setProp(slider, "value", String(Math.min(p.position_s, p.duration_s)));
+        setText(time, seconds(p.position_s) + " / " + seconds(p.duration_s));
+      }
+    }
+    setProp(loop, "checked", !!state.loop);
+    setProp(live, "hidden", !state.live);
+    const known = groupVolume.get(g.id);
+    if (setSlider(volume, String(known === undefined ? 50 : known))) setText(volumeText, known === undefined ? "unknown" : String(known));
+    setChips(members, g.members.map((member) => [clientName(member)]));
+    setProp(noMembers, "hidden", g.members.length !== 0);
+    setValue(name, g.name);
+  }
+  return {root, update};
+}
+
+// The artwork and colors controls; nothing in them comes from the state, so a push leaves them be
+function artworkRow(id) {
+  const details = el("details", {});
+  details.append(el("summary", {class: "small", text: "Artwork and colors"}));
+  const source = el("select", {"aria-label": "Artwork source"}, [el("option", {value: "album", text: "Album"}), el("option", {value: "artist", text: "Artist"})]);
+  const file = el("input", {type: "file", accept: "image/jpeg,image/png", class: "grow", "aria-label": "Image"});
+  details.append(el("div", {class: "row"}, [source, file,
+    el("button", {text: "Upload", onclick: () => upload(id(), source.value, file.files[0])}),
+    el("button", {text: "Clear", onclick: () => act("artwork", {group: id(), source: source.value})}),
+  ]));
+  const names = ["background_dark", "background_light", "primary", "accent", "on_dark", "on_light"];
+  const pickers = {};
+  const row = el("div", {class: "row small"});
+  for (const n of names) {
+    const use = el("input", {type: "checkbox", "aria-label": "Send " + n});
+    const pick = el("input", {type: "color", value: n.endsWith("dark") && n.startsWith("background") ? "#101820" : "#1db954", "aria-label": n});
+    pickers[n] = {use, pick};
+    row.append(el("label", {}, [use, pick, n]));
+  }
+  details.append(row);
+  details.append(el("div", {class: "row"}, [
+    el("button", {text: "Set colors", onclick: () => {
+      const colors = {};
+      for (const n of names) if (pickers[n].use.checked) colors[n] = pickers[n].pick.value.slice(1);
+      act("colors", {group: id(), colors});
+    }}),
+    el("button", {text: "Clear colors", onclick: () => act("colors", {group: id(), colors: {}})}),
+  ]));
+  return details;
+}
+
+function upload(group, source, file) {
+  if (!file) { toast("Choose an image first"); return; }
+  if (server.max_image_bytes && file.size > server.max_image_bytes) { toast("The image is larger than the server takes"); return; }
+  fetch("/artwork?group=" + encodeURIComponent(group) + "&source=" + encodeURIComponent(source), {
+    method: "POST", body: file,
+    headers: {"X-Sendspin-Dashboard": "1", "Content-Type": "application/octet-stream"},
+  }).then((r) => r.json()).then((r) => toast(r.ok ? "Image set" : "Image: " + r.error))
+    .catch((e) => toast("Image: " + e.message));
+}
+
+function formatText(f) {
+  return f ? f.codec + " " + f.sample_rate + " Hz, " + f.channels + " ch, " + f.bit_depth + " bit" : "no stream";
+}
+
+// A client's card; built once, then update(c) patches it for each push
+function clientCard() {
+  const self = {c: null};
+  const cid = () => self.c.client_id;
+  const name = el("span", {class: "name"});
+  const chips = el("span", {class: "chips"});
+  const address = el("div", {class: "mono muted"});
+  // The rest shows once the client is reached and has an id
+  const streamText = el("span");
+  const streamChips = el("span", {class: "chips"});
+  const groupLabel = el("span", {class: "small", text: "Group"});
+  const group = el("select", {"aria-label": "Group", onchange: (e) => {
+    e.target.blur();
+    act("move", {client: cid(), group: Number(e.target.value)});
+  }});
+  const newName = el("input", {placeholder: "New group name", class: "grow", "aria-label": "New group name", maxLength: 1024});
+  const approve = el("button", {onclick: () => act(self.c.approved ? "revoke" : "approve", {client: cid()})});
+  const method = el("select", {"aria-label": "Pairing method"});
+  const cancel = el("button", {text: "Cancel pairing", onclick: () => act("cancel_pairing", {client: cid()})});
+  const unpair = el("button", {text: "Unpair", onclick: () => act("unpair", {client: cid()})});
+  // A source: approved with its source role, and routed into a group
+  const routeGroup = el("select", {"aria-label": "Group to route the source into"});
+  const sourceRow = el("div", {class: "row"}, [el("span", {class: "small", text: "Source"}),
+    el("button", {text: "Approve with source", onclick: () => act("approve", {client: cid(), source: true})}),
+    routeGroup, el("button", {text: "Route here", onclick: () => act("route", {client: cid(), group: Number(routeGroup.value)})})]);
+  // Format override: the user's own fields, never written by a push
+  const codec = el("select", {"aria-label": "Codec"}, ["pcm", "flac", "opus"].map((x) => el("option", {value: x, text: x})));
+  const rate = el("input", {type: "number", value: "48000", min: "1", style: "width:7em", "aria-label": "Sample rate"});
+  const channels = el("input", {type: "number", value: "2", min: "1", max: "255", style: "width:4em", "aria-label": "Channels"});
+  const bits = el("input", {type: "number", value: "16", min: "1", max: "255", style: "width:4em", "aria-label": "Bit depth"});
+  const reached = el("div", {}, [
+    el("div", {class: "row small"}, [streamText, streamChips]),
+    el("div", {class: "row"}, [groupLabel, group, newName, el("button", {text: "New group", onclick: () => {
+      newName.blur();
+      if (newName.value) act("create_group", {name: newName.value, client: cid()});
+    }})]),
+    el("div", {class: "row"}, [approve, method,
+      el("button", {text: "Pair", onclick: () => {
+        const c = self.c, args = {client: c.client_id};
+        if (method.value) args.method = method.value;
+        send("pair", args).then(() => showPairing(c.client_id, c.name, {event: "started"})).catch(() => {});
+      }}),
+      cancel, unpair]),
+    sourceRow,
+    el("details", {}, [el("summary", {class: "small", text: "Player format override"}),
+      el("div", {class: "row"}, [codec, rate, channels, bits,
+        el("button", {text: "Set", onclick: () => act("format", {client: cid(), format: {
+          codec: codec.value, sample_rate: Number(rate.value), channels: Number(channels.value), bit_depth: Number(bits.value)}})}),
+        el("button", {text: "Clear", onclick: () => act("format", {client: cid(), format: null})}),
+      ]),
+      el("div", {class: "muted small", text: "Applies while the client lists the format; otherwise its own preference does."})]),
+  ]);
+  const root = el("div", {class: "card"}, [el("div", {class: "row"}, [name, chips]), address, reached]);
+  function update(c) {
+    self.c = c;
+    const known = c.client_id !== "";
+    setText(name, c.name || "(unnamed)");
+    setChips(chips, [[c.connected ? "connected" : (c.reconnecting ? "reconnecting" : "not connected"), c.connected ? "ok" : "warn"],
+      known ? trust(c) : ["not reached yet"]]);
+    setText(address, (known ? c.client_id + "  " : "") +
+      (c.accepted ? "from " + c.address : (c.discovered ? "found at " : "dialed at ") + c.url));
+    setProp(reached, "hidden", !known);
+    if (!known) return;
+    setText(streamText, "Stream: " + formatText(c.format));
+    setChips(streamChips, [c.roles.includes("visualizer@v1") ? ["visualizer"] : null,
+      c.volume !== undefined ? ["volume " + c.volume] : null, c.muted ? ["muted", "warn"] : null]);
+    setProp(groupLabel, "hidden", c.group === null);
+    setProp(group, "hidden", c.group === null);
+    if (c.group !== null) setSelect(group, state.groups.map((g) => [String(g.id), g.name + " (" + g.id + ")"]), String(c.group));
+    setText(approve, c.approved ? "Revoke" : "Approve");
+    setProp(approve, "className", c.approved ? "" : "primary");
+    setSelect(method, [["", "code it shows"], c.offers.psk ? ["psk", "pairing token"] : null,
+      c.offers.static ? ["static", "static code"] : null, c.offers.digits ? ["digits", "digits"] : null,
+      c.offers.qr ? ["qr", "QR token"] : null].filter(Boolean));
+    setProp(cancel, "hidden", !c.pairing);
+    setProp(unpair, "hidden", !c.paired);
+    setProp(sourceRow, "hidden", !c.roles.includes("source@v1"));
+    // The user's choice, never set by a push
+    setSelect(routeGroup, state.groups.map((g) => [String(g.id), g.name + " (" + g.id + ")"]));
+  }
+  return {root, update};
+}
+
+// ---------------------------------------------------------------- pairing
+const pairings = new Map();
+function onPairing(m) {
+  showPairing(m.client_id, m.name, m);
+}
+function showPairing(clientId, name, m) {
+  let entry = pairings.get(clientId);
+  if (!entry) {
+    entry = {node: el("div", {class: "card"}), event: ""};
+    pairings.set(clientId, entry);
+    $("pairing").append(entry.node);
+  }
+  const node = entry.node;
+  // The same prompt again leaves a code being typed where it is
+  if (m.event === entry.event && node.contains(document.activeElement)) return;
+  entry.event = m.event;
+  node.replaceChildren(el("div", {class: "row"}, [el("span", {class: "name", text: name}), el("span", {class: "mono muted", text: clientId})]));
+  if (m.event === "started") {
+    node.append(el("div", {class: "muted", text: "Pairing started; waiting for the client."}));
+  } else if (m.event === "pending") {
+    node.append(el("div", {text: "The device asks for an action on it" + (m.message ? ": " : ".")}));
+    if (m.message) node.append(el("div", {class: "mono", text: m.message}));
+  } else if (m.event === "code_needed") {
+    const what = m.method === "psk" ? "the pairing token it shows (SP:0...)"
+      : m.format === "qr" ? "the token under the QR code it shows (SP:1...)"
+      : m.method === "static" ? "its 8-digit code" : "the 6-digit code it shows";
+    const input = el("input", {class: "grow", placeholder: "Code", autocomplete: "off", "aria-label": "Pairing code",
+      inputMode: m.format === "digits" ? "numeric" : "text"});
+    const submit = () => {
+      input.blur();
+      const cmd = m.method === "psk" ? "token" : "code";
+      const args = {client: clientId};
+      args[cmd] = input.value.trim();
+      act(cmd, args);
+    };
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+    node.append(el("div", {text: "Enter " + what + ":"}), el("div", {class: "row"}, [input,
+      el("button", {class: "primary", text: "Submit", onclick: submit})]));
+    setTimeout(() => input.focus(), 0);
+  } else if (m.event === "result") {
+    node.append(el("div", {}, [chip(m.result.replace(/_/g, " "), m.result === "paired" ? "ok" : "bad")]));
+    setTimeout(() => { if (pairings.get(clientId) === entry) { entry.node.remove(); pairings.delete(clientId); updatePairingSection(); } }, 15000);
+  }
+  if (m.event !== "result") {
+    node.append(el("div", {class: "row"}, [el("button", {text: "Cancel", onclick: () => act("cancel_pairing", {client: clientId})})]));
+  }
+  updatePairingSection();
+}
+function updatePairingSection() { $("pairingsection").hidden = pairings.size === 0; }
+
+// ---------------------------------------------------------------- files
+// Rows are kept by path, so listing the same directory again keeps the list and its scroll
+let filesLoaded = false, filePath = "";
+const fileRows = new Map();
+function fileRow(full, entry) {
+  if (entry.directory) {
+    return el("li", {}, [el("button", {text: entry.name + "/", class: "grow", style: "text-align:left", onclick: () => listFiles(full)})]);
+  }
+  const group = () => Number($("filegroup").value);
+  return el("li", {}, [el("span", {class: "grow", text: entry.name}),
+    el("button", {text: "Play", onclick: () => act("play", {group: group(), path: full})}),
+    el("button", {text: "Queue", onclick: () => act("queue", {group: group(), path: full})})]);
+}
+function listFiles(path) {
+  send("list", {path}).then((data) => {
+    const moved = path !== filePath;
+    filePath = path;
+    setText($("filepath"), "/" + path);
+    setProp($("fileup"), "disabled", path === "");
+    const full = (entry) => (path ? path + "/" : "") + entry.name;
+    reconcile($("files"), fileRows, data.entries, (entry) => (entry.directory ? "d:" : "f:") + full(entry), () => ({root: null,
+      update(entry) { if (!this.root) this.root = fileRow(full(entry), entry); }}));
+    if (moved) $("files").scrollTop = 0;
+    setText($("filenote"), data.truncated ? "Only the first entries are listed." : (data.entries.length ? "" : "No WAV or FLAC files here."));
+  }).catch(() => {});
+}
+$("fileup").onclick = () => listFiles(filePath.split("/").slice(0, -1).join("/"));
+
+// ---------------------------------------------------------------- timing
+let timing = [], timingInterval = 2;
+const palette = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#65a30d"];
+function drawTiming() {
+  const canvas = $("chart");
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth, height = canvas.clientHeight;
+  if (!width) return;
+  canvas.width = width * ratio; canvas.height = height * ratio;
+  const g = canvas.getContext("2d");
+  g.setTransform(ratio, 0, 0, ratio, 0, 0);
+  const style = getComputedStyle(document.documentElement);
+  const fg = style.getPropertyValue("--muted").trim(), line = style.getPropertyValue("--line").trim();
+  g.clearRect(0, 0, width, height);
+  const ids = [];
+  let top = 1;
+  for (const point of timing) {
+    for (const [id, v] of Object.entries(point.clients)) {
+      if (!ids.includes(id)) ids.push(id);
+      if (v.n > 0) top = Math.max(top, v.p99_us / 1000);
+    }
+  }
+  top *= 1.1;
+  const left = 40, bottom = height - 18, right = width - 6, upper = 6;
+  const now = Date.now(), span = 300 * timingInterval * 1000;
+  const x = (t) => left + (right - left) * (1 - (now - t) / span);
+  const y = (ms) => bottom - (bottom - upper) * (ms / top);
+  g.font = "11px system-ui, sans-serif"; g.fillStyle = fg; g.strokeStyle = line; g.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const v = top * i / 4;
+    g.beginPath(); g.moveTo(left, y(v)); g.lineTo(right, y(v)); g.stroke();
+    g.fillText(v.toFixed(v < 10 ? 2 : 0), 2, y(v) + 4);
+  }
+  for (let m = 0; m <= 10; m += 2) g.fillText("-" + m + "m", x(now - m * 60000) - 10, height - 4);
+  ids.forEach((id, index) => {
+    g.strokeStyle = palette[index % palette.length];
+    for (const [key, dash, widthPx] of [["p50_us", [], 2], ["p99_us", [4, 3], 1]]) {
+      g.setLineDash(dash); g.lineWidth = widthPx; g.beginPath();
+      let started = false;
+      for (const point of timing) {
+        const v = point.clients[id];
+        if (!v || v.n === 0) { started = false; continue; }
+        const px = x(point.t), py = y(v[key] / 1000);
+        if (px < left) continue;
+        if (started) g.lineTo(px, py); else { g.moveTo(px, py); started = true; }
+      }
+      g.stroke();
+    }
+  });
+  g.setLineDash([]);
+  // The legend and the table hold no controls, so they are simply rebuilt
+  $("legend").replaceChildren(...ids.map((id, index) => el("span", {}, [
+    el("i", {class: "swatch", style: "background:" + palette[index % palette.length]}), clientName(id)])),
+    el("span", {class: "muted", text: "solid p50, dashed p99, ms"}));
+  const last = timing.length ? timing[timing.length - 1] : null;
+  setText($("timingnote"), "every " + timingInterval + " s, last 10 min");
+  $("timingtable").replaceChildren(...(last ? Object.entries(last.clients) : []).map(([id, v]) =>
+    el("tr", {}, [el("td", {text: clientName(id)}), el("td", {text: String(v.n)}),
+      el("td", {text: v.n ? (v.p50_us / 1000).toFixed(2) : "-"}), el("td", {text: v.n ? (v.p99_us / 1000).toFixed(2) : "-"}),
+      el("td", {text: v.n ? (v.max_us / 1000).toFixed(2) : "-"})])));
+}
+addEventListener("resize", drawTiming);
+
+// ---------------------------------------------------------------- log
+// Follow scrolls to each new line; without it the scroll position is left as the user set it
+let logLines = [];
+function addLog(line) {
+  const log = $("log");
+  const filter = $("logfilter").value.toLowerCase();
+  const node = el("div", {text: line});
+  if (filter && !line.toLowerCase().includes(filter)) node.hidden = true;
+  log.append(node);
+  logLines.push(node);
+  if (logLines.length > 1000) logLines.shift().remove();
+  if ($("logfollow").checked) log.scrollTop = log.scrollHeight;
+}
+$("logfilter").addEventListener("input", () => {
+  const filter = $("logfilter").value.toLowerCase();
+  for (const node of logLines) node.hidden = filter !== "" && !node.textContent.toLowerCase().includes(filter);
+});
+
+// ---------------------------------------------------------------- header controls
+$("onegroup").onchange = (e) => act("one_group", {on: e.target.checked});
+$("connectbtn").onclick = () => {
+  const url = $("connecturl").value.trim();
+  if (url) send("connect", {url}).then(() => { $("connecturl").value = ""; toast("Dialing " + url); }).catch(() => {});
+};
+connect();
+</script>
+</body>
+</html>
