@@ -200,7 +200,7 @@ private:
     size_t window_{0};
     std::unique_ptr<RealFft> fft_;
     /// The window-sized buffers, in PSRAM (memory.h): four analyses' worth would crowd internal
-    /// RAM, where the FFT's own buffers go
+    /// RAM
     template <class T>
     using WindowVector = std::vector<T, ExternalAllocator<T>>;
     /// The first half of the symmetric Hann window, the A-weighting power gains per FFT bin, and
