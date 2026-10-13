@@ -33,7 +33,8 @@ namespace sendspin::server {
 constexpr size_t WS_KEY_NONCE_BYTES = 16;
 
 /// @brief The longest upgrade response taken, its blank line included; a longer one fails the
-/// dial
+/// dial. A 101 is about 200 bytes, so this leaves room for a server's extra headers while bounding
+/// a hostile one, and sizes each dialed connection's read buffer.
 constexpr size_t WS_UPGRADE_RESPONSE_MAX = 2048;
 
 /// @brief The Sec-WebSocket-Key for nonce: its Base64
