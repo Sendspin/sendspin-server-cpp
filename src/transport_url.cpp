@@ -15,10 +15,10 @@
 // parse_ws_url(), shared by every transport implementation
 
 #include "transport.h"
+#include "url_text.h"
 #include <arpa/inet.h>
 #include <sys/socket.h>
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -35,17 +35,6 @@ namespace {
 constexpr uint16_t DEFAULT_WS_PORT = 80;
 /// RFC 4291 section 2: 128 bits
 constexpr size_t IPV6_ADDRESS_BYTES = 16;
-
-bool is_hex_digit(char c) {
-    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-}
-
-/// RFC 3986 section 2.3
-bool is_unreserved(char c) {
-    constexpr std::string_view UNRESERVED_SYMBOLS = "-._~";
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-           UNRESERVED_SYMBOLS.find(c) != std::string_view::npos;
-}
 
 /// Whether text holds only unreserved characters, sub-delims, percent-encodings (RFC 3986 section
 /// 2) and the characters of extra, so no control character or space reaches the upgrade request
@@ -74,14 +63,11 @@ bool only_url_characters(std::string_view text, std::string_view extra) {
 std::optional<std::string> ip_literal_host(std::string_view literal) {
     const size_t percent = literal.find('%');
     const std::string_view address = literal.substr(0, percent);
-    // The characters first: a parser that stops at an unexpected one would accept a prefix
-    const bool address_characters = std::all_of(address.begin(), address.end(), [](char c) {
-        return is_hex_digit(c) || c == ':' || c == '.';
-    });
-    if (!address_characters) {
+    // Checked as text first, so no platform's inet_pton takes more (lwIP's takes malformed
+    // groups); it then refuses every form on a build without IPv6, and lwIP's some IPv4 tails
+    if (!is_ipv6_text(address)) {
         return std::nullopt;
     }
-    // An IPv6 address in an RFC 4291 section 2.2 text form, as the system's inet_pton reads it
     std::string host(address);
     std::array<uint8_t, IPV6_ADDRESS_BYTES> bytes{};
     if (inet_pton(AF_INET6, host.c_str(), bytes.data()) != 1) {
@@ -95,8 +81,7 @@ std::optional<std::string> ip_literal_host(std::string_view literal) {
     if (zone.starts_with(ENCODED_PERCENT)) {
         zone.remove_prefix(ENCODED_PERCENT.size());
     }
-    // RFC 6874 section 2: a ZoneID's unreserved characters
-    if (zone.empty() || !std::all_of(zone.begin(), zone.end(), is_unreserved)) {
+    if (!is_zone_id(zone)) {
         return std::nullopt;
     }
     host += '%';

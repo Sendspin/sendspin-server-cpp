@@ -499,15 +499,23 @@ TEST(TransportUrl, ParsesWebSocketUrls) {
         {"ws://[fe%80::1%en0]/p", false, "", 0, ""},
         {"ws://[fe80::1%25en%250]/p", false, "", 0, ""},
         {"ws://[fe80::1%%en0]/p", false, "", 0, ""},
-        // An address that is empty or holds a character besides hex digits, ':' and '.'; lwIP's
-        // inet_pton accepts the prefix before such a character, so only ESP-IDF needs the check
+        // An address that is empty or holds a character besides hex digits, ':' and '.'
         {"ws://[%en0]/p", false, "", 0, ""},
         {"ws://[fe80::g]/p", false, "", 0, ""},
-        // RFC 3986 section 3.2.2: a bracketed address is IPv6, in an RFC 4291 section 2.2 form
+        // RFC 3986 section 3.2.2: a bracketed address is IPv6, in a form is_ipv6_text() takes
+        // (its own table is in test_url_text.cpp).
+        // Control: the forms with and without "::", in either case, with an IPv4 tail
+        {"ws://[::]/p", true, "::", 80, "/p"},
+        {"ws://[1:2:3:4:5:6:7:8]/p", true, "1:2:3:4:5:6:7:8", 80, "/p"},
+        {"ws://[FE80::1]/p", true, "FE80::1", 80, "/p"},
+        {"ws://[64:ff9b::1.2.3.4]/p", true, "64:ff9b::1.2.3.4", 80, "/p"},
         {"ws://[1]/p", false, "", 0, ""},
         {"ws://[::::]/p", false, "", 0, ""},
         {"ws://[1.2.3.4]/p", false, "", 0, ""},
         {"ws://[1.2.3.4%en0]/p", false, "", 0, ""},
+        // Forms macOS's inet_pton takes that RFC 4291 does not
+        {"ws://[0fac9::]/p", false, "", 0, ""},
+        {"ws://[::1.2.3.04]/p", false, "", 0, ""},
         {"ws://host/a\r\nX-Injected: 1", false, "", 0, ""},
         {"ws://host/a\nb", false, "", 0, ""},
         {"ws://host/a b", false, "", 0, ""},

@@ -88,6 +88,7 @@ add_executable(sendspin_server_cpp_tests
     test_timing_stats.cpp
     test_transport.cpp
     test_trust_policy.cpp
+    test_url_text.cpp
     test_visualizer.cpp
     test_visualizer_stream.cpp
     test_wav_reader.cpp
