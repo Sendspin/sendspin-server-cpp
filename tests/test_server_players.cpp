@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <memory>
@@ -612,6 +613,19 @@ public:
         return id.value_or(std::string{});
     }
 
+    /// Runs every player until the host heard each of drained and every player played out its
+    /// stream: a drain completes by the server's clock, which can be before a player's output
+    /// plays its last frames.
+    void run_until_drained(std::initializer_list<std::string> drained) {
+        run_until(this->players, [&] {
+            return std::all_of(
+                       drained.begin(), drained.end(),
+                       [&](const std::string& event) { return this->recorder.contains(event); }) &&
+                   std::all_of(this->players.begin(), this->players.end(),
+                               [](const auto& player) { return player->sink().played_out(); });
+        });
+    }
+
     /// Whether the server has sent player a chunk
     bool has_chunks(const Player& player) {
         const std::string id = this->client_id(player);
@@ -685,7 +699,7 @@ TEST_P(ServerPlayersByDepth, PlayTheHostsAudioBitForBitInPcmAndFlac) {
         input->drain();
     });
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);
@@ -759,7 +773,7 @@ TEST(ServerPlayersPacking, FillFlacChunksToTheTarget) {
             input->drain();
         });
         const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-        run_until(s.players, [&] { return s.recorder.contains(drained); });
+        s.run_until_drained({drained});
         host.join();
 
         const std::lock_guard<std::mutex> lock(s.trace.mutex);
@@ -814,7 +828,7 @@ TEST(ServerPlayers, PlayFlacThroughALateJoinAndASeek) {
     run_until(s.players, [&] { return joiner.sink().audible() > RATE / 5; });
     seek = true;
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);
@@ -1042,7 +1056,7 @@ TEST_P(ServerPlayersResampled, PlayA44100InputAt48000) {
         input->drain();
     });
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);
@@ -1091,7 +1105,7 @@ TEST(ServerPlayersMixed, PlayAStereoInputToAMonoPlayer) {
         input->drain();
     });
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);
@@ -1131,7 +1145,7 @@ TEST(ServerPlayersTwoCells, PlayAn11025HzInputBitForBitInPcmAndFlac) {
         input->drain();
     });
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);
@@ -1215,7 +1229,7 @@ TEST(ServerPlayersSegments, PlayAFormatChangeWithinARunOnEveryPlayer) {
         input->drain();
     });
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     // The mono samples as the stages' floats
@@ -1308,7 +1322,7 @@ TEST(ServerPlayersSegments, KeepAStreamThroughAnInputItsFormatsAreNotOfferedFor)
     });
     started = true;
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     Bytes reference(size_t{first.count + HALF} * 6);
@@ -1371,7 +1385,7 @@ TEST(ServerPlayersSegments, StartAJoinerAtThePlayingSegmentsRate) {
     const Player& joiner = s.add({{Codec::PCM, 2, RATE_44, 24}}, RATE_44);
     joined.store(true);
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     std::vector<float> both;
@@ -1453,7 +1467,7 @@ void play_a_joiner_through_a_segment_change(bool staged_first) {
     run_until(s.players, [&] { return s.has_chunks(joiner); });
     next_track = true;
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     // The first track resampled, cut at the boundary's output index (exactly 120,000 frames), then
@@ -1523,7 +1537,7 @@ TEST(ServerPlayersLateJoin, CatchUpAJoinerNeedingTheResampler) {
     const Player& resampled = s.add({{Codec::PCM, 2, RATE, 24}});
     const Player& same = s.add({{Codec::PCM, 2, RATE_44, 24}}, RATE_44);
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);
@@ -1600,7 +1614,7 @@ TEST(ServerPlayersSwitch, SwitchAPlayerFromPcmToFlacInPlace) {
     run_until(s.players, [&] { return s.has_chunks(switching); });
     EXPECT_TRUE(s.server.set_player_format(id, StreamFormat{StreamCodec::FLAC, RATE, 2, 24}));
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);
@@ -1639,7 +1653,7 @@ TEST(ServerPlayersSwitch, SwitchAPlayerInPlaceToAResampledRate) {
     run_until(s.players, [&] { return s.has_chunks(switching); });
     EXPECT_TRUE(s.server.set_player_format(id, StreamFormat{StreamCodec::PCM, RATE, 2, 24}));
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);
@@ -1738,8 +1752,7 @@ TEST(ServerPlayersGroups, PlayTwoGroupsAndMoveAPlayerBetweenThem) {
     hear_stream(s, moved, moved_id, 3);
     const std::string drained_a = Recorder::drained(living_input->id(), DrainOutcome::PLAYED);
     const std::string drained_b = Recorder::drained(kitchen_input->id(), DrainOutcome::PLAYED);
-    run_until(s.players,
-              [&] { return s.recorder.contains(drained_a) && s.recorder.contains(drained_b); });
+    s.run_until_drained({drained_a, drained_b});
     host_a.join();
     host_b.join();
 
@@ -1933,7 +1946,7 @@ TEST(ServerPlayersLive, RaiseTheGroupLeadForAJoinerWithOneShift) {
     const int64_t joined_us = s.server.now_us();
     const Player& joiner = s.add(formats, RATE, 2, 400, 2000);
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);
@@ -1988,7 +2001,7 @@ TEST(ServerPlayersLive, ShiftPastAHostStallAndPlayOn) {
         input->drain();
     });
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);
@@ -2038,7 +2051,7 @@ TEST(ServerPlayersLive, ResumeAPausedLiveInputAtItsHead) {
         input->drain();
     });
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
     EXPECT_LE(paused, PAUSE_AT);
 
@@ -2107,7 +2120,7 @@ TEST(ServerPlayersOpus, PlayOpusInSyncWithAPcmPlayer) {
         input->drain();
     });
     const std::string drained = Recorder::drained(input->id(), DrainOutcome::PLAYED);
-    run_until(s.players, [&] { return s.recorder.contains(drained); });
+    s.run_until_drained({drained});
     host.join();
 
     const std::lock_guard<std::mutex> lock(s.trace.mutex);

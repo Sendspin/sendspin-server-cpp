@@ -145,6 +145,23 @@ public:
         return room;
     }
 
+    void on_stream_start() override {
+        const std::lock_guard<std::mutex> lock(this->mutex_);
+        this->streaming_ = true;
+    }
+
+    void on_stream_end() override {
+        const std::lock_guard<std::mutex> lock(this->mutex_);
+        this->streaming_ = false;
+    }
+
+    /// Whether no stream is open and every frame written has played. on_stream_end() fires once
+    /// the player has stopped writing its stream.
+    bool played_out() const {
+        const std::lock_guard<std::mutex> lock(this->mutex_);
+        return !this->streaming_ && this->buffer_.empty();
+    }
+
     /// Every frame played so far
     Bytes played() const {
         const std::lock_guard<std::mutex> lock(this->mutex_);
@@ -201,6 +218,7 @@ private:
     Bytes buffer_;
     Bytes played_;
     size_t audible_{0};
+    bool streaming_{false};
     bool stopping_{false};
     std::thread thread_;
 };
