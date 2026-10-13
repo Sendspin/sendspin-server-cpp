@@ -137,8 +137,9 @@ constexpr size_t MAX_NAME_BYTES = 1024;
 bool is_valid_path(std::string_view path, size_t max_bytes);
 
 /// @brief client as the server keeps it: at most discovery_limits::MAX_ADDRESSES addresses; nullopt
-/// when its instance is empty or too long, it has no address or port, or its path or name is not
-/// a valid TXT value (spec connection.md "Server Initiated Connections": `path` is required)
+/// when its instance is empty or too long, its host holds a control character or a space, it has
+/// no address or port, or its path or name is not a valid TXT value (spec connection.md "Server
+/// Initiated Connections": `path` is required)
 std::optional<DiscoveredClient> validated(const DiscoveredClient& client);
 
 /// @brief The `_sendspin-server._tcp` advertisement for a server named name (spec connection.md

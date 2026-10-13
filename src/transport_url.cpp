@@ -28,6 +28,35 @@ namespace {
 
 constexpr uint16_t DEFAULT_WS_PORT = 80;
 
+bool is_hex_digit(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+/// Whether text holds only unreserved characters, sub-delims, percent-encodings (RFC 3986 section
+/// 2) and the characters of extra, so no control character or space reaches the upgrade request
+bool only_url_characters(std::string_view text, std::string_view extra) {
+    constexpr std::string_view UNRESERVED_SYMBOLS = "-._~";
+    constexpr std::string_view SUB_DELIMS = "!$&'()*+,;=";
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c == '%') {
+            if (i + 2 >= text.size() || !is_hex_digit(text[i + 1]) || !is_hex_digit(text[i + 2])) {
+                return false;
+            }
+            i += 2;
+            continue;
+        }
+        const bool alphanumeric =
+            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        if (!alphanumeric && UNRESERVED_SYMBOLS.find(c) == std::string_view::npos &&
+            SUB_DELIMS.find(c) == std::string_view::npos &&
+            extra.find(c) == std::string_view::npos) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 std::optional<DialTarget> parse_ws_url(std::string_view url) {
@@ -45,6 +74,10 @@ std::optional<DialTarget> parse_ws_url(std::string_view url) {
 
     DialTarget target;
     target.path = slash == std::string_view::npos ? "/" : std::string(url.substr(slash));
+    // RFC 3986 section 3.3, with the query (section 3.4) the request target carries
+    if (!only_url_characters(target.path, ":@/?")) {
+        return std::nullopt;
+    }
     std::optional<std::string_view> port_text;
     if (authority.starts_with('[')) {
         const size_t close = authority.find(']');
@@ -52,6 +85,10 @@ std::optional<DialTarget> parse_ws_url(std::string_view url) {
             return std::nullopt;
         }
         target.host = authority.substr(1, close - 1);
+        // RFC 3986 section 3.2.2: an IP literal, with a zone identifier's (RFC 6874)
+        if (!only_url_characters(target.host, ":")) {
+            return std::nullopt;
+        }
         const std::string_view rest = authority.substr(close + 1);
         if (!rest.empty()) {
             if (rest.front() != ':') {
@@ -62,6 +99,10 @@ std::optional<DialTarget> parse_ws_url(std::string_view url) {
     } else {
         const size_t colon = authority.find(':');
         target.host = authority.substr(0, colon);
+        // RFC 3986 section 3.2.2: a registered name or an IPv4 address
+        if (!only_url_characters(target.host, "")) {
+            return std::nullopt;
+        }
         if (colon != std::string_view::npos) {
             port_text = authority.substr(colon + 1);
         }

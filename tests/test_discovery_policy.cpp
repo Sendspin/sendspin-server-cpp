@@ -176,6 +176,16 @@ TEST(DiscoveryValues, KeepsOnlyValidBrowseResults) {
         {"Control: a complete result", [](DiscoveredClient&) {}, true},
         {"Control: no TXT name", [](DiscoveredClient& c) { c.name.reset(); }, true},
         {"no instance", [](DiscoveredClient& c) { c.instance.clear(); }, false},
+        {"Control: a host with UTF-8",
+         [](DiscoveredClient& c) {
+             c.host = "k\xC3\xBC"
+                      "che.local.";
+         },
+         true},
+        {"a host with a line break", [](DiscoveredClient& c) { c.host = "kitchen.local.\r\nX: y"; },
+         false},
+        {"a host with a space", [](DiscoveredClient& c) { c.host = "kit chen.local."; }, false},
+        {"a host with DEL", [](DiscoveredClient& c) { c.host = "kitchen\x7F.local."; }, false},
         {"no address", [](DiscoveredClient& c) { c.addresses.clear(); }, false},
         {"no port", [](DiscoveredClient& c) { c.port = 0; }, false},
         {"no path", [](DiscoveredClient& c) { c.path.clear(); }, false},

@@ -479,6 +479,27 @@ TEST(TransportUrl, ParsesWebSocketUrls) {
         {"ws://host?x=1", false, "", 0, ""},
         {"ws://host/p#frag", false, "", 0, ""},
         {"ws://host#frag", false, "", 0, ""},
+        // RFC 3986 sections 2 and 3: nothing that could break the upgrade request's lines.
+        // Control: every character class a host and a path may hold
+        {"ws://h-1.local/a_b~c.%2F;x=1!$&'()*+,@:?q=/?", true, "h-1.local", 80,
+         "/a_b~c.%2F;x=1!$&'()*+,@:?q=/?"},
+        // Control: an IPv6 literal with a zone identifier (RFC 6874)
+        {"ws://[fe80::1%25en0]/p", true, "fe80::1%25en0", 80, "/p"},
+        {"ws://host/a\r\nX-Injected: 1", false, "", 0, ""},
+        {"ws://host/a\nb", false, "", 0, ""},
+        {"ws://host/a b", false, "", 0, ""},
+        {"ws://host/a\x7F", false, "", 0, ""},
+        {"ws://host/a\x01", false, "", 0, ""},
+        {"ws://host/a\"b", false, "", 0, ""},
+        {"ws://host/caf\xC3\xA9", false, "", 0, ""},
+        {"ws://host/%2", false, "", 0, ""},
+        {"ws://host/%zz", false, "", 0, ""},
+        {"ws://host/%g0", false, "", 0, ""},
+        {"ws://host/%0g", false, "", 0, ""},
+        {"ws://ho\r\nst/p", false, "", 0, ""},
+        {"ws://ho st/p", false, "", 0, ""},
+        {"ws://[::1\r\n]/p", false, "", 0, ""},
+        {"ws://[::1 ]/p", false, "", 0, ""},
     };
     for (const Row& row : rows) {
         SCOPED_TRACE(row.url);

@@ -269,7 +269,8 @@ struct DialTarget {
 
 /// @brief Parses `ws://host[:port][/path]`. The host may be a bracketed IPv6 literal; the port
 /// defaults to 80 and the path to "/".
-/// @return nullopt for any other scheme, a fragment (RFC 6455 section 3) or a malformed URL
+/// @return nullopt for any other scheme, a fragment (RFC 6455 section 3), a host or path holding
+/// a character RFC 3986 does not allow there, or another malformed URL
 std::optional<DialTarget> parse_ws_url(std::string_view url);
 
 /// @brief A dial's outcome: the connection, not started, or why the dial failed

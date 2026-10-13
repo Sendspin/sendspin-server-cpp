@@ -95,9 +95,16 @@ bool is_valid_path(std::string_view path, size_t max_bytes) {
 }
 
 std::optional<DiscoveredClient> validated(const DiscoveredClient& client) {
+    // The host goes into the upgrade request's Host header
+    constexpr char FIRST_PRINTABLE = '!';
+    constexpr char DELETE = '\x7F';
+    const bool host_printable = std::all_of(client.host.begin(), client.host.end(), [](char c) {
+        return static_cast<unsigned char>(c) >= FIRST_PRINTABLE && c != DELETE;
+    });
     if (client.instance.empty() || client.instance.size() > discovery_limits::MAX_NAME_BYTES ||
-        client.host.size() > discovery_limits::MAX_NAME_BYTES || client.addresses.empty() ||
-        client.port == 0 || !is_valid_path(client.path, MAX_TXT_VALUE_BYTES) ||
+        client.host.size() > discovery_limits::MAX_NAME_BYTES || !host_printable ||
+        client.addresses.empty() || client.port == 0 ||
+        !is_valid_path(client.path, MAX_TXT_VALUE_BYTES) ||
         (client.name && client.name->size() > MAX_TXT_VALUE_BYTES)) {
         return std::nullopt;
     }
