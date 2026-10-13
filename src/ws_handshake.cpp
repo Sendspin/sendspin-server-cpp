@@ -177,6 +177,20 @@ bool lists_token(std::string_view list, std::string_view token) {
     }
 }
 
+/// Whether text, lines each ending in CRLF, holds no other CR or LF and no NUL: RFC 9112 section
+/// 2.2 (a bare CR is invalid) and RFC 9110 section 5.5 (a field value with CR, LF or NUL is)
+bool only_crlf_line_ends(std::string_view text) {
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        const bool line_end = (c == '\r' && i + 1 < text.size() && text[i + 1] == '\n') ||
+                              (c == '\n' && i > 0 && text[i - 1] == '\r');
+        if (c == '\0' || ((c == '\r' || c == '\n') && !line_end)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// "HTTP/1.1 101", then a reason phrase or nothing
 bool switching_protocols(std::string_view status_line) {
     constexpr std::string_view STATUS = "HTTP/1.1 101";
@@ -237,7 +251,7 @@ WsUpgradeCheck check_upgrade_response(std::string_view received, std::string_vie
     // The status line and each header line, each ending in CRLF
     std::string_view lines = received.substr(0, blank + CRLF.size());
     size_t end = lines.find(CRLF);
-    if (!switching_protocols(lines.substr(0, end))) {
+    if (!only_crlf_line_ends(lines) || !switching_protocols(lines.substr(0, end))) {
         return check;
     }
     lines.remove_prefix(end + CRLF.size());
