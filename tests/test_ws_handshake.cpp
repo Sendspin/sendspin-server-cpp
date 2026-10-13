@@ -125,6 +125,14 @@ TEST(WsHandshake, ChecksTheResponse) {
          "sec-websocket-accept:  " +
              std::string(SAMPLE_ACCEPT) + " \r\nServer: test\r\n\r\n",
          WsUpgradeStatus::ACCEPTED, 0},
+        {"Control: Connection on two lines, Upgrade first",
+         ok_status + "Upgrade: websocket\r\nConnection: Upgrade\r\nConnection: keep-alive\r\n" +
+             accept + "\r\n",
+         WsUpgradeStatus::ACCEPTED, 0},
+        {"Control: Connection on two lines, Upgrade last",
+         ok_status + "Upgrade: websocket\r\nConnection: keep-alive\r\nConnection: Upgrade\r\n" +
+             accept + "\r\n",
+         WsUpgradeStatus::ACCEPTED, 0},
         {"Control: a response of WS_UPGRADE_RESPONSE_MAX bytes, a frame after it",
          longest + "\x82\x01z", WsUpgradeStatus::ACCEPTED, longest.size()},
         {"no blank line yet", ok_status + ok_headers, WsUpgradeStatus::INCOMPLETE, 0},
