@@ -44,13 +44,16 @@ int32_t live_slew_ppm(LiveLowering& lowering, uint64_t frames, uint32_t rate, in
                       int64_t now_us, int64_t group_lead_next_us) {
     const int64_t debt =
         observe_live_write(lowering, head_us - now_us - group_lead_next_us, now_us);
-    const auto write_us = static_cast<int64_t>(frames) * US_PER_SECOND / rate;
-    if (debt <= 0 || write_us == 0) {
+    // Dropped frames carry a part frame from write to write, so a write may drop up to a frame more
+    // than its rate's share: the rate leaves a frame of the debt unpaid, and the lead never falls
+    // below `G_next`
+    const int64_t frame_us = (US_PER_SECOND + rate - 1) / rate;
+    const int64_t write_us = ((static_cast<int64_t>(frames) * US_PER_SECOND) + rate - 1) / rate;
+    if (debt <= frame_us || write_us == 0) {
         return 0;
     }
-    // Never faster than takes out what is owed, so the lead falls below `G_next` by no more than
-    // the part frame a frame drop carries
-    return static_cast<int32_t>(std::min(LOWERING_SLEW_PPM, debt * US_PER_SECOND / write_us));
+    return static_cast<int32_t>(
+        std::min(LOWERING_SLEW_PPM, (debt - frame_us) * US_PER_SECOND / write_us));
 }
 
 int64_t record_slew(LiveLowering& lowering, int64_t slewed_us, int64_t group_lead_next_us,

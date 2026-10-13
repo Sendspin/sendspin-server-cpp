@@ -401,8 +401,9 @@ public:
     ///
     /// The source's audio plays a fixed latency after its capture: the group's lead past its
     /// arrival when its run starts, or options' least latency where higher, held there by
-    /// correcting the source's clock against the server's once the two measurably drift, and
-    /// raised or lowered as for any live input, never below that least latency. Its
+    /// correcting the source's clock against the server's once the two measurably drift (for a
+    /// source clock within 500 ppm of the server's), and raised or lowered as for any live input,
+    /// never below that least latency. Its
     /// capture times also drop a chunk that arrives later than the write jitter allows, the
     /// backlog of a stall, and end the input's run at a gap of a second or more, and at the end
     /// of the source's stream, so its next audio starts a new run. A device that is a player too

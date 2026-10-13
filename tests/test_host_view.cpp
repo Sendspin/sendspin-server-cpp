@@ -250,7 +250,8 @@ TEST_F(HostViewTest, PlaysALiveInputFastWhileItOwesLatency) {
         {"Control: nothing owed stages the write as it came", 200000, 0, 0, ANCHOR, 0},
         {"Owing more than the write's share plays at the slew rate", 200000, 0, 1000000, ANCHOR,
          WRITE_US * LOWERING_SLEW_PPM / 1000000},
-        {"Owing less plays only that out", 200000, 0, 100, ANCHOR, 100},
+        // All but a frame of it, for the part frame a frame drop carries: 80 us, 40 ppm
+        {"Owing less plays only that out", 200000, 0, 101, ANCHOR, 101 - FRAME_US},
         {"G_eff stops at G_next", 50, 0, 1000000, ANCHOR, WRITE_US * LOWERING_SLEW_PPM / 1000000},
         {"G_eff stops at the least lead", 200000, LEAD_US - 50, 1000000, ANCHOR,
          WRITE_US * LOWERING_SLEW_PPM / 1000000},

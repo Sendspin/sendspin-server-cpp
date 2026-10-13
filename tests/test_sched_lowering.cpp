@@ -38,6 +38,8 @@ using sendspin::server::sched::record_slew;
 constexpr int64_t WINDOW = LOWERING_WINDOW_US;
 constexpr int64_t MIN = LOWERING_MIN_US;
 constexpr uint32_t RATE = 48000;
+/// A frame at RATE, rounded up
+constexpr int64_t FRAME_US = (1000000 + RATE - 1) / RATE;
 
 /// The slew took slewed_us out; `G_eff` is not what these tests look at
 void slew(LiveLowering& lowering, int64_t slewed_us) {
@@ -147,8 +149,9 @@ TEST(LiveLowering, EndsWhatAWritesOwnExcessNoLongerHolds) {
     EXPECT_EQ(observe_live_write(steady, 400000, WINDOW + 10000), 400000);
 }
 
-// A write owing latency plays LOWERING_SLEW_PPM fast, or slower where that would take out more
-// than it owes; its excess is measured against `G_next` from where its head lands
+// A write owing latency plays LOWERING_SLEW_PPM fast, or slower where that could take out more
+// than it owes, a frame of the debt left for the part frame a frame drop carries; its excess is
+// measured against `G_next` from where its head lands
 TEST(LiveLowering, PlaysAWriteFastAtMostAtTheSlewRate) {
     constexpr int64_t NOW = 5 * WINDOW;
     constexpr int64_t LEAD = 150000;
@@ -164,9 +167,12 @@ TEST(LiveLowering, PlaysAWriteFastAtMostAtTheSlewRate) {
         {"Control: nothing owed plays at the rate it came", 0, RATE / 50, 200000, 0},
         {"A large debt plays at the slew rate", 200000, RATE / 50, 200000,
          static_cast<int32_t>(LOWERING_SLEW_PPM)},
-        // 20 ms at 100 ppm takes out the 2 us owed
-        {"A debt short of the rate's share plays only it out", 2, RATE / 50, 200000, 100},
-        {"A write's own excess caps the debt it plays out", 200000, RATE / 50, 2, 100},
+        // 20 ms at 100 ppm takes out 2 us of the 23 owed, leaving a 21 us frame for the part frame
+        // a frame drop carries
+        {"A debt short of the rate's share plays it out less a frame", 23, RATE / 50, 200000, 100},
+        {"A write's own excess caps the debt it plays out", 200000, RATE / 50, 23, 100},
+        {"A debt of a frame plays nothing out", 21, RATE / 50, 200000, 0},
+        {"Nor does a debt of less", 10, RATE / 50, 200000, 0},
         {"No frames play nothing out", 200000, 0, 200000, 0},
     };
     for (const SlewRow& row : rows) {
@@ -205,9 +211,9 @@ TEST(LiveLowering, LowersGEffByWhatTheSlewTookOut) {
 }
 
 // Twenty minutes of 20 ms writes on time, their lead 250 ms past `G_next` after a high-lead member
-// left: the slew takes out each write's share at the slew rate until the excess is gone, `G_eff`
-// following the lead down to `G_next` and staying at or above it, the lead never below `G_next`.
-// A joiner raising `G_next` mid-slew ends what its raise covers, and the slew ends sooner.
+// left: the slew takes out each write's share at the slew rate until all but a frame of the excess
+// is gone, `G_eff` following the lead down and staying at or above `G_next`, the lead never below
+// it. A joiner raising `G_next` mid-slew ends what its raise covers, and the slew ends sooner.
 TEST(LiveLowering, SlewsAnExcessAwayAtTheRateWithGEffFollowing) {
     constexpr int64_t WRITE_US = 20000;
     constexpr auto FRAMES = static_cast<uint64_t>(RATE * WRITE_US / 1000000);
@@ -248,15 +254,16 @@ TEST(LiveLowering, SlewsAnExcessAwayAtTheRateWithGEffFollowing) {
             if (lead_eff > next) {
                 ASSERT_EQ(lead_eff, lead) << now;
             }
-            if (done_at < 0 && lowering.debt_us == 0 && lead - next < MIN) {
+            // Paid but for the frame the rate leaves
+            if (done_at < 0 && lowering.debt_us <= FRAME_US && lead - next < MIN) {
                 done_at = now;
             }
         }
-        // All the excess the raise left, at the rate: 250 ms at 300 ppm takes about 833 s, and
-        // the 50 ms a 200 ms raise leaves about 167 s, after the first window's wait
-        EXPECT_LT(lead - next, 1000) << lead;
-        EXPECT_EQ(lead_eff, next);
-        const int64_t slew_us = (EXCESS - raise) * 1000000 / LOWERING_SLEW_PPM;
+        // All the excess the raise left but a frame, at the rate: 250 ms at 300 ppm takes about
+        // 833 s, and the 50 ms a 200 ms raise leaves about 167 s, after the first window's wait
+        EXPECT_LE(lead - next, FRAME_US) << lead;
+        EXPECT_EQ(lead_eff, lead);
+        const int64_t slew_us = (EXCESS - raise - FRAME_US) * 1000000 / LOWERING_SLEW_PPM;
         EXPECT_GE(done_at, slew_us) << done_at;
         EXPECT_LE(done_at, slew_us + (2 * WINDOW)) << done_at;
     }

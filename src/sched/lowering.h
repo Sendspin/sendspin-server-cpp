@@ -51,15 +51,14 @@ int64_t observe_live_write(LiveLowering& lowering, int64_t excess_us, int64_t no
 
 /// @brief One playing live write of frames admitted frames at rate, its head landing at head_us:
 /// observes its excess against `G_next` (observe_live_write()), then the rate to play the write
-/// fast at: LOWERING_SLEW_PPM, or less where that would take out more than the debt
-/// @return in ppm; 0 while nothing is owed
+/// fast at: LOWERING_SLEW_PPM, or less where that could take out more than the debt
+/// @return in ppm; 0 while a frame or less is owed
 int32_t live_slew_ppm(LiveLowering& lowering, uint64_t frames, uint32_t rate, int64_t head_us,
                       int64_t now_us, int64_t group_lead_next_us);
 
 /// @brief A write played fast took slewed_us out of the timeline: the debt falls by it, and `G_eff`
 /// follows the input's lead down by as much, never below `G_next`, so the lead keeps its distance
-/// from the stall rebase's threshold and admission's horizon. Dropped frames carry a part frame
-/// from write to write, so the lead may end up to a frame below `G_next`.
+/// from the stall rebase's threshold and admission's horizon
 /// @return `G_eff` after it
 int64_t record_slew(LiveLowering& lowering, int64_t slewed_us, int64_t group_lead_next_us,
                     int64_t group_lead_eff_us);
