@@ -14,7 +14,7 @@
 
 /// @file test_timer.cpp
 /// @brief Timer and Wakeup on an EventLoop run from the test thread. Every deadline is already
-/// past, so io.poll() runs the completions.
+/// past; a test that expects a timer's call runs the loop until it is made.
 
 #include "clock.h"
 #include "transport.h"
@@ -39,13 +39,24 @@ protected:
     EventLoop loop;
     boost::asio::io_context& io{loop.impl().io()};
     std::vector<char> calls;
+
+    /// Runs handlers until `count` calls were made, then every handler already ready, so a
+    /// stray call after them shows too. A due timer's completion is ready only once the
+    /// reactor has collected its expiry, which a single poll() may not do; a missing call
+    /// hangs into the suite watchdog
+    void run_until_called(std::size_t count) {
+        while (this->calls.size() < count) {
+            this->io.run_one();
+        }
+        this->io.poll();
+    }
 };
 
 TEST_F(TimerTest, ASecondStartReplacesTheFirst) {
     Timer timer(this->loop);
     timer.start(now_us(), [this] { this->calls.push_back('a'); });
     timer.start(now_us(), [this] { this->calls.push_back('b'); });
-    this->io.poll();
+    this->run_until_called(1);
     EXPECT_EQ(this->calls, std::vector<char>{'b'});
 }
 
@@ -70,7 +81,7 @@ TEST_F(TimerTest, ACompletionAlreadyDueIsDiscardedWhenReplaced) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
     second.start(now_us(), [this] { this->calls.push_back('a'); });
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    this->io.poll();
+    this->run_until_called(2);
     EXPECT_EQ(this->calls, (std::vector<char>{'1', 'b'}));
 }
 
