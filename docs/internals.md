@@ -14,7 +14,7 @@ How the parts of the server fit together: its threads, the channels between them
 | Artwork worker | Its job queue | Decodes, fits, letterboxes and encodes artwork images and derives an album image's palette (`ArtworkWorker`), so core never decodes or encodes an image |
 | Discovery | The `DiscoveryProvider`'s mDNS handles | Advertises `_sendspin-server._tcp`, browses `_sendspin._tcp` and resolves each instance; the built-in provider (`platform_discovery()`) runs dns_sd on macOS and avahi-client on Linux |
 
-Asio's resolver runs host name lookups for `connect_url()` on a thread of its own. A client found by browsing is dialed at the addresses its resolve reported, never through the resolver.
+Asio's resolver runs host name lookups for `connect_url()` on a thread of its own. A client found by browsing is dialed at the literal addresses its resolve reported, never through the resolver.
 
 ## Cross-thread channels
 

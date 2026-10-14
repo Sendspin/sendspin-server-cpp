@@ -275,8 +275,7 @@ struct DialTarget {
 /// encoded, so it is written encoded (`%2525` for index 25). A build without IPv6 refuses every
 /// bracketed host, and lwIP (ESP-IDF) an IPv4 tail unless the text has three or six colons, the
 /// last a single one. Any other host holds no percent-encoding. The port defaults to 80 and the
-/// path to
-/// "/".
+/// path to "/".
 /// @return nullopt for any other scheme, a fragment (RFC 6455 section 3), a host or path holding
 /// a character RFC 3986 does not allow there, or another malformed URL
 std::optional<DialTarget> parse_ws_url(std::string_view url);

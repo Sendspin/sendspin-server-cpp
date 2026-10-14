@@ -13,9 +13,9 @@
 // limitations under the License.
 
 /// @file url_text.h
-/// @brief The text a dial's host and a browsed address are checked against: RFC 3986 character
-/// classes, IPv4 and IPv6 address text and an RFC 6874 zone identifier, as pure functions with no
-/// platform parser, so every transport takes the same forms
+/// @brief The text a dial URL's bracketed host and a browsed address are checked against: RFC 3986
+/// character classes, IPv4 and IPv6 address text and an RFC 6874 zone identifier, as pure functions
+/// with no platform parser, so every transport takes the same forms
 
 #pragma once
 
@@ -23,6 +23,7 @@
 
 namespace sendspin::server {
 
+/// @brief RFC 3986 HEXDIG, in either case
 bool is_hex_digit(char c);
 
 /// @brief RFC 3986 section 2.3

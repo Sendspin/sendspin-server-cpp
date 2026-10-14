@@ -17,7 +17,6 @@
 #include "crypto/base64url.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cstring>
 #include <string>
 
@@ -196,7 +195,7 @@ bool only_crlf_line_ends(std::string_view text) {
 bool is_token(std::string_view name) {
     constexpr std::string_view TCHAR_SYMBOLS = "!#$%&'*+-.^_`|~";
     return !name.empty() && std::all_of(name.begin(), name.end(), [TCHAR_SYMBOLS](char c) {
-        return std::isalnum(static_cast<unsigned char>(c)) != 0 ||
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
                TCHAR_SYMBOLS.find(c) != std::string_view::npos;
     });
 }
@@ -212,11 +211,14 @@ bool is_field_value(std::string_view value) {
     });
 }
 
-/// "HTTP/1.1 101", then a reason phrase or nothing
+/// "HTTP/1.1 101", then a reason phrase or nothing; a reason phrase holds the characters a field
+/// value does (RFC 9112 section 4)
 bool switching_protocols(std::string_view status_line) {
     constexpr std::string_view STATUS = "HTTP/1.1 101";
     return status_line.starts_with(STATUS) &&
-           (status_line.size() == STATUS.size() || status_line[STATUS.size()] == ' ');
+           (status_line.size() == STATUS.size() ||
+            (status_line[STATUS.size()] == ' ' &&
+             is_field_value(status_line.substr(STATUS.size() + 1))));
 }
 
 }  // namespace
