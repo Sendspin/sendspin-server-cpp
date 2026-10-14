@@ -96,11 +96,15 @@ void FrameRing::skip_to(EpochId epoch, int64_t index, int64_t now_us) {
 }
 
 const Frame* FrameRing::at(EpochId epoch, int64_t index) const {
-    if (epoch != this->epoch_ || index < this->base_ || index >= this->next_expected() ||
-        (index - this->base_) % this->cells_ != 0) {
+    if (epoch != this->epoch_ || index < this->base_ || index >= this->next_expected()) {
         return nullptr;
     }
-    return &this->frames_[static_cast<size_t>((index - this->base_) / this->cells_)];
+    // The bounded ring span fits size_t, avoiding software int64_t division on 32-bit targets
+    const auto offset = static_cast<size_t>(index - this->base_);
+    if (offset % this->cells_ != 0) {
+        return nullptr;
+    }
+    return &this->frames_[offset / this->cells_];
 }
 
 void prepare_cursor(Cursor& cursor, const FrameRing& ring, EpochId epoch, int64_t output_delay_us,
