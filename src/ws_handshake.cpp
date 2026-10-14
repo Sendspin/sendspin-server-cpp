@@ -17,6 +17,7 @@
 #include "crypto/base64url.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <string>
 
@@ -191,6 +192,26 @@ bool only_crlf_line_ends(std::string_view text) {
     return true;
 }
 
+/// Whether a field name is a token (RFC 9110 sections 5.1 and 5.6.2)
+bool is_token(std::string_view name) {
+    constexpr std::string_view TCHAR_SYMBOLS = "!#$%&'*+-.^_`|~";
+    return !name.empty() && std::all_of(name.begin(), name.end(), [TCHAR_SYMBOLS](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) != 0 ||
+               TCHAR_SYMBOLS.find(c) != std::string_view::npos;
+    });
+}
+
+/// Whether a field value holds only SP, HTAB, visible characters and obs-text (RFC 9110 section
+/// 5.5)
+bool is_field_value(std::string_view value) {
+    constexpr unsigned char FIRST_VISIBLE = 0x21;
+    constexpr unsigned char DELETE = 0x7F;
+    return std::all_of(value.begin(), value.end(), [](char c) {
+        const auto byte = static_cast<unsigned char>(c);
+        return c == ' ' || c == '\t' || (byte >= FIRST_VISIBLE && byte != DELETE);
+    });
+}
+
 /// "HTTP/1.1 101", then a reason phrase or nothing
 bool switching_protocols(std::string_view status_line) {
     constexpr std::string_view STATUS = "HTTP/1.1 101";
@@ -268,11 +289,13 @@ WsUpgradeCheck check_upgrade_response(std::string_view received, std::string_vie
             return check;
         }
         const std::string_view name = line.substr(0, colon);
-        // RFC 9110 section 5.1: no whitespace between a field's name and its colon
-        if (name.back() == ' ' || name.back() == '\t') {
+        const std::string_view raw_value = line.substr(colon + 1);
+        // Every field well formed, the ones read and the ones ignored alike; a token holds no
+        // whitespace, so none can stand before the colon (RFC 9112 section 5.1)
+        if (!is_token(name) || !is_field_value(raw_value)) {
             return check;
         }
-        const std::string_view value = trimmed(line.substr(colon + 1));
+        const std::string_view value = trimmed(raw_value);
         if (equals_ignoring_case(name, "Upgrade")) {
             // RFC 6455 section 4.1 step 2: one line, exactly the token
             if (upgrade || !equals_ignoring_case(value, "websocket")) {

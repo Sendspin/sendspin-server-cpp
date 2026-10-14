@@ -133,6 +133,12 @@ TEST(WsHandshake, ChecksTheResponse) {
          ok_status + "Upgrade: websocket\r\nConnection: keep-alive\r\nConnection: Upgrade\r\n" +
              accept + "\r\n",
          WsUpgradeStatus::ACCEPTED, 0},
+        {"Control: an ignored field's value with a tab and obs-text",
+         ok_status +
+             "X-Test:\ta\xE9"
+             "b\t\r\n" +
+             ok_headers + "\r\n",
+         WsUpgradeStatus::ACCEPTED, 0},
         {"Control: a response of WS_UPGRADE_RESPONSE_MAX bytes, a frame after it",
          longest + "\x82\x01z", WsUpgradeStatus::ACCEPTED, longest.size()},
         {"no blank line yet", ok_status + ok_headers, WsUpgradeStatus::INCOMPLETE, 0},
@@ -167,6 +173,22 @@ TEST(WsHandshake, ChecksTheResponse) {
          WsUpgradeStatus::REJECTED, 0},
         {"whitespace before a field's colon",
          ok_status + "Upgrade : h2c\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" + accept +
+             "\r\n",
+         WsUpgradeStatus::REJECTED, 0},
+        {"a field name holding a space",
+         ok_status + "Bad Name: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" + accept +
+             "\r\n",
+         WsUpgradeStatus::REJECTED, 0},
+        {"a field name holding '@'",
+         ok_status + "Bad@Name: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" + accept +
+             "\r\n",
+         WsUpgradeStatus::REJECTED, 0},
+        {"an ignored field's value holding a control character",
+         ok_status + "X-Test: a\x01z\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" + accept +
+             "\r\n",
+         WsUpgradeStatus::REJECTED, 0},
+        {"an ignored field's value holding DEL",
+         ok_status + "X-Test: a\x7Fz\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" + accept +
              "\r\n",
          WsUpgradeStatus::REJECTED, 0},
         {"Upgrade as a list",
