@@ -99,8 +99,7 @@ const Frame* FrameRing::at(EpochId epoch, int64_t index) const {
     if (epoch != this->epoch_ || index < this->base_ || index >= this->next_expected()) {
         return nullptr;
     }
-    // Within the ring, so the offset fits a size_t: a 32-bit target divides it in hardware, where
-    // an int64_t division is a library call
+    // The bounded ring span fits size_t, avoiding software int64_t division on 32-bit targets
     const auto offset = static_cast<size_t>(index - this->base_);
     if (offset % this->cells_ != 0) {
         return nullptr;
