@@ -103,10 +103,13 @@ std::optional<DiscoveredClient> validated(const DiscoveredClient& client) {
     const bool host_printable = std::all_of(client.host.begin(), client.host.end(), [](char c) {
         return static_cast<unsigned char>(c) >= FIRST_PRINTABLE && c != DELETE;
     });
-    // The root name: nothing is left once the dial drops a host's final dot
-    const bool root = client.host == ".";
+    // A name of dots only leaves no host or only dots once the dial drops its final dot, and a
+    // ':' would be bracketed as an IPv6 literal; a DNS name holds neither (RFC 1035 section 2.3.1)
+    const bool dots_only =
+        !client.host.empty() && client.host.find_first_not_of('.') == std::string::npos;
+    const bool host_name = !dots_only && client.host.find(':') == std::string::npos;
     if (client.instance.empty() || client.instance.size() > discovery_limits::MAX_NAME_BYTES ||
-        client.host.size() > discovery_limits::MAX_NAME_BYTES || !host_printable || root ||
+        client.host.size() > discovery_limits::MAX_NAME_BYTES || !host_printable || !host_name ||
         client.port == 0 || !is_valid_path(client.path, MAX_TXT_VALUE_BYTES) ||
         (client.name && client.name->size() > MAX_TXT_VALUE_BYTES)) {
         return std::nullopt;

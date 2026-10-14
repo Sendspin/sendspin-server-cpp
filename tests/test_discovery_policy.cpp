@@ -192,6 +192,8 @@ TEST(DiscoveryValues, KeepsOnlyValidBrowseResults) {
         // The dial's addresses, the first of them the Host header's for no host
         {"Control: no host", [](DiscoveredClient& c) { c.host.clear(); }, true},
         {"the root as the host", [](DiscoveredClient& c) { c.host = "."; }, false},
+        {"a host of dots only", [](DiscoveredClient& c) { c.host = ".."; }, false},
+        {"a host holding ':'", [](DiscoveredClient& c) { c.host = "fe80::1"; }, false},
         {"Control: IPv4 and IPv6 with a zone",
          [](DiscoveredClient& c) { c.addresses = {"192.0.2.7", "fe80::1%en0"}; }, true},
         {"an address with a line break",
