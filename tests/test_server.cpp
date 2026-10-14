@@ -35,6 +35,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <string>
 #include <thread>
 #include <vector>
@@ -87,9 +88,29 @@ TEST(ServerPersistence, CreatesAndSavesTheKeyOnFirstStartOrFails) {
          StartResult::PERSISTENCE_FAILED, 1, 0},
         {"commit refused", [](MemoryProvider& p) { p.refuse_commit = true; },
          StartResult::PERSISTENCE_FAILED, 1, 1},
+        // Holds a 0x00 byte and a 0xFF byte, so a check for any byte rather than every byte fails
+        {"Control: a stored key",
+         [](MemoryProvider& p) {
+             Bytes key(persistence_keys::SERVER_KEY_SIZE);
+             std::iota(key.begin(), key.end(), uint8_t{0});
+             key.back() = 0xFF;
+             p.blobs[persistence_keys::SERVER_KEY] = key;
+         },
+         StartResult::OK, 0, 0},
         // Never overwritten: a new key is a different server to every client
         {"a stored key of the wrong size",
          [](MemoryProvider& p) { p.blobs[persistence_keys::SERVER_KEY] = Bytes(31, 7); },
+         StartResult::PERSISTENCE_FAILED, 0, 0},
+        // An erased store's key: a fixed key anyone knows
+        {"a stored key of zeros",
+         [](MemoryProvider& p) {
+             p.blobs[persistence_keys::SERVER_KEY] = Bytes(persistence_keys::SERVER_KEY_SIZE, 0x00);
+         },
+         StartResult::PERSISTENCE_FAILED, 0, 0},
+        {"a stored key of 0xFF bytes",
+         [](MemoryProvider& p) {
+             p.blobs[persistence_keys::SERVER_KEY] = Bytes(persistence_keys::SERVER_KEY_SIZE, 0xFF);
+         },
          StartResult::PERSISTENCE_FAILED, 0, 0},
     };
     for (const Row& row : rows) {

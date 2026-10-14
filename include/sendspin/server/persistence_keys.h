@@ -23,7 +23,8 @@
 namespace sendspin::server::persistence_keys {
 
 /// @brief The server's static X25519 private key, raw. The server_id derives from it, so clients
-/// pair with it: keep it in the host's backup set.
+/// pair with it: keep it in the host's backup set. start() fails rather than replace a blob of
+/// another size, or of all zeros or all 0xFF bytes, as an erased store reads.
 inline constexpr const char* SERVER_KEY = "server_key";
 inline constexpr size_t SERVER_KEY_SIZE = 32;
 
