@@ -1,0 +1,6 @@
+# The component's registry dependencies (cmake/esp_idf.cmake), at the versions CI builds with;
+# esphome/noise-c brings esphome/libsodium
+dependencies:
+  idf: ">=5.5"
+  esphome/noise-c: "0.1.31"
+  espressif/esp-dsp: "1.8.2"
