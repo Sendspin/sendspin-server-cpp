@@ -752,7 +752,10 @@ private:
     void write_frame(size_t index, size_t offset, size_t frames) {
         const Connection::Impl::BatchFrame frame = this->core_->batch_frames_[index];
         this->ws_.text(frame.kind == MessageKind::TEXT);
-        this->start_io();
+        // The stall deadline covers the whole write, as on ESP-IDF
+        if (index == 0) {
+            this->start_io();
+        }
         this->ws_.async_write(
             asio::buffer(this->core_->write_buffer_.data() + offset, frame.bytes),
             [self = this->shared_from_this(), next = index + 1, end = offset + frame.bytes, frames](
