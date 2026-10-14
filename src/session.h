@@ -108,6 +108,9 @@ enum class SessionEnd : uint8_t {
 struct OutboundMessage {
     MessageKind kind{MessageKind::TEXT};
     std::vector<uint8_t> bytes;
+    /// A server/time: the last message of its write, so no message is built between its stamp and
+    /// its write
+    bool time_reply{false};
 };
 
 /// @brief Receives the plaintext of every WebSocket message a session takes in or yields

@@ -1397,7 +1397,7 @@ TEST(ServerRolesInProcess, ControllerAndMetadataReachASendspinCppClient) {
 // Message trace (ServerConfig::trace_writes)
 // ==============================================================================
 
-// ServerConfig::trace_writes: the completed write of each outbound message is traced after it, and
+// ServerConfig::trace_writes: each completed write is traced after the messages it carried, and
 // a server/time's comes before a client/time the client sent once it had read that reply, which is
 // what lets a host place what it received against what was on the wire; without the option the
 // trace has no such entry
@@ -1471,7 +1471,8 @@ TEST(ServerTrace, TracesCompletedWritesOnlyWhenAsked) {
             EXPECT_EQ(writes, 0U);
             continue;
         }
-        // The write invariant: no outbound message is taken between the reply and its write
+        // A time reply ends its write: no outbound message is taken between the reply and its
+        // write
         ASSERT_NE(reply_written, seen.end());
         EXPECT_TRUE(std::none_of(reply + 1, reply_written,
                                  [](const Seen& entry) { return !entry.inbound; }));

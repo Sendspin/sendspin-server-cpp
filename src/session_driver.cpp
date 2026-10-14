@@ -66,9 +66,18 @@ void SessionDriver::on_message(MessageKind kind, std::span<const uint8_t> payloa
 
 void SessionDriver::on_writable() {
     this->waiting_ = false;
-    std::optional<OutboundMessage> message = this->session_.take_message();
-    if (message) {
-        this->writing_ = this->connection_.write(message->kind, message->bytes);
+    // Every message ready now, in select_next() order, while the write takes them
+    while (this->connection_.can_write()) {
+        std::optional<OutboundMessage> message = this->session_.take_message();
+        if (!message) {
+            break;
+        }
+        if (this->connection_.write(message->kind, message->bytes)) {
+            this->writing_ = true;
+        }
+        if (message->time_reply) {
+            break;
+        }
     }
     this->pump();
 }

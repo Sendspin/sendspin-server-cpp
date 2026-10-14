@@ -52,6 +52,10 @@ public:
 
     void start(ConnectionHandler& handler);
     bool wait_writable();
+    bool can_write() const {
+        return !this->closed_ && this->room_ &&
+               write_batch_has_room(this->batch_count_, this->batch_bytes_);
+    }
     bool write(MessageKind kind, std::span<const uint8_t> payload);
     void close(uint16_t code);
 
@@ -69,6 +73,8 @@ private:
     void on_wake();
     void on_message(MessageKind kind, std::span<const uint8_t> payload, int64_t rx_us);
     void on_wait();
+    /// Starts the write of the messages on_writable() took, unless it took none or closed
+    void start_write();
     void on_write();
     void on_closed(CloseReason reason);
     void fail(CloseReason reason);
@@ -111,7 +117,11 @@ private:
     bool closed_{false};
     bool wait_in_flight_{false};
     bool write_in_flight_{false};
-    // True only while on_writable() runs and nothing has consumed the room
+    // The messages staged in the link for the write being built or in flight, and their bytes; 0
+    // once it completes
+    size_t batch_count_{0};
+    size_t batch_bytes_{0};
+    // True only while on_writable() runs
     bool room_{false};
 };
 

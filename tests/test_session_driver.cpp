@@ -16,8 +16,9 @@
 /// @brief SessionDriver over loopback: the server dials a sendspin-cpp client through the hello
 /// exchange, a raw Beast peer on its own thread sees server/error before the close (traced with its
 /// completed write) and a silent close on a timeout, and a goodbye that arrives while a write is in
-/// flight ends the session. White-box: reads SessionDriver::writing_ and the session's fragment
-/// progress (see tests/CMakeLists.txt).
+/// flight ends the session, and an active session's messages go out as many to a write as are
+/// ready, but for a time reply, which ends its write. White-box: reads SessionDriver::writing_ and
+/// the session's fragment progress (see tests/CMakeLists.txt).
 
 #include "backoff.h"
 #include "clock.h"
@@ -52,6 +53,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -141,9 +143,12 @@ public:
         this->events.emplace_back("in");
     }
 
-    void on_outbound(sendspin::server::MessageKind /*kind*/, std::span<const uint8_t> /*plaintext*/,
+    void on_outbound(sendspin::server::MessageKind /*kind*/, std::span<const uint8_t> plaintext,
                      int64_t stamp_us, size_t /*audio_bytes*/) override {
-        this->events.emplace_back("out");
+        const std::string_view text(reinterpret_cast<const char*>(plaintext.data()),
+                                    plaintext.size());
+        this->events.emplace_back(
+            text.find(R"("type":"server/time")") != std::string_view::npos ? "out time" : "out");
         this->last_out_us = stamp_us;
     }
 
@@ -325,6 +330,174 @@ TEST_F(SessionDriverTest, CompletesTheHelloExchangeWithASendspinCppClient) {
     EXPECT_TRUE(hello.unrecognized_identifiers.empty());
 
     client.stop();
+}
+
+// A driver the server dials to a RawClient, run on a core thread of its own, through an activation
+// with no roles. on_core() runs a step on the core thread and waits for it.
+class ActiveDriver {
+public:
+    class Observer : public SessionObserver {
+    public:
+        void on_ready(SessionDriver& /*driver*/) override {
+            this->ready = true;
+        }
+
+        void on_closed(SessionDriver& /*driver*/) override {}
+
+        bool ready{false};
+    };
+
+    explicit ActiveDriver(SessionSettings settings) : settings_(std::move(settings)) {
+        this->core_thread_ = std::thread([this] { this->loop_.run(); });
+    }
+
+    ~ActiveDriver() {
+        this->loop_.post([this] {
+            this->driver_.reset();
+            this->pending_.reset();
+            this->loop_.shutdown(0);
+        });
+        this->core_thread_.join();
+    }
+
+    ActiveDriver(const ActiveDriver&) = delete;
+    ActiveDriver& operator=(const ActiveDriver&) = delete;
+
+    template <typename Fn>
+    auto on_core(Fn fn) {
+        std::packaged_task<decltype(fn())()> task(std::move(fn));
+        auto result = task.get_future();
+        this->loop_.post([&task] { task(); });
+        return result.get();
+    }
+
+    // Dials, completes the handshake and hello exchange, and activates
+    void activate() {
+        this->on_core([this] {
+            this->pending_.emplace(sendspin::server::dial(
+                this->loop_, *sendspin::server::parse_ws_url(this->client.url()),
+                sendspin::server::TransportSettings{}, [this](sendspin::server::DialResult result) {
+                    this->driver_ = std::make_unique<SessionDriver>(
+                        this->loop_, std::move(std::get<Connection>(result)), this->identity_,
+                        this->settings_, this->observer_, &this->trace);
+                    this->driver_->start();
+                }));
+        });
+        this->client.handshake();
+        this->client.send_json(sendspin::server::test::client_hello_json());
+        while (!this->on_core([this] { return this->observer_.ready; })) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        this->on_core([this] {
+            this->driver_->activate(
+                sendspin::server::ServerActivate{false, std::vector<std::string>{}, std::nullopt});
+        });
+        const std::string activation = this->client.receive_json();
+        ASSERT_NE(activation.find("server/activate"), std::string::npos) << activation;
+        // Until the activation's write has completed and nothing more is ready
+        while (!this->on_core([this] {
+            return !this->driver_->writing_ && !this->driver_->waiting_ &&
+                   !this->driver_->session().has_message();
+        })) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    // Queues each JSON message, then pumps
+    void queue(const std::vector<std::string>& messages) {
+        this->on_core([&] {
+            for (const std::string& json : messages) {
+                ASSERT_TRUE(this->driver_->session().queue_json(json));
+            }
+            this->driver_->pump();
+        });
+    }
+
+    // The trace's events from index on, once there are at least count of them
+    std::vector<std::string> events_from(size_t index, size_t count) {
+        for (;;) {
+            std::vector<std::string> events = this->on_core([this] { return this->trace.events; });
+            if (events.size() >= index + count) {
+                return {events.begin() + static_cast<std::ptrdiff_t>(index), events.end()};
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    size_t event_count() {
+        return this->on_core([this] { return this->trace.events.size(); });
+    }
+
+    sendspin::server::test::RawClient client;
+    // Core thread only
+    OrderTrace trace;
+
+private:
+    sendspin::server::EventLoop loop_;
+    const Identity identity_{*Identity::generate()};
+    const SessionSettings settings_;
+    Observer observer_;
+    std::unique_ptr<SessionDriver> driver_;
+    std::optional<sendspin::server::PendingDial> pending_;
+    std::thread core_thread_;
+};
+
+std::vector<std::string> numbered_messages(size_t count) {
+    std::vector<std::string> messages;
+    for (size_t i = 0; i < count; ++i) {
+        messages.push_back(R"({"type":"test/numbered","payload":{"n":)" + std::to_string(i) + "}}");
+    }
+    return messages;
+}
+
+// Messages ready together go out in one write, each encrypted as a message of its own, which the
+// client decrypts in order
+TEST(SessionDriverWrites, AWriteCarriesEveryMessageReadyAsItStarts) {
+    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
+    ActiveDriver active{SessionSettings{}};
+    ASSERT_NO_FATAL_FAILURE(active.activate());
+    const size_t before = active.event_count();
+    const std::vector<std::string> messages = numbered_messages(4);
+    active.queue(messages);
+    for (const std::string& expected : messages) {
+        EXPECT_EQ(active.client.receive_json(), expected);
+    }
+
+    const std::vector<std::string> one_write = {"out", "out", "out", "out", "written"};
+    EXPECT_EQ(active.events_from(before, one_write.size()), one_write);
+}
+
+// messaging.md "Transmit timestamps": a time reply ends its write, so no message is built between
+// its stamp and its write, while the messages ready beside it follow in the next write. The reply
+// is taken with them ready: the client sends its request while a message larger than the socket
+// buffers keeps the server writing, and reads only after.
+TEST(SessionDriverWrites, ATimeReplyEndsItsWrite) {
+    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
+    constexpr size_t BIG_BYTES = size_t{16} * 1024 * 1024;
+    SessionSettings settings;
+    settings.queue_caps.control_bytes = 2 * BIG_BYTES;
+    ActiveDriver active{settings};
+    active.client.fix_receive_buffer(16384);
+    ASSERT_NO_FATAL_FAILURE(active.activate());
+    const size_t before = active.event_count();
+    std::vector<std::string> messages{R"({"type":"test/big","payload":")" +
+                                      std::string(BIG_BYTES, 'b') + R"("})"};
+    const std::vector<std::string> numbered = numbered_messages(4);
+    messages.insert(messages.end(), numbered.begin(), numbered.end());
+    active.queue(messages);
+    active.client.send_json(sendspin::server::test::client_time_json(1));
+    EXPECT_NE(active.client.receive_until("server/time"), "");
+    for (const std::string& expected : numbered) {
+        EXPECT_EQ(active.client.receive_json(), expected);
+    }
+
+    const std::vector<std::string> events = active.events_from(before, 0);
+    const auto reply = std::find(events.begin(), events.end(), "out time");
+    ASSERT_NE(reply, events.end());
+    ASSERT_NE(reply + 1, events.end());
+    EXPECT_EQ(*(reply + 1), "written");
+    // The numbered messages, after the reply
+    EXPECT_EQ(std::count(reply, events.end(), "out"), 4);
 }
 
 // messaging.md "client/goodbye": a goodbye that arrives while a write is stalled, from a client

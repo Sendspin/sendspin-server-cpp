@@ -88,11 +88,15 @@ add_executable(sendspin_server_cpp_tests
     test_timing_stats.cpp
     test_transport.cpp
     test_trust_policy.cpp
+    test_url_text.cpp
     test_visualizer.cpp
     test_visualizer_stream.cpp
     test_wav_reader.cpp
     test_web_commands.cpp
     test_web_ui.cpp
+    test_ws_batch.cpp
+    test_ws_frame.cpp
+    test_ws_handshake.cpp
     # server_cli's file readers, feeders, --one-group, timing figures and --web dashboard, tested
     # beside the library
     ${PROJECT_SOURCE_DIR}/examples/server_cli/audio_source.cpp
@@ -155,7 +159,8 @@ set_source_files_properties(test_group_audio.cpp PROPERTIES COMPILE_OPTIONS -fno
 # one that refuses on the group audio thread, to show core's handling of a pipeline failure.
 # test_session_driver.cpp reads SessionDriver::writing_ and waiting_ and the session's fragment
 # progress to send a goodbye while a write is stalled, and writing_ again at the close to tell
-# which end closed, states nothing else shows.
+# which end closed, states nothing else shows; ActiveDriver::activate() reads writing_ and waiting_
+# to wait until the activation's write has completed, which the client cannot see.
 # test_server_trust.cpp sets ServerCore::pairing_psks_, the state an operator-started Pairing PSK
 # pairing sets, calls ServerCore::rekey() and handshake_psk(), which pairing drives, and reads
 # ServerCore::records_ for a record, which no listener call carries.

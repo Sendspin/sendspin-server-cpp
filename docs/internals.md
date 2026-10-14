@@ -14,7 +14,7 @@ How the parts of the server fit together: its threads, the channels between them
 | Artwork worker | Its job queue | Decodes, fits, letterboxes and encodes artwork images and derives an album image's palette (`ArtworkWorker`), so core never decodes or encodes an image |
 | Discovery | The `DiscoveryProvider`'s mDNS handles | Advertises `_sendspin-server._tcp`, browses `_sendspin._tcp` and resolves each instance; the built-in provider (`platform_discovery()`) runs dns_sd on macOS and avahi-client on Linux |
 
-Asio's resolver runs host name lookups for `connect_url()` on a thread of its own. A client found by browsing is dialed at the addresses its resolve reported, never through the resolver.
+Asio's resolver runs host name lookups for `connect_url()` on a thread of its own. A client found by browsing is dialed at the literal addresses its resolve reported, never through the resolver.
 
 ## Cross-thread channels
 
@@ -102,7 +102,7 @@ The sink keeps each sample a fixed latency after its capture. The run's anchor s
 
 Receive: the network thread stamps a message when its last byte is read and pushes it into the inbound ring; core's drain delivers it to the driver. `Session` checks the phase, decrypts, traces the plaintext, reassembles fragments and dispatches.
 
-Send: after every event the driver runs its pump. With a message to send and no wait or write outstanding, it asks the transport for room. When room is reported, `Session::take_message()` selects through `sched::select_next()` (the rest of a fragmented message, then the time queue, then the control FIFO, then an aged artwork message, then the player and visualizer cursors by earliest deadline, then artwork), builds the message, reads the stamp, encrypts and returns it; the next wait starts only after the write completes. The transport closes a connection whose wait or write stays outstanding for the write-stall time; a send queue that passes its cap (`SendQueueCaps`) ends the session.
+Send: after every event the driver runs its pump. With a message to send and no wait or write outstanding, it asks the transport for room. When room is reported, the driver takes every message ready, while the write has room (`write_batch_has_room()`, `transport.h`): `Session::take_message()` selects through `sched::select_next()` (the rest of a fragmented message, then the time queue, then the control FIFO, then an aged artwork message, then the player and visualizer cursors by earliest deadline, then artwork), builds the message, reads the stamp, encrypts and returns it. A time reply ends the write, so no message is built between its stamp and its write. The messages go out as one write, each its own WebSocket frame: in one send on ESP-IDF (`WsBatch`), one after another on a host, where Beast's write lock, which its pongs and closing handshake share, holds one message at a time. The next wait starts only after the write completes. The transport closes a connection whose wait or write stays outstanding for the write-stall time; a send queue that passes its cap (`SendQueueCaps`) ends the session.
 
 ## The send-path core
 
@@ -125,7 +125,7 @@ Send: after every event the driver runs its pump. With a message to send and no 
 
 ## ESP-IDF
 
-On ESP-IDF the library is a component (`cmake/esp_idf.cmake`, sources from `cmake/sources.cmake`) built with the embedded resource profile, `src/profile.h`: smaller write-ahead, staging ring and connection caps, one group audio thread, a source's clock corrected and a live input's latency slewed by single-frame slips rather than the ASRC, and no Opus. The host runs its whole test suite with the same values (`-DSENDSPIN_SERVER_EMBEDDED_PROFILE=ON`). The transport is native (`src/esp/`): dials on esp_websocket_client, accepts on esp_http_server, a writer task per connection, all handing received messages to core through the same inbound ring. `src/esp/memory_esp.cpp` wraps the whole application's `pthread_mutex_init()` and `pthread_cond_init()` at link time, so another component that wraps either symbol will not link with it.
+On ESP-IDF the library is a component (`cmake/esp_idf.cmake`, sources from `cmake/sources.cmake`) built with the embedded resource profile, `src/profile.h`: smaller write-ahead, staging ring and connection caps, one group audio thread, a source's clock corrected and a live input's latency slewed by single-frame slips rather than the ASRC, and no Opus. The host runs its whole test suite with the same values (`-DSENDSPIN_SERVER_EMBEDDED_PROFILE=ON`). The transport is native (`src/esp/`): dials on lwIP's sockets, with a reader task per dialed connection, accepts on esp_http_server, a writer task per connection, all handing received messages to core through the same inbound ring. `src/esp/memory_esp.cpp` wraps the whole application's `pthread_mutex_init()` and `pthread_cond_init()` at link time, so another component that wraps either symbol will not link with it.
 
 ## Known limitations
 

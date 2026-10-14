@@ -124,8 +124,7 @@ constexpr MemoryLocation ARTWORK_STACK = MemoryLocation::PREFER_EXTERNAL;
 constexpr MemoryLocation LINK_WRITER_STACK = MemoryLocation::PREFER_EXTERNAL;
 /// @brief esp_http_server's task, which receives for every accepted connection
 constexpr MemoryLocation LISTENER_STACK = MemoryLocation::PREFER_EXTERNAL;
-/// @brief Each dialed connection's esp_websocket_client task (ss_ws_rx), where the client takes
-/// task_caps (an esp_websocket_client with a task_caps option); internal RAM otherwise
+/// @brief Each dialed connection's reader task (ss_ws_rx)
 constexpr MemoryLocation DIAL_RECEIVE_STACK = MemoryLocation::PREFER_EXTERNAL;
 /// @brief Internal RAM: the PersistenceProvider's calls run on the dispatch thread and may write
 /// flash, which disables the cache PSRAM is read through

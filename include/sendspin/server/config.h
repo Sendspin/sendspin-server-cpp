@@ -162,9 +162,9 @@ struct ServerConfig {
     bool operator_can_scan_qr{false};
     /// Opt-in plaintext trace of every message; empty for none, which costs nothing
     MessageTraceFn trace;
-    /// With trace: also an entry each time an outbound message's write completes
-    /// (TracedMessage::written), in order with the messages, so a host can tell what was on the
-    /// wire before a message it received. Off by default.
+    /// With trace: also an entry each time a write completes (TracedMessage::written), after the
+    /// last of the outbound messages it carried, in order with the messages, so a host can tell
+    /// what was on the wire before a message it received. Off by default.
     bool trace_writes{false};
     /// Where log lines go; empty for standard error
     LogFn log;

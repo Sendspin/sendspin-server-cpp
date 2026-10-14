@@ -14,7 +14,7 @@
 
 // Listener on esp_http_server: httpd's task accepts, upgrades and receives for every accepted
 // connection (SessionLink), and each delivered connection's writer task writes its frames to the
-// socket directly, so httpd's task never writes for the server
+// socket directly (WsLink), so httpd's task never writes for the server but to answer a close
 
 #include "clock.h"
 #include "connection_esp.h"
@@ -39,6 +39,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -49,7 +50,7 @@ namespace {
 /// httpd's task, the receive task of every accepted connection; its stack where
 /// profile::LISTENER_STACK places it
 constexpr size_t HTTPD_STACK_BYTES = 4096;
-/// As a dialed connection's receive task (dial_esp.cpp)
+/// As a dialed connection's receive task (ThreadRole::LINK_READER)
 constexpr unsigned HTTPD_PRIORITY = 12;
 /// Accepted connections a run keeps open, past those in their handshake: the embedded profile's
 /// players
@@ -66,40 +67,6 @@ constexpr uint32_t HTTPD_STOPPER_STACK_BYTES = 2560;
 /// included. httpd's one task reads for every accepted connection, so a peer that sends part of a
 /// frame and stops holds all of their reads for this long.
 constexpr int HTTPD_RECV_WAIT_S = 2;
-/// A control frame's payload (RFC 6455 section 5.5)
-constexpr size_t CONTROL_PAYLOAD_MAX = 125;
-/// The longest a send waits for room at a time (SessionLink::write_frame()) before it checks for a
-/// close asked for; the longest httpd's task waits to answer a close
-constexpr int SEND_SLICE_MS = 200;
-/// A frame header the server sends: no mask, at most a 64-bit length (RFC 6455 section 5.2)
-constexpr size_t FRAME_HEADER_MAX = 10;
-constexpr uint8_t FIN = 0x80;
-/// Close codes a close frame never carries (RFC 6455 section 7.4.1)
-constexpr uint16_t CLOSE_NO_STATUS = 1005;
-constexpr uint16_t CLOSE_ABNORMAL = 1006;
-constexpr uint16_t CLOSE_TLS_HANDSHAKE = 1015;
-
-size_t frame_header(uint8_t opcode, size_t len, std::array<uint8_t, FRAME_HEADER_MAX>& header) {
-    constexpr size_t LEN_7_MAX = 125;
-    constexpr size_t LEN_16_MAX = 65535;
-    header[0] = FIN | opcode;
-    if (len <= LEN_7_MAX) {
-        header[1] = static_cast<uint8_t>(len);
-        return 2;
-    }
-    if (len <= LEN_16_MAX) {
-        header[1] = 126;
-        header[2] = static_cast<uint8_t>(len >> 8U);
-        header[3] = static_cast<uint8_t>(len);
-        return 4;
-    }
-    header[1] = 127;
-    const auto len64 = static_cast<uint64_t>(len);
-    for (size_t i = 0; i < 8; ++i) {
-        header[2 + i] = static_cast<uint8_t>(len64 >> (8U * (7 - i)));
-    }
-    return FRAME_HEADER_MAX;
-}
 
 /// What httpd's callbacks reach, as its global user context: held by the Listener and by itself
 /// while httpd runs, so a Listener destroyed while sessions stay open leaves it alive
@@ -122,7 +89,9 @@ void stop_when_idle(ListenerState& state);
 class SessionLink final : public WsLink {
 public:
     SessionLink(SharedPtr<LoopCore> loop, ListenerState& state, int fd)
-        : WsLink(std::move(loop), state.settings), fd_(fd) {}
+        : WsLink(std::move(loop), state.settings, false) {
+        this->fd_ = fd;
+    }
 
     // ---- httpd task ----
 
@@ -164,7 +133,7 @@ public:
             case HTTPD_WS_TYPE_PING:
             case HTTPD_WS_TYPE_PONG:
             case HTTPD_WS_TYPE_CLOSE: {
-                std::array<uint8_t, CONTROL_PAYLOAD_MAX> payload{};
+                std::array<uint8_t, WS_CONTROL_PAYLOAD_MAX> payload{};
                 if (frame.len > payload.size()) {
                     return ESP_FAIL;
                 }
@@ -176,16 +145,11 @@ public:
                 }
                 this->note_rx(now_us());
                 if (frame.type == HTTPD_WS_TYPE_PING) {
-                    {
-                        const std::lock_guard<std::mutex> lock(this->socket_mutex_);
-                        std::memcpy(this->pong_.data(), payload.data(), frame.len);
-                        this->pong_bytes_ = frame.len;
-                    }
+                    this->store_ping(payload.data(), frame.len);
                     this->ask_pong();
                 } else if (frame.type == HTTPD_WS_TYPE_CLOSE) {
                     // httpd closes the session once this returns
-                    this->answer_close(payload.data(), frame.len);
-                    this->report_closed(CloseReason::PEER_CLOSED);
+                    return this->answer_close(payload.data(), frame.len) ? ESP_OK : ESP_FAIL;
                 }
                 return ESP_OK;
             }
@@ -215,10 +179,7 @@ public:
     /// waiting for an inbound slot stops waiting
     void end_session() {
         this->drop_inbound();
-        const std::lock_guard<std::mutex> lock(this->socket_mutex_);
-        if (!this->fd_closed_) {
-            shutdown(this->fd_, SHUT_RDWR);
-        }
+        this->shutdown_socket(SHUT_RDWR);
     }
 
     // ---- Core task ----
@@ -256,58 +217,14 @@ protected:
 
     // ---- Writer task ----
 
-    int poll_room(int timeout_ms) override {
-        if (this->fd_closed_.load(std::memory_order_acquire)) {
-            return -1;
-        }
-        // Outside the socket mutex: lwIP holds a socket for the whole of a select() on it
-        // (LWIP_NETCONN_FULLDUPLEX), so httpd's close meanwhile frees the descriptor only after
-        // it; one closed before the select() starts fails it, or, reused, answers spuriously, and
-        // the write that follows checks fd_closed_ under the socket mutex
-        fd_set writable;
-        FD_ZERO(&writable);
-        FD_SET(this->fd_, &writable);
-        timeval timeout{};
-        timeout.tv_sec = timeout_ms / 1000;
-        timeout.tv_usec = (timeout_ms % 1000) * 1000;
-        return select(this->fd_ + 1, nullptr, &writable, nullptr, &timeout);
-    }
-
-    bool send_message(MessageKind kind, const uint8_t* data, size_t len) override {
-        return this->send_frame(kind == MessageKind::TEXT ? ws_opcode::TEXT : ws_opcode::BINARY,
-                                data, len);
-    }
-
-    bool send_ping() override {
-        return this->send_frame(ws_opcode::PING, nullptr, 0);
-    }
-
-    bool send_pong() override {
-        std::array<uint8_t, CONTROL_PAYLOAD_MAX> payload{};
-        size_t bytes = 0;
-        {
-            const std::lock_guard<std::mutex> lock(this->socket_mutex_);
-            bytes = this->pong_bytes_;
-            std::memcpy(payload.data(), this->pong_.data(), bytes);
-        }
-        return this->send_frame(ws_opcode::PONG, payload.data(), bytes);
-    }
-
     void shut(std::optional<uint16_t> code) override {
-        // send_frame() refuses a second close frame and any frame after one left part written, so
+        // send_close() refuses a second close frame and any frame after one left part written, so
         // a close the peer began is not answered twice and none lands inside a broken frame
         if (code && !this->closed()) {
-            const std::array<uint8_t, 2> body{static_cast<uint8_t>(*code >> 8U),
-                                              static_cast<uint8_t>(*code)};
-            if (this->send_frame(ws_opcode::CLOSE, body.data(), body.size())) {
+            if (this->send_close(*code)) {
                 // The peer answers with its close and closes the TCP connection, which httpd
                 // sees; past the handshake timeout the session is ended anyway
-                {
-                    const std::lock_guard<std::mutex> lock(this->socket_mutex_);
-                    if (!this->fd_closed_) {
-                        shutdown(this->fd_, SHUT_WR);
-                    }
-                }
+                this->shutdown_socket(SHUT_WR);
                 const int64_t deadline_us = now_us() + this->settings_.handshake_timeout_us;
                 while (!this->fd_closed_.load(std::memory_order_acquire)) {
                     const int64_t left_us = deadline_us - now_us();
@@ -322,126 +239,8 @@ protected:
     }
 
 private:
-    /// The writer: one whole frame, waiting for the frame lock while httpd's task answers a close
-    bool send_frame(uint8_t opcode, const uint8_t* data, size_t len) {
-        const std::lock_guard<std::timed_mutex> lock(this->frame_mutex_);
-        return this->write_frame(opcode, data, len, now_us() + this->settings_.write_stall_us);
-    }
-
-    /// httpd's task: the close frame that answers the peer's, echoing its status code (RFC 6455
-    /// section 5.5.1), unless a close was sent already. A frame the writer has begun cannot be
-    /// interrupted; past SEND_SLICE_MS in all, waiting for it and sending, the close goes
-    /// unanswered.
-    void answer_close(const uint8_t* payload, size_t len) {
-        const int64_t deadline_us = now_us() + static_cast<int64_t>(SEND_SLICE_MS) * 1000;
-        std::unique_lock<std::timed_mutex> lock(this->frame_mutex_, std::defer_lock);
-        if (!lock.try_lock_for(std::chrono::milliseconds(SEND_SLICE_MS))) {
-            return;
-        }
-        // A code a close frame never carries is answered with none
-        constexpr size_t STATUS_CODE_BYTES = 2;
-        size_t echoed = 0;
-        if (len >= STATUS_CODE_BYTES) {
-            const auto code = static_cast<uint16_t>((payload[0] << 8U) | payload[1]);
-            if (code != CLOSE_NO_STATUS && code != CLOSE_ABNORMAL && code != CLOSE_TLS_HANDSHAKE) {
-                echoed = STATUS_CODE_BYTES;
-            }
-        }
-        this->write_frame(ws_opcode::CLOSE, payload, echoed, deadline_us);
-    }
-
-    /// Under frame_mutex_: writes one frame until it is all sent, deadline_us passes or a close is
-    /// asked for. The socket mutex is held only while lwIP copies what fits, so httpd's close of
-    /// the session waits no longer than that. A frame left part written breaks the stream: every
-    /// later frame, a close included, is refused, and the session just ends.
-    bool write_frame(uint8_t opcode, const uint8_t* data, size_t len, int64_t deadline_us) {
-        // RFC 6455 section 5.5.1: nothing follows a close frame
-        if (this->close_sent_ || this->frame_broken_) {
-            return false;
-        }
-        if (opcode == ws_opcode::CLOSE) {
-            this->close_sent_ = true;
-        }
-        std::array<uint8_t, FRAME_HEADER_MAX> header{};
-        const size_t header_bytes = frame_header(opcode, len, header);
-        // Header and payload in one call, so they leave in as few segments as fit
-        std::array<iovec, 2> parts{};
-        parts[0].iov_base = header.data();
-        parts[0].iov_len = header_bytes;
-        parts[1].iov_base = const_cast<uint8_t*>(data);
-        parts[1].iov_len = len;
-        msghdr message{};
-        message.msg_iov = parts.data();
-        message.msg_iovlen = len > 0 ? 2 : 1;
-        const size_t total = header_bytes + len;
-        size_t left = total;
-        // A frame some of whose bytes went is broken by any failure from here
-        const auto fail = [this, &left, total] {
-            if (left < total) {
-                this->frame_broken_ = true;
-            }
-            return false;
-        };
-        while (left > 0) {
-            ssize_t sent = 0;
-            {
-                const std::lock_guard<std::mutex> lock(this->socket_mutex_);
-                if (this->fd_closed_) {
-                    return fail();
-                }
-                sent = sendmsg(this->fd_, &message, MSG_DONTWAIT);
-            }
-            if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                return fail();
-            }
-            if (sent > 0) {
-                left -= static_cast<size_t>(sent);
-                skip_sent(message, static_cast<size_t>(sent));
-                continue;
-            }
-            const int64_t left_us = deadline_us - now_us();
-            if (left_us <= 0 || this->close_requested()) {
-                return fail();
-            }
-            const auto wait_ms = static_cast<int>(
-                std::min<int64_t>(left_us / 1000 + 1, static_cast<int64_t>(SEND_SLICE_MS)));
-            if (this->poll_room(wait_ms) < 0) {
-                return fail();
-            }
-        }
-        return true;
-    }
-
-    static void skip_sent(msghdr& message, size_t sent) {
-        while (sent > 0 && message.msg_iovlen > 0) {
-            iovec& part = message.msg_iov[0];
-            const size_t taken = std::min(sent, part.iov_len);
-            part.iov_base = static_cast<uint8_t*>(part.iov_base) + taken;
-            part.iov_len -= taken;
-            sent -= taken;
-            if (part.iov_len == 0) {
-                ++message.msg_iov;
-                --message.msg_iovlen;
-            }
-        }
-    }
-
-    const int fd_;
     /// httpd's task: the request of the frame being read
     httpd_req_t* request_{nullptr};
-    /// Held for one whole frame, so frames from the writer and httpd's task never interleave;
-    /// taken before socket_mutex_
-    std::timed_mutex frame_mutex_;
-    /// Guarded by frame_mutex_: a close frame was sent or begun
-    bool close_sent_{false};
-    /// Guarded by frame_mutex_: a frame was left part written
-    bool frame_broken_{false};
-    std::mutex socket_mutex_;
-    /// Set under socket_mutex_ once httpd closes the session
-    std::atomic<bool> fd_closed_{false};
-    /// Guarded by socket_mutex_, which no one holds long: the last ping's payload
-    std::array<uint8_t, CONTROL_PAYLOAD_MAX> pong_{};
-    size_t pong_bytes_{0};
 };
 
 }  // namespace

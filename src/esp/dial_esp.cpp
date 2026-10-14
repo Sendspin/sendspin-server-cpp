@@ -12,32 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// dial() on esp_websocket_client: the client's task connects, upgrades and receives (ClientLink's
-// event handler); the link's writer task starts the client, writes and tears the client down
+// dial() without a WebSocket library: a dialed connection's reader task resolves, connects,
+// upgrades (ws_handshake.h) and reads its frames (ws_frame.h); its writer task, WsLink's, frames
+// and masks what it sends, as an accepted connection's does unmasked
 
 #include "clock.h"
 #include "connection_esp.h"
 #include "esp_loop.h"
-#include "esp_tls.h"
-#include "esp_transport.h"
-#include "esp_transport_internal.h"
-#include "esp_transport_ws.h"
-#include "esp_websocket_client.h"
+#include "esp_random.h"
+#include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "memory.h"
-#include "profile.h"
-#include "thread_esp.h"
+#include "thread_setup.h"
 #include "transport.h"
+#include "ws_frame.h"
+#include "ws_handshake.h"
 #include "ws_link.h"
+#include <fcntl.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstring>
-#include <memory>
-#include <mutex>
+#include <exception>
+#include <limits>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -45,84 +48,30 @@ namespace sendspin::server {
 
 namespace {
 
-/// The client task's stack, where profile::DIAL_RECEIVE_STACK places it when the client takes
-/// task_caps, else in internal RAM: its receive path, the event handler and its error logs, which
-/// esp-tls's failed connects take deepest (2.5 KB, peers reset during a redial)
-constexpr int WS_CLIENT_STACK_BYTES = 3584;
-/// Above the writers and the core task, so a message is stamped as soon as it is read
-constexpr int WS_CLIENT_PRIORITY = 12;
-/// The client's receive and send buffers (one each, from the default heap): a message up to this
-/// size goes as one frame; a larger one goes as several (RFC 6455 section 5.4)
-constexpr size_t WS_CLIENT_BUFFER_MAX_BYTES = 16384;
-/// The client's own pings are left at about one a day: the idle timer on the core task pings
-constexpr size_t WS_CLIENT_PING_INTERVAL_S = 86400;
+/// How often the reader, waiting on its socket, looks whether the writer is stopping it
+constexpr int READ_POLL_MS = 100;
+/// The reader's buffer: the upgrade's response, then the frames' headers and the payloads that
+/// arrive with them; the rest of a longer payload is read into its message in place
+constexpr size_t READ_BUFFER_BYTES = WS_UPGRADE_RESPONSE_MAX;
 constexpr int64_t US_PER_MS = 1000;
+constexpr int64_t NO_DEADLINE = std::numeric_limits<int64_t>::max();
 
-TickType_t ticks_for_us(int64_t us) {
-    return pdMS_TO_TICKS(std::max<int64_t>(us / US_PER_MS, 1));
-}
-
-int ms_for_us(int64_t us) {
-    return static_cast<int>(std::max<int64_t>(us / US_PER_MS, 1));
-}
-
-timeval timeval_for_ms(int ms) {
-    timeval tv{};
-    tv.tv_sec = static_cast<time_t>(ms / 1000);
-    tv.tv_usec = static_cast<suseconds_t>((ms % 1000) * 1000);
-    return tv;
-}
-
-/// select() on one descriptor; > 0 ready, 0 timed out, < 0 an error
-int poll_fd(int fd, bool for_write, int timeout_ms) {
-    if (fd < 0) {
-        return -1;
-    }
-    fd_set ready;
-    fd_set errors;
-    FD_ZERO(&ready);
-    FD_ZERO(&errors);
-    FD_SET(fd, &ready);
-    FD_SET(fd, &errors);
-    timeval timeout = timeval_for_ms(std::max(timeout_ms, 0));
-    const int polled = for_write ? select(fd + 1, nullptr, &ready, &errors, &timeout)
-                                 : select(fd + 1, &ready, nullptr, &errors, &timeout);
-    if (polled > 0 && FD_ISSET(fd, &errors) && !FD_ISSET(fd, &ready)) {
-        return -1;
-    }
-    return polled;
-}
-
-/// A dialed connection: an esp_websocket_client over a WebSocket transport whose TCP layer is the
-/// link's own socket (ClientLink::socket_*), not esp_transport_tcp. esp_websocket_client closes
-/// its transport from whichever task finds an error, with only its receive lock held, while a send
-/// (the writer's, or the client task's pong) may be between two writes. Here a close only shuts
-/// the socket down (which fails later reads and writes and wakes a select() on it), and the
-/// descriptor is closed when the transport is destroyed, after the client task has ended and on
-/// the writer, so no task's call or select() reaches a descriptor another connection has reused;
-/// reads and writes take it under one mutex, held only for the call that moves the bytes. Owning
-/// the socket also sets
-/// TCP_NODELAY (esp_transport_ws writes a frame's header and payload as two writes, so a small
-/// message could otherwise wait for the peer's delayed ACK) and lets the address tried differ
-/// from the Host header's name.
-class ClientLink final : public WsLink {
+/// A dialed connection: the reader task (ThreadRole::LINK_READER) resolves the target, connects,
+/// upgrades and then reads every frame; the writer task (WsLink) starts it, writes, and in shut()
+/// stops it and waits for its end before closing the descriptor, so no task's call or select()
+/// reaches a descriptor another connection has reused.
+class DialLink final : public WsLink {
 public:
-    ClientLink(SharedPtr<LoopCore> loop, const TransportSettings& settings, DialTarget target)
-        : WsLink(std::move(loop), settings), target_(std::move(target)) {
-        // RFC 3986 section 3.2.2: an IPv6 literal is bracketed
-        this->host_header_ = this->target_.host.find(':') == std::string::npos
-                                 ? this->target_.host
-                                 : "[" + this->target_.host + "]";
-    }
+    DialLink(SharedPtr<LoopCore> loop, const TransportSettings& settings, DialTarget target)
+        : WsLink(std::move(loop), settings, true), target_(std::move(target)) {}
 
-    ~ClientLink() override {
-        this->destroy_client();
+    ~DialLink() override {
         if (this->resume_ != nullptr) {
             vSemaphoreDelete(this->resume_);
         }
     }
 
-    /// Core task, or the task closing the link: wakes the client task holding a message
+    /// Core task, or the task closing the link: wakes the reader holding a message
     void resume_inbound() override {
         if (this->resume_ != nullptr) {
             xSemaphoreGive(this->resume_);
@@ -130,11 +79,7 @@ public:
     }
 
 protected:
-    /// The client task, holding a message: waits until it is pushed or dropped. It holds
-    /// esp_websocket_client's receive lock meanwhile: sends take only the send lock, but a failed
-    /// send takes the receive lock before it aborts the connection, so a writer whose send fails
-    /// waits until the message is released, which core's close at the write stall does at the
-    /// latest.
+    /// The reader, holding a message: waits until it is pushed or dropped
     bool hold_receiving(uint64_t generation) override {
         while (!this->hold_.released(generation)) {
             xSemaphoreTake(this->resume_, portMAX_DELAY);
@@ -148,439 +93,367 @@ protected:
             this->report_closed(CloseReason::FAILED);
             return false;
         }
-        std::vector<std::string> hosts = this->target_.addresses;
-        if (hosts.empty()) {
-            hosts.push_back(this->target_.host);
+        // A detached pthread, as the writer is, so its stack can be in PSRAM
+        // (profile::DIAL_RECEIVE_STACK) and is freed when it ends
+        this->loop().task_started();
+        try {
+            start_thread(ThreadRole::LINK_READER, [self = this->shared_from_this()]() mutable {
+                auto* link = static_cast<DialLink*>(self.get());
+                link->reader_main();
+                link->reader_done_.store(true, std::memory_order_release);
+                link->wake_writer();
+                link->loop().task_ended();
+            }).detach();
+        } catch (const std::exception&) {
+            this->loop().task_ended();
+            this->report_closed(CloseReason::FAILED);
+            return false;
         }
-        CloseReason failure = CloseReason::FAILED;
-        for (const std::string& host : hosts) {
-            if (this->close_requested()) {
+        this->reader_started_ = true;
+        while (!this->connected()) {
+            if (this->reader_done_.load(std::memory_order_acquire) || this->close_requested()) {
                 return false;
             }
-            if (this->connect_to(host)) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        }
+        return true;
+    }
+
+    void shut(std::optional<uint16_t> code) override {
+        if (!this->reader_started_) {
+            return;
+        }
+        // RFC 6455 section 7.1.1: the server closes the TCP connection after its close frame,
+        // which the reader sees; past the handshake timeout the connection is dropped anyway
+        if (code && this->connected() && !this->closed() && this->send_close(*code)) {
+            const int64_t deadline_us = now_us() + this->settings_.handshake_timeout_us;
+            while (!this->closed() && !this->reader_done_.load(std::memory_order_acquire)) {
+                const int64_t left_us = deadline_us - now_us();
+                if (left_us <= 0) {
+                    break;
+                }
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS((left_us / US_PER_MS) + 1));
+            }
+        }
+        this->stopping_.store(true, std::memory_order_release);
+        // Ends a read or select() the reader is in
+        this->shutdown_socket(SHUT_RDWR);
+        while (!this->reader_done_.load(std::memory_order_acquire)) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(READ_POLL_MS));
+        }
+        const std::lock_guard<std::mutex> lock(this->socket_mutex_);
+        if (this->fd_ >= 0 && !this->fd_closed_) {
+            ::close(this->fd_);
+            this->fd_closed_ = true;
+        }
+    }
+
+private:
+    // ---- Reader task ----
+
+    void reader_main() {
+        if (!this->dial()) {
+            return;
+        }
+        this->note_rx(now_us());
+        this->report_connected(peer_endpoint(this->fd_));
+        this->receive();
+    }
+
+    bool stopping() const {
+        return this->stopping_.load(std::memory_order_acquire);
+    }
+
+    /// Each address in turn, the target's literal addresses or else what its host resolves to;
+    /// true once one is upgraded, with fd_ set
+    bool dial() {
+        std::vector<std::string> hosts = this->target_.addresses;
+        const bool numeric = !hosts.empty();
+        if (!numeric) {
+            hosts.push_back(this->target_.host);
+        }
+        const std::string port = std::to_string(this->target_.port);
+        CloseReason failure = CloseReason::FAILED;
+        for (const std::string& host : hosts) {
+            addrinfo hints{};
+            hints.ai_family = AF_UNSPEC;
+            hints.ai_socktype = SOCK_STREAM;
+            hints.ai_flags = numeric ? AI_NUMERICHOST : 0;
+            addrinfo* found = nullptr;
+            if (getaddrinfo(host.c_str(), port.c_str(), &hints, &found) != 0 || found == nullptr) {
+                failure = CloseReason::FAILED;
+                continue;
+            }
+            bool open = false;
+            for (const addrinfo* at = found; at != nullptr && !open && !this->stopping();
+                 at = at->ai_next) {
+                open = this->attempt(*at, failure);
+            }
+            freeaddrinfo(found);
+            if (open) {
                 return true;
             }
-            failure = static_cast<CloseReason>(this->attempt_failure_.load());
-            this->destroy_client();
+            if (this->stopping()) {
+                return false;
+            }
         }
-        if (!this->close_requested()) {
+        if (!this->stopping()) {
             this->report_closed(failure);
         }
         return false;
     }
 
-    int poll_room(int timeout_ms) override {
-        return poll_fd(this->socket_snapshot(), true, timeout_ms);
-    }
-
-    bool send_message(MessageKind kind, const uint8_t* data, size_t len) override {
-        const TickType_t timeout = ticks_for_us(this->settings_.write_stall_us);
-        const char* bytes = reinterpret_cast<const char*>(data);
-        const int size = static_cast<int>(len);
-        const int sent = kind == MessageKind::TEXT
-                             ? esp_websocket_client_send_text(this->client_, bytes, size, timeout)
-                             : esp_websocket_client_send_bin(this->client_, bytes, size, timeout);
-        return sent == size;
-    }
-
-    bool send_ping() override {
-        return esp_websocket_client_send_with_opcode(
-                   this->client_, WS_TRANSPORT_OPCODES_PING, nullptr, 0,
-                   ticks_for_us(this->settings_.write_stall_us)) >= 0;
-    }
-
-    void shut(std::optional<uint16_t> code) override {
-        if (this->client_ == nullptr) {
-            return;
-        }
-        if (code && this->connected() && !this->closed() &&
-            esp_websocket_client_is_connected(this->client_)) {
-            // Sends the close frame (within the write stall, socket_write()), then waits for the
-            // peer's and for the TCP close (esp_transport_ws_poll_connection_closed() on
-            // socket_get()), within the handshake timeout; stops the client either way
-            esp_websocket_client_close_with_code(
-                this->client_, *code, nullptr, 0,
-                ticks_for_us(this->settings_.handshake_timeout_us));
-        }
-        this->destroy_client();
-    }
-
-private:
-    static void on_event(void* arg, esp_event_base_t /*base*/, int32_t id, void* data) {
-        // First, so a message's stamp is as close to its last byte's arrival as this task gets
-        const int64_t rx_us = now_us();
-        auto* link = static_cast<ClientLink*>(arg);
-        const auto* event = static_cast<const esp_websocket_event_data_t*>(data);
-        switch (id) {
-            case WEBSOCKET_EVENT_CONNECTED:
-                link->on_connected();
-                break;
-            case WEBSOCKET_EVENT_DATA:
-                link->on_data(*event, rx_us);
-                break;
-            case WEBSOCKET_EVENT_DISCONNECTED:
-                link->on_lost(link->reason_of(*event));
-                break;
-            case WEBSOCKET_EVENT_CLOSED:
-                link->on_lost(CloseReason::PEER_CLOSED);
-                break;
-            case WEBSOCKET_EVENT_FINISH:
-                // An attempt that failed keeps the reason its DISCONNECTED gave
-                if (link->connected()) {
-                    link->report_closed(CloseReason::PEER_CLOSED);
-                }
-                link->finished_.store(true, std::memory_order_release);
-                link->wake_writer();
-                break;
-            default:
-                break;
-        }
-    }
-
-    /// One attempt at the address host; true once the WebSocket is open, false when it failed or
-    /// a close was asked for
-    bool connect_to(const std::string& host) {
-        this->finished_.store(false, std::memory_order_release);
-        this->connect_timed_out_ = false;
-        this->attempt_failure_.store(static_cast<int>(CloseReason::FAILED));
-        this->address_ = host;
-        if (!this->create_client()) {
+    /// One address: the TCP connect within connect_timeout_us, then the upgrade within
+    /// handshake_timeout_us. Sets failure when it fails.
+    bool attempt(const addrinfo& address, CloseReason& failure) {
+        failure = CloseReason::FAILED;
+        const int fd = socket(address.ai_family, SOCK_STREAM, IPPROTO_TCP);
+        if (fd < 0) {
             return false;
         }
-        while (true) {
-            if (this->connected()) {
-                return true;
+        const int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            ::close(fd);
+            return false;
+        }
+        bool open = false;
+        if (connect(fd, address.ai_addr, address.ai_addrlen) == 0 || errno == EINPROGRESS) {
+            const int ready = this->await(fd, true, now_us() + this->settings_.connect_timeout_us);
+            int error = 0;
+            socklen_t length = sizeof(error);
+            if (ready == 0) {
+                failure = CloseReason::TIMED_OUT;
+            } else if (ready > 0 && getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0 &&
+                       error == 0) {
+                // A small frame is not held back for the peer's delayed ACK
+                const int on = 1;
+                setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+                open = this->upgrade(fd, failure);
             }
-            if (this->finished_.load(std::memory_order_acquire) || this->close_requested()) {
-                return false;
-            }
-            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         }
-    }
-
-    bool create_client() {
-        this->transports_ = esp_transport_list_init();
-        if (this->transports_ == nullptr) {
+        if (!open) {
+            ::close(fd);
             return false;
         }
-        this->socket_transport_ = esp_transport_init();
-        if (this->socket_transport_ == nullptr) {
-            return false;
-        }
-        esp_transport_set_func(this->socket_transport_, &ClientLink::socket_connect,
-                               &ClientLink::socket_read, &ClientLink::socket_write,
-                               &ClientLink::socket_close, &ClientLink::socket_poll_read,
-                               &ClientLink::socket_poll_write, &ClientLink::socket_destroy);
-        esp_transport_set_context_data(this->socket_transport_, this);
-        // For esp_transport_ws_poll_connection_closed(), which selects on the socket itself
-        this->socket_transport_->_get_socket = &ClientLink::socket_get;
-        esp_transport_list_add(this->transports_, this->socket_transport_, "_tcp");
-        this->ws_ = esp_transport_ws_init(this->socket_transport_);
-        if (this->ws_ == nullptr) {
-            return false;
-        }
-        esp_transport_list_add(this->transports_, this->ws_, "ws");
-        esp_transport_ws_config_t ws_config{};
-        ws_config.ws_path = this->target_.path.c_str();
-        // As esp_websocket_client sets it for the transports it builds: control frames reach the
-        // client, which answers pings and closes
-        ws_config.propagate_control_frames = true;
-        esp_transport_ws_set_config(this->ws_, &ws_config);
-
-        esp_websocket_client_config_t config{};
-        // The upgrade's Host header; the socket connects to address_ (socket_connect())
-        config.host = this->host_header_.c_str();
-        config.port = this->target_.port;
-        config.path = this->target_.path.c_str();
-        config.disable_auto_reconnect = true;
-        config.task_prio = WS_CLIENT_PRIORITY;
-        config.task_name = "ss_ws_rx";
-        config.task_stack = WS_CLIENT_STACK_BYTES;
-#ifdef ESP_WEBSOCKET_CLIENT_HAS_TASK_CAPS
-        config.task_caps = stack_caps(profile::DIAL_RECEIVE_STACK, WS_CLIENT_STACK_BYTES);
-#endif
-        config.buffer_size =
-            static_cast<int>(std::clamp(this->settings_.write_buffer_bytes,
-                                        ROOM_AFTER_WRITE_MAX_BYTES, WS_CLIENT_BUFFER_MAX_BYTES));
-        // The TCP connect, the upgrade's reads and, until the connection opens, a send
-        config.network_timeout_ms = ms_for_us(this->settings_.connect_timeout_us);
-        config.ping_interval_sec = WS_CLIENT_PING_INTERVAL_S;
-        config.disable_pingpong_discon = true;
-        config.ext_transport = this->ws_;
-        this->client_ = esp_websocket_client_init(&config);
-        if (this->client_ == nullptr) {
-            return false;
-        }
-        esp_websocket_register_events(this->client_, WEBSOCKET_EVENT_ANY, &ClientLink::on_event,
-                                      this);
-        return esp_websocket_client_start(this->client_) == ESP_OK;
-    }
-
-    /// Stops the client task (waiting for it) and frees the client and its transports
-    void destroy_client() {
-        if (this->client_ != nullptr) {
-            esp_websocket_client_destroy(this->client_);
-            this->client_ = nullptr;
-        }
-        if (this->transports_ != nullptr) {
-            // The client never owns an external transport; the socket transport's destroy closes
-            // the socket
-            esp_transport_list_destroy(this->transports_);
-            this->transports_ = nullptr;
-        }
-        this->socket_transport_ = nullptr;
-        this->ws_ = nullptr;
-    }
-
-    // ---- The socket transport: the client task, and the writer for writes, closes and the
-    // transport's destruction ----
-
-    static ClientLink& link_of(esp_transport_handle_t t) {
-        return *static_cast<ClientLink*>(esp_transport_get_context_data(t));
-    }
-
-    static int socket_connect(esp_transport_handle_t t, const char* /*host*/, int port,
-                              int timeout_ms) {
-        return link_of(t).connect_socket(port, timeout_ms);
-    }
-
-    static int socket_read(esp_transport_handle_t t, char* buffer, int len, int timeout_ms) {
-        ClientLink& link = link_of(t);
-        return link.read_socket(buffer, len, link.bounded_ms(timeout_ms));
-    }
-
-    static int socket_write(esp_transport_handle_t t, const char* buffer, int len, int timeout_ms) {
-        ClientLink& link = link_of(t);
-        return link.write_socket(buffer, len, link.bounded_ms(timeout_ms));
-    }
-
-    static int socket_close(esp_transport_handle_t t) {
-        link_of(t).shut_socket();
-        return 0;
-    }
-
-    static int socket_poll_read(esp_transport_handle_t t, int timeout_ms) {
-        ClientLink& link = link_of(t);
-        return poll_fd(link.socket_snapshot(), false, link.bounded_ms(timeout_ms));
-    }
-
-    static int socket_poll_write(esp_transport_handle_t t, int timeout_ms) {
-        ClientLink& link = link_of(t);
-        return poll_fd(link.socket_snapshot(), true, link.bounded_ms(timeout_ms));
-    }
-
-    static int socket_get(esp_transport_handle_t t) {
-        ClientLink& link = link_of(t);
-        const std::lock_guard<std::mutex> lock(link.socket_mutex_);
-        return link.fd_;
-    }
-
-    static int socket_destroy(esp_transport_handle_t t) {
-        link_of(t).release_socket();
-        return 0;
-    }
-
-    /// esp_websocket_client waits with -1 (portMAX_DELAY) for a close frame's send, which would
-    /// never end on a peer that stops reading: a wait is at most the write stall
-    int bounded_ms(int timeout_ms) const {
-        const int stall_ms = ms_for_us(this->settings_.write_stall_us);
-        return timeout_ms < 0 ? stall_ms : std::min(timeout_ms, stall_ms);
-    }
-
-    /// The descriptor to poll, or -1 once the socket is shut down
-    int socket_snapshot() {
-        const std::lock_guard<std::mutex> lock(this->socket_mutex_);
-        return this->shut_ ? -1 : this->fd_;
-    }
-
-    /// The client task, connecting: to the address being tried, whatever the Host header names
-    int connect_socket(int port, int timeout_ms) {
-        this->release_socket();
-        esp_tls_cfg_t config{};
-        config.timeout_ms = timeout_ms;
-        esp_tls_last_error_t error{};
-        int fd = -1;
-        const esp_err_t result = esp_tls_plain_tcp_connect(this->address_.c_str(),
-                                                           static_cast<int>(this->address_.size()),
-                                                           port, &config, &error, &fd);
-        if (result != ESP_OK) {
-            this->connect_timed_out_ = result == ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT;
-            return -1;
-        }
-        const int on = 1;
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
         const std::lock_guard<std::mutex> lock(this->socket_mutex_);
         this->fd_ = fd;
-        this->shut_ = false;
-        return 0;
+        return true;
     }
 
-    /// The client task, after a poll found data: as esp_transport_tcp reads, with its codes
-    int read_socket(char* buffer, int len, int timeout_ms) {
-        const int polled = poll_fd(this->socket_snapshot(), false, timeout_ms);
-        if (polled < 0) {
-            return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
-        }
-        if (polled == 0) {
-            return ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT;
-        }
-        ssize_t got = 0;
-        {
-            const std::lock_guard<std::mutex> lock(this->socket_mutex_);
-            if (this->fd_ < 0 || this->shut_) {
-                return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
-            }
-            got = recv(this->fd_, buffer, static_cast<size_t>(len), MSG_DONTWAIT);
-        }
-        if (got < 0) {
-            return errno == EAGAIN || errno == EWOULDBLOCK ? ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT
-                                                           : ERR_TCP_TRANSPORT_CONNECTION_FAILED;
-        }
-        if (got == 0) {
-            return ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN;
-        }
-        return static_cast<int>(got);
-    }
-
-    /// The writer, or the client task for its pongs, pings and closes (esp_websocket_client's
-    /// send lock serializes them): all of buffer within timeout_ms, or -1, since esp_transport_ws
-    /// would send the rest of a short write as a frame of its own
-    int write_socket(const char* buffer, int len, int timeout_ms) {
-        const int64_t deadline_us = now_us() + static_cast<int64_t>(timeout_ms) * US_PER_MS;
-        int written = 0;
-        while (written < len) {
-            ssize_t sent = 0;
-            int fd = -1;
-            {
-                // Held only while lwIP copies what fits, so a close waits no longer than that
-                const std::lock_guard<std::mutex> lock(this->socket_mutex_);
-                fd = this->fd_;
-                if (fd < 0 || this->shut_) {
-                    return -1;
-                }
-                sent = send(fd, buffer + written, static_cast<size_t>(len - written), MSG_DONTWAIT);
-            }
-            if (sent > 0) {
-                written += static_cast<int>(sent);
+    /// The opening handshake (RFC 6455 section 4.1); the bytes after the response stay buffered
+    /// as frames
+    bool upgrade(int fd, CloseReason& failure) {
+        std::array<uint8_t, WS_KEY_NONCE_BYTES> nonce{};
+        esp_fill_random(nonce.data(), nonce.size());
+        const std::string key = ws_handshake_key(nonce);
+        const std::string request = ws_upgrade_request(this->target_, key);
+        const int64_t deadline_us = now_us() + this->settings_.handshake_timeout_us;
+        size_t sent = 0;
+        while (sent < request.size()) {
+            const ssize_t wrote =
+                send(fd, request.data() + sent, request.size() - sent, MSG_DONTWAIT);
+            if (wrote > 0) {
+                sent += static_cast<size_t>(wrote);
                 continue;
             }
-            if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            if (wrote < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                return false;
+            }
+            const int ready = this->await(fd, true, deadline_us);
+            if (ready <= 0) {
+                failure = ready == 0 ? CloseReason::TIMED_OUT : CloseReason::FAILED;
+                return false;
+            }
+        }
+        this->buffer_begin_ = 0;
+        this->buffer_end_ = 0;
+        while (true) {
+            const std::string_view received(reinterpret_cast<const char*>(this->buffer_.data()),
+                                            this->buffer_end_);
+            const WsUpgradeCheck check = check_upgrade_response(received, key);
+            if (check.status == WsUpgradeStatus::ACCEPTED) {
+                this->buffer_begin_ = check.response_bytes;
+                return true;
+            }
+            if (check.status == WsUpgradeStatus::REJECTED) {
+                return false;
+            }
+            const int got = this->read_some(fd, deadline_us);
+            if (got <= 0) {
+                failure = got == 0 ? CloseReason::TIMED_OUT : CloseReason::FAILED;
+                return false;
+            }
+        }
+    }
+
+    /// Reads every frame until the connection ends. A message's stamp is that of the read that
+    /// brought its last byte (spec messaging.md "Receive timestamps").
+    void receive() {
+        while (true) {
+            const WsHeaderParse parse = ws_parse_frame_header(this->buffered(), false);
+            if (parse.status == WsHeaderStatus::INVALID) {
+                this->fail_protocol();
+                return;
+            }
+            if (parse.status == WsHeaderStatus::INCOMPLETE) {
+                if (this->read_some(this->fd_, NO_DEADLINE) <= 0) {
+                    this->report_read_end();
+                    return;
+                }
+                continue;
+            }
+            const WsFrameHeader& header = parse.header;
+            this->buffer_begin_ += header.header_bytes;
+            if (header.opcode >= ws_opcode::CLOSE) {
+                // A control frame (RFC 6455 section 5.5), at most WS_CONTROL_PAYLOAD_MAX bytes
+                std::array<uint8_t, WS_CONTROL_PAYLOAD_MAX> payload{};
+                const auto len = static_cast<size_t>(header.payload_bytes);
+                if (!this->read_exact(payload.data(), len)) {
+                    this->report_read_end();
+                    return;
+                }
+                this->note_rx(this->rx_us_);
+                if (header.opcode == ws_opcode::PING) {
+                    this->store_ping(payload.data(), len);
+                    this->ask_pong();
+                } else if (header.opcode == ws_opcode::CLOSE) {
+                    this->answer_close(payload.data(), len);
+                    return;
+                }
+                continue;
+            }
+            if (header.payload_bytes > this->settings_.read_message_max) {
+                this->fail_protocol();
+                return;
+            }
+            const auto len = static_cast<size_t>(header.payload_bytes);
+            if (!this->begin_frame(header.opcode, len)) {
+                return;
+            }
+            if (!this->read_exact(this->frame_data(), len)) {
+                this->report_read_end();
+                return;
+            }
+            this->note_rx(this->rx_us_);
+            if (!this->end_frame(header.fin, this->rx_us_)) {
+                return;
+            }
+        }
+    }
+
+    std::span<const uint8_t> buffered() const {
+        return std::span<const uint8_t>(this->buffer_.data() + this->buffer_begin_,
+                                        this->buffer_end_ - this->buffer_begin_);
+    }
+
+    /// len bytes into out: those buffered first, then the rest read into out in place
+    bool read_exact(uint8_t* out, size_t len) {
+        const size_t taken = std::min(len, this->buffer_end_ - this->buffer_begin_);
+        if (taken > 0) {
+            std::memcpy(out, this->buffer_.data() + this->buffer_begin_, taken);
+            this->buffer_begin_ += taken;
+        }
+        size_t done = taken;
+        while (done < len) {
+            if (this->await(this->fd_, false, NO_DEADLINE) <= 0) {
+                return false;
+            }
+            const ssize_t got = recv(this->fd_, out + done, len - done, MSG_DONTWAIT);
+            this->rx_us_ = now_us();
+            if (got > 0) {
+                done += static_cast<size_t>(got);
+            } else if (got == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Reads what fd has into the buffer, after the bytes kept (moved to its start)
+    /// @return the bytes read, 0 when deadline_us passed, -1 at the connection's end, an error or
+    /// a stop
+    int read_some(int fd, int64_t deadline_us) {
+        if (this->buffer_begin_ > 0) {
+            std::memmove(this->buffer_.data(), this->buffer_.data() + this->buffer_begin_,
+                         this->buffer_end_ - this->buffer_begin_);
+            this->buffer_end_ -= this->buffer_begin_;
+            this->buffer_begin_ = 0;
+        }
+        if (this->buffer_end_ == this->buffer_.size()) {
+            return -1;
+        }
+        while (true) {
+            const int ready = this->await(fd, false, deadline_us);
+            if (ready <= 0) {
+                return ready;
+            }
+            const ssize_t got = recv(fd, this->buffer_.data() + this->buffer_end_,
+                                     this->buffer_.size() - this->buffer_end_, MSG_DONTWAIT);
+            this->rx_us_ = now_us();
+            if (got > 0) {
+                this->buffer_end_ += static_cast<size_t>(got);
+                return static_cast<int>(got);
+            }
+            if (got == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
                 return -1;
             }
+        }
+    }
+
+    /// select() on fd in READ_POLL_MS slices until it is ready
+    /// @return > 0 ready, 0 when deadline_us passed, < 0 on an error or once the writer stops the
+    /// reader
+    int await(int fd, bool for_write, int64_t deadline_us) {
+        while (!this->stopping()) {
             const int64_t left_us = deadline_us - now_us();
-            if (left_us <= 0 || this->close_requested()) {
+            if (left_us <= 0) {
+                return 0;
+            }
+            const int64_t slice_ms =
+                std::min<int64_t>((left_us / US_PER_MS) + 1, static_cast<int64_t>(READ_POLL_MS));
+            fd_set ready;
+            fd_set errors;
+            FD_ZERO(&ready);
+            FD_ZERO(&errors);
+            FD_SET(fd, &ready);
+            FD_SET(fd, &errors);
+            timeval timeout{};
+            timeout.tv_sec = static_cast<time_t>(slice_ms / 1000);
+            timeout.tv_usec = static_cast<suseconds_t>((slice_ms % 1000) * US_PER_MS);
+            const int polled = for_write ? select(fd + 1, nullptr, &ready, &errors, &timeout)
+                                         : select(fd + 1, &ready, nullptr, &errors, &timeout);
+            if (polled < 0 || (polled > 0 && FD_ISSET(fd, &errors) && !FD_ISSET(fd, &ready))) {
                 return -1;
             }
-            if (poll_fd(fd, true, ms_for_us(left_us)) < 0) {
-                return -1;
+            if (polled > 0) {
+                return polled;
             }
         }
-        return written;
+        return -1;
     }
 
-    /// Any task, as esp_websocket_client closes its transport: shuts the socket down, which ends
-    /// its connection, fails later reads and writes and wakes a select() on it, and keeps the
-    /// descriptor, so another task's select() or call never meets one reused
-    void shut_socket() {
-        const std::lock_guard<std::mutex> lock(this->socket_mutex_);
-        if (this->fd_ >= 0 && !this->shut_) {
-            shutdown(this->fd_, SHUT_RDWR);
-            this->shut_ = true;
+    /// The connection ended under a read: the peer's close of TCP, an error, or the writer's stop
+    void report_read_end() {
+        if (!this->stopping()) {
+            this->report_closed(CloseReason::PEER_CLOSED);
         }
-    }
-
-    /// The writer as it destroys the transport, after the client task has ended, or the client
-    /// task before a connect: closes the descriptor
-    void release_socket() {
-        const std::lock_guard<std::mutex> lock(this->socket_mutex_);
-        if (this->fd_ >= 0) {
-            ::close(this->fd_);
-            this->fd_ = -1;
-        }
-        this->shut_ = false;
-    }
-
-    // ---- Client task ----
-
-    void on_connected() {
-        const int fd = this->socket_snapshot();
-        this->note_rx(now_us());
-        this->report_connected(peer_endpoint(fd));
-    }
-
-    void on_data(const esp_websocket_event_data_t& event, int64_t rx_us) {
-        this->note_rx(rx_us);
-        const uint8_t opcode = event.op_code;
-        // The client answers pings and closes itself
-        if (opcode != ws_opcode::TEXT && opcode != ws_opcode::BINARY &&
-            opcode != ws_opcode::CONTINUATION) {
-            return;
-        }
-        // One frame arrives in as many events as the client's buffer needs
-        const auto offset = static_cast<size_t>(event.payload_offset);
-        const auto chunk = static_cast<size_t>(event.data_len);
-        const auto frame = static_cast<size_t>(event.payload_len);
-        if (offset == 0) {
-            this->in_frame_ = this->begin_frame(opcode, frame);
-        }
-        if (!this->in_frame_) {
-            return;
-        }
-        if (chunk > 0 && offset + chunk <= frame) {
-            std::memcpy(this->frame_data() + offset, event.data_ptr, chunk);
-        }
-        if (offset + chunk >= frame) {
-            this->in_frame_ = false;
-            // The stamp of the event that completes the frame (spec messaging.md "Receive
-            // timestamps")
-            this->end_frame(event.fin, rx_us);
-        }
-    }
-
-    void on_lost(CloseReason reason) {
-        if (this->connected()) {
-            this->report_closed(reason);
-        } else {
-            // Kept for the writer, which may try the next address
-            this->attempt_failure_.store(static_cast<int>(reason));
-        }
-    }
-
-    CloseReason reason_of(const esp_websocket_event_data_t& event) const {
-        const esp_websocket_error_codes_t& error = event.error_handle;
-        if (error.error_type == WEBSOCKET_ERROR_TYPE_PONG_TIMEOUT ||
-            (!this->connected() && this->connect_timed_out_)) {
-            return CloseReason::TIMED_OUT;
-        }
-        if (error.error_type == WEBSOCKET_ERROR_TYPE_SERVER_CLOSE ||
-            (error.error_type == WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT && this->connected())) {
-            return CloseReason::PEER_CLOSED;
-        }
-        return CloseReason::FAILED;
     }
 
     DialTarget target_;
-    std::string host_header_;
-    /// Writer task, read by the client task while it runs: the address being tried
-    std::string address_;
-    esp_websocket_client_handle_t client_{nullptr};
-    esp_transport_list_handle_t transports_{nullptr};
-    esp_transport_handle_t socket_transport_{nullptr};
-    esp_transport_handle_t ws_{nullptr};
-    std::mutex socket_mutex_;
-    /// Guarded by socket_mutex_; -1 when no socket is open
-    int fd_{-1};
-    /// Guarded by socket_mutex_: fd_ is shut down, to be closed when the transport is destroyed
-    bool shut_{false};
-    /// The client task has ended
-    std::atomic<bool> finished_{false};
-    std::atomic<int> attempt_failure_{static_cast<int>(CloseReason::FAILED)};
-    /// Client task only: the attempt's TCP connect timed out
-    bool connect_timed_out_{false};
-    /// A frame begun with begin_frame() is arriving
-    bool in_frame_{false};
-    /// Given by resume_inbound(), taken by the client task holding a message
+    /// Given by resume_inbound(), taken by the reader holding a message
     SemaphoreHandle_t resume_{xSemaphoreCreateBinary()};
+    /// Writer task: the reader was started, and shut() waits for its end
+    bool reader_started_{false};
+    /// Set by the writer's shut(): the reader stops at its next look
+    std::atomic<bool> stopping_{false};
+    /// Set by the reader as it ends
+    std::atomic<bool> reader_done_{false};
+    /// Reader task only: the bytes read and not yet parsed, buffer_[buffer_begin_, buffer_end_)
+    std::array<uint8_t, READ_BUFFER_BYTES> buffer_{};
+    size_t buffer_begin_{0};
+    size_t buffer_end_{0};
+    /// Reader task only: now_us() at the last read that returned
+    int64_t rx_us_{0};
 };
 
 }  // namespace
@@ -594,7 +467,7 @@ public:
     Impl(EventLoop& loop, const DialTarget& target, const TransportSettings& settings,
          DialFn on_done)
         : timer_(loop),
-          link_(make_shared_external<ClientLink>(loop.impl().core(), settings, target)),
+          link_(make_shared_external<DialLink>(loop.impl().core(), settings, target)),
           connection_(Connection::Impl::make(loop, link_, settings)),
           settings_(settings),
           on_done_(std::move(on_done)) {}
@@ -611,7 +484,7 @@ public:
             this->timer_.start(now_us(), [this] { this->finish(CloseReason::FAILED); });
             return;
         }
-        // The client task bounds the connect and the upgrade's reads; this bounds the whole dial
+        // The reader task bounds each connect and upgrade; this bounds the whole dial
         this->timer_.start(
             now_us() + this->settings_.connect_timeout_us + this->settings_.handshake_timeout_us,
             [this] { this->finish(CloseReason::TIMED_OUT); });
@@ -656,7 +529,7 @@ private:
     }
 
     Timer timer_;
-    SharedPtr<ClientLink> link_;
+    SharedPtr<DialLink> link_;
     SharedPtr<Connection::Impl> connection_;
     TransportSettings settings_;
     DialFn on_done_;

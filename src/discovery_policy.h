@@ -136,9 +136,12 @@ constexpr size_t MAX_NAME_BYTES = 1024;
 /// ASCII other than '?' and '#', at most max_bytes
 bool is_valid_path(std::string_view path, size_t max_bytes);
 
-/// @brief client as the server keeps it: at most discovery_limits::MAX_ADDRESSES addresses; nullopt
-/// when its instance is empty or too long, it has no address or port, or its path or name is not
-/// a valid TXT value (spec connection.md "Server Initiated Connections": `path` is required)
+/// @brief client as the server keeps it: only the addresses is_ip_address_text() takes
+/// (`url_text.h`), at most discovery_limits::MAX_ADDRESSES of them; nullopt when its instance is
+/// empty or too long, its host is too long, holds a control character, a space or ':' or is dots
+/// only, it has no such address or no port, or its path or name is not a valid TXT value (spec
+/// connection.md "Server Initiated Connections": `path` is required). An empty host is kept: the
+/// dial names the first address instead.
 std::optional<DiscoveredClient> validated(const DiscoveredClient& client);
 
 /// @brief The `_sendspin-server._tcp` advertisement for a server named name (spec connection.md

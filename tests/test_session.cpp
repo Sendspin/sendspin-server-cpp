@@ -637,6 +637,22 @@ TEST_P(SessionTest, BecomesActiveWhenTheActivationIsTaken) {
     EXPECT_EQ(h.session.phase(), SessionPhase::ACTIVE);
 }
 
+// A server/time reply ends its write (SessionDriver::on_writable()), so no message is built
+// between its stamp and its write: it alone is marked so
+TEST_P(SessionTest, MarksOnlyATimeReplyAsEndingItsWrite) {
+    Harness h(GetParam());
+    ASSERT_NO_FATAL_FAILURE(h.activate());
+    const std::string control = R"({"type":"group/update","payload":{}})";
+    h.session.queue_json_message(control);
+    h.send(h.client.encrypt_json(client_time_json(3)));
+    const std::vector<OutboundMessage> sent = h.take_all();
+    ASSERT_EQ(sent.size(), 2U);
+    EXPECT_NE(h.decrypt_json(sent[0]).find("server/time"), std::string::npos);
+    EXPECT_TRUE(sent[0].time_reply);
+    EXPECT_EQ(h.decrypt_json(sent[1]), control);
+    EXPECT_FALSE(sent[1].time_reply);
+}
+
 // messaging.md "server/time" and "Transmit timestamps": the receive stamp of the request, and a
 // transmit stamp read when the reply is taken, not when it was queued
 TEST_P(SessionTest, AnswersClientTimeWithAStampTakenWhenTheReplyIsTaken) {

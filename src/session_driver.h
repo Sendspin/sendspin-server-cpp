@@ -14,8 +14,9 @@
 
 /// @file session_driver.h
 /// @brief Runs a Session over a Connection: feeds it inbound messages and its deadlines, writes
-/// its outbound messages one at a time under the transport's write invariant, and closes the
-/// connection once the session ends and its last message is written. Core thread only.
+/// its outbound messages under the transport's write invariant, each write taking every message
+/// ready as it starts, and closes the connection once the session ends and its last message is
+/// written. Core thread only.
 
 #pragma once
 

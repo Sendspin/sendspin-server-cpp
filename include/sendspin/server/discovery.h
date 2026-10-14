@@ -50,7 +50,8 @@ struct DiscoveryRequest {
 struct DiscoveredClient {
     /// The service instance name, which identifies the client while it advertises
     std::string instance;
-    /// Literal IPv4 or IPv6 addresses, an IPv6 link-local one with its `%` zone, to try in order
+    /// Literal IPv4 or IPv6 addresses, an IPv6 link-local one with its `%` zone, to try in order;
+    /// the server drops any other text
     std::vector<std::string> addresses;
     /// The SRV target host name, for the WebSocket upgrade's Host header; empty for none
     std::string host;
