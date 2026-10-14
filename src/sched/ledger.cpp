@@ -72,7 +72,12 @@ int64_t Ledger::completion(const Entry& entry) const {
 }
 
 size_t Ledger::first_counting(int64_t now_us) const {
-    return this->first_index([&](const Entry& entry) { return this->completion(entry) > now_us; });
+    const auto counts = [&](const Entry& entry) { return this->completion(entry) > now_us; };
+    // Once pruned, a visualizer's entries all count and a player's oldest mostly does: no search
+    if (this->entries_.empty() || counts(this->entries_.front())) {
+        return 0;
+    }
+    return this->first_index(counts);
 }
 
 int64_t Ledger::bytes_from(size_t index) const {
