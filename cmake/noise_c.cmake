@@ -15,9 +15,14 @@
 #   NOISE_USE_LIBSODIUM=0:         no libsodium backend
 #   NOISE_USE_CUSTOM_RAND=0:       the OS RNG (rand_os.c)
 
+# The library names its suites, which noise-c resolves in its own sources: the check reads the
+# target's own definitions (COMPILE_DEFINITIONS), which compile those sources, and the ones it
+# exports (INTERFACE_COMPILE_DEFINITIONS), which an INTERFACE library's sources compile with
 if(TARGET noise_c)
     get_target_property(_sendspin_server_noise_definitions noise_c INTERFACE_COMPILE_DEFINITIONS)
-    if(NOT "NOISE_USE_AES=1" IN_LIST _sendspin_server_noise_definitions)
+    get_target_property(_sendspin_server_noise_private_definitions noise_c COMPILE_DEFINITIONS)
+    if(NOT "NOISE_USE_AES=1" IN_LIST _sendspin_server_noise_definitions AND
+       NOT "NOISE_USE_AES=1" IN_LIST _sendspin_server_noise_private_definitions)
         message(FATAL_ERROR "The existing noise_c target does not define NOISE_USE_AES=1; "
                             "sendspin-server-cpp needs the AESGCM suite")
     endif()
