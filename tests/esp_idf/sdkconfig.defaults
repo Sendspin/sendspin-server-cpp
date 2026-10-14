@@ -1,0 +1,4 @@
+# src/esp/ catches the exception a thread that fails to start throws
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+# src/esp/fft_esp_dsp.cpp's RealFft needs at least 4096 points
+CONFIG_DSP_MAX_FFT_SIZE_4096=y

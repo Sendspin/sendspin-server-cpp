@@ -1,0 +1,2 @@
+# The component's Kconfig, which ESP-IDF reads from the component's directory
+rsource "../../../../Kconfig"
