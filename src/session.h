@@ -270,6 +270,12 @@ public:
         return this->pairing_queued_;
     }
 
+    /// @brief Whether a re-handshake is queued or not yet complete: from rekey() until its frozen
+    /// activation is taken for writing
+    bool rekey_pending() const {
+        return !this->rekeys_.empty() || this->rekey_phase_ != sched::Phase::NORMAL;
+    }
+
     /// @brief The handshake hash `h` of the keys in use, from AWAIT_CLIENT_HELLO on
     const HandshakeHash& handshake_hash() const;
 

@@ -1006,7 +1006,8 @@ TEST_P(SessionTest, MatchesTheReferencedPskOrFallsBackToTheSentinel) {
 // connection.md "Re-handshake": message 1 travels as an encrypted noise/handshake under the current
 // keys with `h` as the prologue; nothing is written until message 2, old-key messages are taken in
 // meanwhile (a time request keeps its receive stamp), and the frozen server/activate is the first
-// message under the new keys, ahead of the time reply and anything queued during the freeze
+// message under the new keys, ahead of the time reply and anything queued during the freeze. The
+// re-handshake is pending from rekey() until the frozen activation is taken.
 TEST_P(SessionTest, RekeysWithTheFrozenActivationFirstUnderTheNewKeys) {
     using sendspin::server::HandshakePsk;
     using sendspin::server::PskCategory;
@@ -1014,8 +1015,10 @@ TEST_P(SessionTest, RekeysWithTheFrozenActivationFirstUnderTheNewKeys) {
     Harness h(GetParam());
     ASSERT_NO_FATAL_FAILURE(h.activate());
     const sendspin::server::HandshakeHash prior_h = h.client.handshake_hash();
+    EXPECT_FALSE(h.session.rekey_pending());
     h.session.rekey(HandshakePsk{PskCategory::LONG_TERM, psk_of(4)},
                     ServerActivate{true, std::nullopt, std::nullopt});
+    EXPECT_TRUE(h.session.rekey_pending());
     // The activations queued from now go out under the new PSK
     EXPECT_EQ(h.session.next_psk_match(), (PskMatch{PskCategory::LONG_TERM, std::nullopt}));
     EXPECT_EQ(h.session.psk_match(), (PskMatch{PskCategory::SENTINEL, std::nullopt}));
@@ -1029,6 +1032,7 @@ TEST_P(SessionTest, RekeysWithTheFrozenActivationFirstUnderTheNewKeys) {
     EXPECT_EQ(payload_1["psk_id"], sendspin::server::psk_id_for(psk_of(4)));
     EXPECT_EQ(payload_1["psk_category"], "lt");
     ASSERT_TRUE(h.session.deadline_us());
+    EXPECT_TRUE(h.session.rekey_pending());
 
     // The freeze: a time request under the old keys and a queued message wait
     constexpr int64_t TIME_RX_US = 7000;
@@ -1042,7 +1046,9 @@ TEST_P(SessionTest, RekeysWithTheFrozenActivationFirstUnderTheNewKeys) {
     EXPECT_EQ(h.session.psk_match(), (PskMatch{PskCategory::LONG_TERM, std::nullopt}));
     EXPECT_FALSE(h.session.deadline_us());
     EXPECT_NE(h.client.handshake_hash(), prior_h);
+    EXPECT_TRUE(h.session.rekey_pending());
     sent = h.take_all();
+    EXPECT_FALSE(h.session.rekey_pending());
     ASSERT_EQ(sent.size(), 3U);
     EXPECT_EQ(h.decrypt_json(sent[0]),
               R"({"type":"server/activate","payload":{"activities":["playback"]}})");
