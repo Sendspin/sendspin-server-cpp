@@ -23,6 +23,7 @@
 #include "messages.h"
 #include "raw_client.h"
 #include "session.h"
+#include "trust_fixtures.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 #include <noise/protocol.h>
@@ -52,6 +53,7 @@ using sendspin::server::test::bytes_of;
 using sendspin::server::test::client_hello_json;
 using sendspin::server::test::client_time_json;
 using sendspin::server::test::NoiseResponder;
+using sendspin::server::test::psk_of;
 using sendspin::server::test::text_of;
 
 constexpr int64_t START_US = 1000;
@@ -77,12 +79,6 @@ public:
 private:
     sendspin::server::HandshakePsk psk_;
 };
-
-sendspin::server::Psk psk_of(uint8_t byte) {
-    sendspin::server::Psk psk{};
-    psk.fill(byte);
-    return psk;
-}
 
 // A session and its client. Not movable: the session refers to the identity and settings.
 class Harness {
