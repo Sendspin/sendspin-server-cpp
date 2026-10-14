@@ -18,6 +18,7 @@
 /// that the server activates and keeps time-synced.
 
 #include "crypto/keys.h"
+#include "peer.h"
 #include "test_ports.h"
 #include "test_recorder.h"
 #include <gtest/gtest.h>
@@ -50,6 +51,7 @@ using sendspin::server::ServerConfig;
 using sendspin::server::StartResult;
 using sendspin::server::TraceDirection;
 using sendspin::server::TracedMessage;
+using sendspin::server::test::AlwaysReady;
 using sendspin::server::test::MemoryProvider;
 using sendspin::server::test::Recorder;
 namespace persistence_keys = sendspin::server::persistence_keys;
@@ -243,13 +245,6 @@ TEST(ServerPersistence, LoadsTheSameKeyOnLaterStarts) {
 // An in-process client
 // ==============================================================================
 
-class AlwaysReady : public sendspin::SendspinNetworkProvider {
-public:
-    bool is_network_ready() override {
-        return true;
-    }
-};
-
 /// A sendspin-cpp client listening on a loopback port for the server to dial. Its main loop runs
 /// on the test thread through run_until().
 class PeerClient {
@@ -257,7 +252,8 @@ public:
     PeerClient() : PeerClient(sendspin::server::test::free_port()) {}
 
     /// Listens on port, for a URL the server was given before the peer started
-    explicit PeerClient(uint16_t port) : port_(port), client_(make_config(port_)) {
+    explicit PeerClient(uint16_t port)
+        : port_(port), client_(sendspin::server::test::peer_config("sendspin-cpp peer", port_)) {
         sendspin::PlayerRoleConfig player;
         // One format, assigned by count: GCC 13 -Warray-bounds misreads an initializer-list
         // assignment
@@ -278,7 +274,7 @@ public:
     PeerClient& operator=(const PeerClient&) = delete;
 
     std::string url() const {
-        return "ws://127.0.0.1:" + std::to_string(this->port_) + "/sendspin";
+        return sendspin::server::test::peer_url(this->port_);
     }
 
     sendspin::SendspinClient& client() {
@@ -288,22 +284,10 @@ public:
     /// Runs the client's main loop until done() holds, with no timeout
     template <typename Predicate>
     void run_until(Predicate done) {
-        while (!done()) {
-            this->client_.loop();
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
+        sendspin::server::test::run_until(this->client_, done);
     }
 
 private:
-    static sendspin::SendspinClientConfig make_config(uint16_t port) {
-        sendspin::SendspinClientConfig config;
-        config.name = "sendspin-cpp peer";
-        config.server_port = port;
-        // Bursts often enough that several complete within a test
-        config.time_burst_interval_ms = 50;
-        return config;
-    }
-
     uint16_t port_;
     AlwaysReady network_;
     sendspin::SendspinClient client_;
@@ -564,7 +548,7 @@ TEST(ServerConnection, RetriesAUrlUntilItsClientListens) {
     };
     ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
     const uint16_t port = sendspin::server::test::free_port();
-    const std::string url = "ws://127.0.0.1:" + std::to_string(port) + "/sendspin";
+    const std::string url = sendspin::server::test::peer_url(port);
     sendspin::server::ConnectOptions options;
     options.retry_until_connected = true;
     ASSERT_TRUE(server.connect_url(url, options));

@@ -18,7 +18,6 @@
 
 #pragma once
 
-#include <sendspin/client.h>
 #include <sendspin/player_role.h>
 #include <sendspin/server/types.h>
 
@@ -221,13 +220,6 @@ private:
     bool streaming_{false};
     bool stopping_{false};
     std::thread thread_;
-};
-
-class AlwaysReady : public sendspin::SendspinNetworkProvider {
-public:
-    bool is_network_ready() override {
-        return true;
-    }
 };
 
 }  // namespace sendspin::server::test

@@ -17,6 +17,7 @@
 /// the raw client checks the exact messages, and in-process sendspin-cpp clients show what a
 /// client library makes of them.
 
+#include "peer.h"
 #include "raw_client.h"
 #include "test_ports.h"
 #include "test_recorder.h"
@@ -49,7 +50,6 @@ namespace {
 
 using sendspin::server::ApprovalScope;
 using sendspin::server::ClientDisconnect;
-using sendspin::server::ClientInfo;
 using sendspin::server::CommandArgs;
 using sendspin::server::ControllerCaps;
 using sendspin::server::DisconnectReason;
@@ -66,6 +66,8 @@ using sendspin::server::StartResult;
 using sendspin::server::StreamCodec;
 using sendspin::server::StreamFormat;
 using sendspin::server::TransportCommand;
+using sendspin::server::test::AlwaysReady;
+using sendspin::server::test::client_at;
 using sendspin::server::test::MemoryProvider;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
@@ -1142,13 +1144,6 @@ TEST(ServerGroups, SwitchesBackToTheGroupItLeft) {
 // In-process sendspin-cpp clients
 // ==============================================================================
 
-class AlwaysReady : public sendspin::SendspinNetworkProvider {
-public:
-    bool is_network_ready() override {
-        return true;
-    }
-};
-
 /// What a sendspin-cpp client's roles report; on its main loop, the test's thread, except
 /// on_audio_write()
 class Events : public sendspin::PlayerRoleListener,
@@ -1202,7 +1197,8 @@ public:
 class Peer {
 public:
     Peer(const std::string& name, bool controller, uint8_t volume)
-        : port_(sendspin::server::test::free_port()), client_(make_config(name, this->port_)) {
+        : port_(sendspin::server::test::free_port()),
+          client_(sendspin::server::test::peer_config(name, this->port_)) {
         sendspin::PlayerRoleConfig config;
         // One format, assigned by count: GCC 13 -Warray-bounds misreads an initializer-list
         // assignment
@@ -1229,7 +1225,7 @@ public:
     Peer& operator=(const Peer&) = delete;
 
     std::string url() const {
-        return "ws://127.0.0.1:" + std::to_string(this->port_) + "/sendspin";
+        return sendspin::server::test::peer_url(this->port_);
     }
 
     void loop() {
@@ -1241,14 +1237,6 @@ public:
     sendspin::ControllerRole* controller{nullptr};
 
 private:
-    static sendspin::SendspinClientConfig make_config(const std::string& name, uint16_t port) {
-        sendspin::SendspinClientConfig config;
-        config.name = name;
-        config.server_port = port;
-        config.time_burst_interval_ms = 50;
-        return config;
-    }
-
     uint16_t port_;
     AlwaysReady network_;
     sendspin::SendspinClient client_;
@@ -1257,28 +1245,19 @@ private:
 /// Runs each peer's main loop and step on this thread until done() holds, with no timeout
 template <typename Done, typename Step>
 void run_until(const std::vector<Peer*>& peers, Done done, Step step) {
-    while (!done()) {
-        for (Peer* peer : peers) {
-            peer->loop();
-        }
-        step();
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
+    sendspin::server::test::poll_until(
+        [&] {
+            for (Peer* peer : peers) {
+                peer->loop();
+            }
+            step();
+        },
+        done);
 }
 
 template <typename Done>
 void run_until(const std::vector<Peer*>& peers, Done done) {
     run_until(peers, done, [] {});
-}
-
-/// The client_id of the client at url, or empty
-std::string client_at(const SendspinServer& server, const std::string& url) {
-    for (const ClientInfo& client : server.clients()) {
-        if (client.url == url) {
-            return client.client_id;
-        }
-    }
-    return {};
 }
 
 /// Index of the last entry equal to what, or -1

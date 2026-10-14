@@ -25,6 +25,7 @@
 #include "fragmentation.h"
 #include "frame_encoder.h"
 #include "opus_reader.h"
+#include "peer.h"
 #include "player_sink.h"
 #include "raw_client.h"
 #include "test_ports.h"
@@ -163,7 +164,9 @@ class Peer : public sendspin::SourceRoleListener {
 public:
     /// @param bits the player's and the PCM source's depth; an Opus source captures 16 bits
     Peer(bool player, std::optional<Codec> source, uint32_t bits)
-        : port_(sendspin::server::test::free_port()), client_(make_config(this->port_)) {
+        : port_(sendspin::server::test::free_port()),
+          client_(sendspin::server::test::peer_config("Peer " + std::to_string(this->port_),
+                                                      this->port_)) {
         if (player) {
             sendspin::PlayerRoleConfig config;
             config.audio_formats.push_back({Codec::PCM, 2, RATE, static_cast<uint8_t>(bits)});
@@ -229,7 +232,7 @@ public:
     }
 
     std::string url() const {
-        return "ws://127.0.0.1:" + std::to_string(this->port_) + "/sendspin";
+        return sendspin::server::test::peer_url(this->port_);
     }
 
     sendspin::SendspinClient& client() {
@@ -245,14 +248,6 @@ public:
     int stops{0};
 
 private:
-    static sendspin::SendspinClientConfig make_config(uint16_t port) {
-        sendspin::SendspinClientConfig config;
-        config.name = "Peer " + std::to_string(port);
-        config.server_port = port;
-        config.time_burst_interval_ms = 50;
-        return config;
-    }
-
     uint16_t port_;
     AlwaysReady network_;
     sendspin::SendspinClient client_;
@@ -303,12 +298,7 @@ public:
     /// Runs every peer's main loop on this thread until done() holds, with no timeout
     template <typename Predicate>
     void run_until(Predicate done) {
-        while (!done()) {
-            for (const std::unique_ptr<Peer>& peer : this->peers) {
-                peer->client().loop();
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
+        sendspin::server::test::run_all_until(this->peers, done);
     }
 
     /// A copy of what the trace holds for client_id
