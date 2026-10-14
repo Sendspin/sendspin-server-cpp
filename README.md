@@ -39,7 +39,7 @@ cmake -B build
 cmake --build build
 ```
 
-This builds the library (target `sendspin_server_cpp`) and the `server_cli` example (`-DSENDSPIN_SERVER_BUILD_EXAMPLES=OFF` skips it). Options: `-DSENDSPIN_SERVER_ENABLE_DISCOVERY=OFF` builds without mDNS, `-DSENDSPIN_SERVER_ENABLE_OPUS=OFF` without the Opus encoder and decoder, and `-DSENDSPIN_SERVER_ENABLE_WERROR=ON` makes warnings in this project's targets errors, as CI builds.
+This builds the library (target `sendspin_server_cpp`, alias `sendspin_server_cpp::sendspin_server_cpp`) and the `server_cli` example (`-DSENDSPIN_SERVER_BUILD_EXAMPLES=OFF` skips it). Options: `-DSENDSPIN_SERVER_ENABLE_DISCOVERY=OFF` builds without mDNS, `-DSENDSPIN_SERVER_ENABLE_OPUS=OFF` without the Opus encoder and decoder, and `-DSENDSPIN_SERVER_ENABLE_WERROR=ON` makes warnings in this project's targets errors, as CI builds.
 
 Dependencies (fetched automatically via CMake FetchContent at pinned versions): Boost.Beast and Boost.Asio (a system Boost 1.90 or later is used when installed), ArduinoJson, noise-c, micro-flac, micro-opus and pffft. micro-resampler and stb are vendored in `third_party/`; `NOTICES.md` lists every dependency's license.
 

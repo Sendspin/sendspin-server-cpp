@@ -16,8 +16,8 @@
 /// @brief The client records: each client's approval for unpaired access, its long-term PSK once
 /// paired, its last name and the identifiers that show it speaks a newer revision, held on core and
 /// saved through the PersistenceProvider as fixed-size blobs in numbered slots
-/// (persistence_keys.h). A blob of another size holds no record, so a layout that changes size
-/// drops the records saved before it. The codec and the slot bookkeeping are pure.
+/// (persistence_keys.h). A blob of another size or version holds no record, so a layout that
+/// changes drops the records saved before it. The codec and the slot bookkeeping are pure.
 
 #pragma once
 
@@ -86,9 +86,9 @@ void set_details(ClientRecord& record, std::string_view name,
 /// identifiers do not fit
 bool encode_client_record(const ClientRecord& record, ClientRecordBlob& blob);
 
-/// @return nullopt for a blob of another size, a key no client_id names (all zeros included),
-/// another approval byte, a PSK flag other than 0 or 1, a PSK present but all zeros or absent but
-/// not zeros, a length past its field, or nonzero bytes past a field's length
+/// @return nullopt for a blob of another size or version, a key no client_id names (all zeros
+/// included), another approval byte, a PSK flag other than 0 or 1, a PSK present but all zeros or
+/// absent but not zeros, a length past its field, or nonzero bytes past a field's length
 std::optional<ClientRecord> decode_client_record(std::span<const uint8_t> blob);
 
 /// @brief The records by client_id, each with the slot it is saved in

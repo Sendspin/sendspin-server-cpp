@@ -4,7 +4,9 @@
 # The esphome-libs fork (the one sendspin-cpp uses, at its pin) ships only an ESP-IDF
 # CMakeLists.txt, so it is populated without being added (SOURCE_SUBDIR names a directory that
 # does not exist) and built here from a manual source list. sendspin-cpp's host build uses this
-# target instead of building its own when a `noise_c` target exists.
+# target instead of building its own when a `noise_c` target exists. A `noise_c` target a parent
+# project defined first is used here instead, and must register AES-GCM (NOISE_USE_AES=1): the
+# server accepts the AESGCM suite.
 #
 # Compile definitions:
 #   NOISE_USE_REFERENCE_BACKEND=1: the pure-C reference backend
@@ -12,6 +14,15 @@
 #   NOISE_USE_OPENSSL=1:           AES-GCM from OpenSSL (src/backend/openssl/cipher-aesgcm.c)
 #   NOISE_USE_LIBSODIUM=0:         no libsodium backend
 #   NOISE_USE_CUSTOM_RAND=0:       the OS RNG (rand_os.c)
+
+if(TARGET noise_c)
+    get_target_property(_sendspin_server_noise_definitions noise_c INTERFACE_COMPILE_DEFINITIONS)
+    if(NOT "NOISE_USE_AES=1" IN_LIST _sendspin_server_noise_definitions)
+        message(FATAL_ERROR "The existing noise_c target does not define NOISE_USE_AES=1; "
+                            "sendspin-server-cpp needs the AESGCM suite")
+    endif()
+    return()
+endif()
 
 if(APPLE AND NOT DEFINED OPENSSL_ROOT_DIR)
     # Homebrew's openssl@3 is keg-only, so FindOpenSSL does not look there by itself

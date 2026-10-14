@@ -123,6 +123,9 @@ target_compile_options(sendspin_server_cpp_tests PRIVATE
 
 target_include_directories(sendspin_server_cpp_tests PRIVATE ${PROJECT_SOURCE_DIR}/src
                                                          ${PROJECT_SOURCE_DIR}/examples/server_cli)
+# The library's profile (src/profile.h), for the private headers included here
+target_compile_definitions(sendspin_server_cpp_tests PRIVATE
+                           ${_sendspin_server_profile_definitions})
 
 # White-box: test_dispatcher.cpp reads Dispatcher::token_ once the thread has ended: a later
 # thread given the ended thread's token would show it, but a host need not hand a token out again.
@@ -210,6 +213,8 @@ sendspin_server_cpp_configure_target(sendspin_server_cpp_soak)
 target_compile_options(sendspin_server_cpp_soak PRIVATE
                        $<$<CXX_COMPILER_ID:GNU>:-Wno-maybe-uninitialized>)
 target_include_directories(sendspin_server_cpp_soak PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(sendspin_server_cpp_soak PRIVATE
+                           ${_sendspin_server_profile_definitions})
 target_link_libraries(sendspin_server_cpp_soak PRIVATE
     sendspin_server_cpp
     ArduinoJson

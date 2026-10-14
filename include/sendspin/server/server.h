@@ -40,14 +40,10 @@ public:
     virtual ~PersistenceProvider() = default;
 
     /// @return The bytes stored under key, or nullopt when there are none
-    virtual std::optional<std::vector<uint8_t>> load_blob(const std::string& /*key*/) {
-        return std::nullopt;
-    }
+    virtual std::optional<std::vector<uint8_t>> load_blob(const std::string& key) = 0;
 
     /// @return true when the write was accepted: stored, or queued until the next commit()
-    virtual bool save_blob(const std::string& /*key*/, const uint8_t* /*data*/, size_t /*len*/) {
-        return false;
-    }
+    virtual bool save_blob(const std::string& key, const uint8_t* data, size_t len) = 0;
 
     /// @brief Makes every accepted write durable. A provider that writes through in save_blob()
     /// keeps the default.

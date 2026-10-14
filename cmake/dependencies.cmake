@@ -106,14 +106,17 @@ endif()
 # micro-resampler, vendored (third_party/micro-resampler/VENDORED.md)
 # ==============================================================================
 
-set(MICRO_RESAMPLER_BUILD_TESTS OFF)
-set(MICRO_RESAMPLER_NATIVE_TUNING OFF)
-add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/micro-resampler
-                 ${PROJECT_BINARY_DIR}/third_party/micro-resampler SYSTEM)
-# Its QUAD coefficient path compiles in whenever Boost.Multiprecision headers happen to be on its
-# include path. The server never requests QUAD, so keep the build independent of which Boost is
-# installed.
-target_compile_definitions(micro-resampler PRIVATE RESAMPLER_DISABLE_QUAD_PRECISION)
+# A consumer that defined a micro-resampler target first keeps its own
+if(NOT TARGET micro-resampler)
+    set(MICRO_RESAMPLER_BUILD_TESTS OFF)
+    set(MICRO_RESAMPLER_NATIVE_TUNING OFF)
+    add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/micro-resampler
+                     ${PROJECT_BINARY_DIR}/third_party/micro-resampler SYSTEM)
+    # Its QUAD coefficient path compiles in whenever Boost.Multiprecision headers happen to be on
+    # its include path. The server never requests QUAD, so keep the build independent of which
+    # Boost is installed.
+    target_compile_definitions(micro-resampler PRIVATE RESAMPLER_DISABLE_QUAD_PRECISION)
+endif()
 
 # ==============================================================================
 # pffft, the visualizer's FFT on the host (src/fft_pffft.cpp): its single-precision real FFT only,
