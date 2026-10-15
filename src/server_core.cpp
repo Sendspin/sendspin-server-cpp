@@ -905,16 +905,25 @@ void ServerCore::write_record(const std::string& client_id, size_t slot,
     // the loop outlives the dispatcher thread (Running joins it first)
     this->dispatcher_.post(
         [this, &loop = this->loop_, provider = this->provider_, listener = this->listener_,
-         key = persistence_keys::client_record_key(slot), blob = std::move(blob),
+         failed = this->failed_writes_, slot, blob = std::move(blob),
          error =
              ServerError{ErrorKind::PERSISTENCE_FAILED, {}, client_id, std::nullopt, std::nullopt},
          log = this->log_, whom = this->record_owner(client_id), done = std::move(done)] {
-            const bool saved = provider->save_blob(key, blob->bytes.data(), blob->bytes.size()) &&
+            // This write replaces a failed one to its slot
+            failed->erase(slot);
+            retry_writes(*provider, *failed, log);
+            const bool saved = provider->save_blob(persistence_keys::client_record_key(slot),
+                                                   blob->bytes.data(), blob->bytes.size()) &&
                                provider->commit();
             if (!saved) {
                 SS_LOGE(log, "saving the record of %s failed", whom.c_str());
                 if (listener != nullptr) {
                     listener->on_error(error);
+                }
+                // A caller that waits for the outcome handles the failure itself (put_back()
+                // writes the slot again)
+                if (!done) {
+                    failed->emplace(slot, blob);
                 }
             }
             if (done) {
@@ -927,6 +936,21 @@ void ServerCore::write_record(const std::string& client_id, size_t slot,
                 });
             }
         });
+}
+
+void ServerCore::retry_writes(PersistenceProvider& provider, FailedWrites& failed,
+                              const Logger& log) {
+    for (auto it = failed.begin(); it != failed.end();) {
+        const auto& [slot, blob] = *it;
+        if (provider.save_blob(persistence_keys::client_record_key(slot), blob->bytes.data(),
+                               blob->bytes.size()) &&
+            provider.commit()) {
+            SS_LOGI(log, "client record slot %zu saved on a retry", slot);
+            it = failed.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void ServerCore::refresh_record(const Client& client) {
@@ -1749,6 +1773,16 @@ void ServerCore::shutdown(int64_t grace_us) {
         this->put_back(client_id, unsaved);
     }
     this->unsaved_records_.clear();
+    // Behind every record write posted, the last chance for one that failed to land
+    if (this->provider_ != nullptr) {
+        this->dispatcher_.post(
+            [provider = this->provider_, failed = this->failed_writes_, log = this->log_] {
+                retry_writes(*provider, *failed, log);
+                for (const auto& [slot, blob] : *failed) {
+                    SS_LOGE(log, "client record slot %zu stays as last saved", slot);
+                }
+            });
+    }
     if (this->listener_socket_) {
         this->listener_socket_->close();
     }

@@ -262,8 +262,11 @@ enum class ErrorKind : uint8_t {
     PIPELINE_FAILED,
     /// The client record of client_id could not be saved or committed through the
     /// PersistenceProvider, or the store holds persistence_keys::MAX_CLIENT_RECORDS records
-    /// already. A changed approval, name or identifiers apply until the server stops; a long-term
-    /// PSK is never used unsaved, and its record is put back as it was.
+    /// already. A changed approval, name or identifiers and an unpairing apply at once, and a
+    /// record the provider failed is written again before each later record write and at stop()
+    /// until it lands; one still failing at stop() is lost (logged), and the next start loads the
+    /// record as last saved. A long-term PSK is never used unsaved, and its record is put back as
+    /// it was.
     PERSISTENCE_FAILED,
     /// A source's input stream could not be taken (SendspinServer::route_source()): its format is
     /// one the server does not decode, its FLAC header one the decoder cannot read, the group's

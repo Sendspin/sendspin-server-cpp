@@ -61,6 +61,7 @@ Check against `docs/conventions.md` ("Threading and cross-thread state") and the
 
 - A private key or PSK held outside a wiping type (`Identity`, `HandshakePsk`, `ClientRecord`), a blob that held one left unwiped after the provider call, and a secret formatted into a string are findings (`docs/conventions.md` "Secrets").
 - A credential referenced in a handshake before the provider reported it durable is a finding.
+- A record write that drops a credential (a long-term PSK, an approval) bypassing `write_record()`, so a failed write is not written again, is a finding.
 
 ## Header visibility and API shape
 
