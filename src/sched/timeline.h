@@ -49,9 +49,10 @@ struct Segment {
     int64_t unshifted_us{0};
     uint32_t rate{0};
     uint8_t channels{0};
-    /// The time from `T0` to `position` in picoseconds, floored at each segment: the boundary
-    /// time output indices derive from, which `u_j`'s whole microseconds would drift by up to
-    /// one per segment
+    /// The time from `T0` to `position`, whole seconds and the picoseconds past them (below
+    /// 10^12), floored to the picosecond at each segment: the boundary time output indices derive
+    /// from, which `u_j`'s whole microseconds would drift by up to one per segment
+    int64_t elapsed_s{0};
     int64_t elapsed_ps{0};
 };
 

@@ -18,19 +18,13 @@
 /// new run; and LiveSourceSink, which passes a source on the server's clock through unaltered and
 /// corrects one whose clock drifts, with the build's correction
 
-#include "dispatcher.h"
-#include "host_view.h"
-#include "job_view.h"
-#include "pcm_convert.h"
 #include "profile.h"
 #include "source_sink.h"
+#include "source_sink_rig.h"
 #include <gtest/gtest.h>
 
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <memory>
-#include <numbers>
 #include <optional>
 #include <string>
 #include <vector>
@@ -42,10 +36,10 @@ using sendspin::server::SOURCE_RESTART_GAP_US;
 using sendspin::server::SourceChunkAction;
 using sendspin::server::SourceTiming;
 
+using sendspin::server::test::JITTER_US;
+using sendspin::server::test::PATH_US;
+
 constexpr int64_t CHUNK_US = 20000;
-constexpr int64_t JITTER_US = 60000;
-/// The path from capture end to receipt when nothing holds the audio back
-constexpr int64_t PATH_US = 3000;
 
 /// One chunk: captured at capture_us, received late_us after its path's usual time
 struct Chunk {
@@ -118,103 +112,13 @@ TEST(SourceChunkJudgement, RebasesAfterStaleAudioOutlastsARestartsGap) {
 // LiveSourceSink
 // ==============================================================================
 
-using sendspin::server::Dispatcher;
-using sendspin::server::GroupId;
-using sendspin::server::GroupParams;
-using sendspin::server::HostView;
-using sendspin::server::InputId;
-using sendspin::server::InputKind;
-using sendspin::server::InputOptions;
-using sendspin::server::LiveSourceSink;
 using sendspin::server::ResamplerQuality;
 using sendspin::server::SampleFormat;
-using sendspin::server::test::job_view_of;
-
-constexpr uint32_t RATE = 48000;
-constexpr size_t CHUNK = RATE / 50;
-/// The test tone's largest step between two frames at RATE: 100 Hz at half scale
-const double TONE_STEP = 0.5 * 2.0 * std::numbers::pi * 100.0 / RATE;
-
-/// A source's tone at frame position, as a 16-bit sample
-int16_t tone(uint64_t position) {
-    return static_cast<int16_t>(std::lround(
-        16383.0 * std::sin(2.0 * std::numbers::pi * 100.0 * static_cast<double>(position) / RATE)));
-}
-
-/// A mono live input a LiveSourceSink writes into, whose staged audio the rig reads back as
-/// floats and releases, as the pipelines would. Its group lead is raised past everything written
-/// once the run is anchored, so the input never cuts a write to lower its latency.
-class SinkRig {
-public:
-    explicit SinkRig(uint32_t rate = RATE, ResamplerQuality quality = ResamplerQuality::MEDIUM)
-        : rate_(rate) {
-        InputOptions options{{rate, 1, SampleFormat::S16}};
-        options.kind = InputKind::LIVE;
-        this->view = std::make_shared<HostView>(GroupId{1}, InputId{2}, options,
-                                                GroupParams{300000, 0, WRITE_AHEAD_US},
-                                                this->dispatcher, nullptr);
-        this->sink = std::make_unique<LiveSourceSink>(this->view, JITTER_US, quality);
-    }
-
-    ~SinkRig() {
-        this->dispatcher->finish();
-        this->dispatcher->join();
-    }
-
-    SinkRig(const SinkRig&) = delete;
-    SinkRig& operator=(const SinkRig&) = delete;
-
-    /// One chunk of the tone from position, captured at capture_us and received on its path
-    void write(uint64_t position, size_t frames, int64_t capture_us, int64_t late_us = 0) {
-        std::vector<int16_t> pcm(frames);
-        for (size_t i = 0; i < frames; ++i) {
-            pcm[i] = tone(position + i);
-        }
-        const int64_t end = capture_us + static_cast<int64_t>(frames) * 1000000 / this->rate_;
-        this->sink->write(reinterpret_cast<const uint8_t*>(pcm.data()), frames, capture_us,
-                          end + PATH_US + late_us);
-        if (!this->anchored_) {
-            this->view->set_group_params({LEAD_PAST_ALL_US, 0, WRITE_AHEAD_US});
-            this->anchored_ = true;
-        }
-        this->collect();
-    }
-
-    std::shared_ptr<Dispatcher> dispatcher = std::make_shared<Dispatcher>();
-    std::shared_ptr<HostView> view;
-    std::unique_ptr<LiveSourceSink> sink;
-    /// What the input staged, as floats, unless only counted
-    std::vector<float> staged;
-    bool count_only{false};
-    uint64_t staged_count{0};
-
-private:
-    static constexpr int64_t WRITE_AHEAD_US = int64_t{1000} * 1000000;
-    static constexpr int64_t LEAD_PAST_ALL_US = int64_t{1000} * 1000000;
-
-    void collect() {
-        const sendspin::server::JobView job = job_view_of(*this->view);
-        if (job.head <= this->read_to_) {
-            return;
-        }
-        const auto frames = static_cast<size_t>(job.head - this->read_to_);
-        this->staged_count += frames;
-        if (!this->count_only) {
-            std::vector<uint8_t> bytes;
-            ASSERT_TRUE(this->view->read(job.run.epoch, this->read_to_, frames, bytes));
-            const SampleFormat format = this->view->format().format.sample_format;
-            std::vector<float> floats(frames);
-            sendspin::server::to_float(bytes, format, floats);
-            this->staged.insert(this->staged.end(), floats.begin(), floats.end());
-        }
-        this->read_to_ = job.head;
-        this->view->release_before(job.run.epoch, job.head);
-    }
-
-    uint32_t rate_;
-    bool anchored_{false};
-    uint64_t read_to_{0};
-};
+using sendspin::server::test::CHUNK;
+using sendspin::server::test::RATE;
+using sendspin::server::test::SinkRig;
+using sendspin::server::test::tone;
+using sendspin::server::test::TONE_STEP;
 
 /// Where staged and written first differ, past the start: where the correction began
 size_t first_difference(const std::vector<float>& staged, const std::vector<float>& written) {
