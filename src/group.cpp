@@ -221,7 +221,9 @@ void Group::queue_markers(std::optional<sched::TriggerKind> kind) {
 }
 
 void Group::pump_members(bool active_only) {
-    std::vector<GroupMember*> members;
+    // A pump may close a connection, which removes its member: iterate over a copy
+    std::vector<GroupMember*> members = std::move(this->pumped_);
+    members.clear();
     members.reserve(this->members_.size());
     for (const Member& member : this->members_) {
         const Session& session = member.member->session();
@@ -232,6 +234,7 @@ void Group::pump_members(bool active_only) {
     for (GroupMember* member : members) {
         member->pump();
     }
+    this->pumped_ = std::move(members);
 }
 
 // ==============================================================================
@@ -866,7 +869,7 @@ void Group::end_run(sched::EpochId epoch) {
     // already resumed, is a pause, whose speed a resume restores.
     bool paused = false;
     if (this->input_) {
-        const sched::RunState run = this->input_->job_view().run.run;
+        const sched::RunState run = this->input_->run_state();
         paused = run == sched::RunState::PAUSED || run == sched::RunState::PLAYING;
     }
     this->send_metadata(this->metadata_.stop(now_us(), paused));

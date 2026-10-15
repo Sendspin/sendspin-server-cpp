@@ -20,6 +20,7 @@
 
 #include "dispatcher.h"
 #include "host_view.h"
+#include "job_view.h"
 #include "pcm_convert.h"
 #include "profile.h"
 #include "source_sink.h"
@@ -127,6 +128,7 @@ using sendspin::server::InputOptions;
 using sendspin::server::LiveSourceSink;
 using sendspin::server::ResamplerQuality;
 using sendspin::server::SampleFormat;
+using sendspin::server::test::job_view_of;
 
 constexpr uint32_t RATE = 48000;
 constexpr size_t CHUNK = RATE / 50;
@@ -191,7 +193,7 @@ private:
     static constexpr int64_t LEAD_PAST_ALL_US = int64_t{1000} * 1000000;
 
     void collect() {
-        const sendspin::server::JobView job = this->view->job_view();
+        const sendspin::server::JobView job = job_view_of(*this->view);
         if (job.head <= this->read_to_) {
             return;
         }
