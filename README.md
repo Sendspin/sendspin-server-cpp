@@ -43,7 +43,7 @@ This builds the library (target `sendspin_server_cpp`, alias `sendspin_server_cp
 
 Dependencies (fetched automatically via CMake FetchContent at pinned versions): Boost.Beast and Boost.Asio (a system Boost 1.90 or later is used when installed), ArduinoJson, noise-c, micro-flac, micro-opus and pffft. micro-resampler and stb are vendored in `third_party/`; `NOTICES.md` lists every dependency's license.
 
-The library also builds as an ESP-IDF component (`cmake/esp_idf.cmake`); `tests/esp_idf/` is a minimal project that builds it. The project raises `CONFIG_LWIP_MAX_SOCKETS` from ESP-IDF's default of 10: the listener's httpd takes a socket for each accepted connection in its handshake and each activated one, plus three of its own (19 on the embedded profile), and a build with fewer fails; the dials and mDNS need more, as `tests/esp_idf/sdkconfig.defaults` allows.
+The library also builds as an ESP-IDF component (`cmake/esp_idf.cmake`); `tests/esp_idf/` is a minimal project that builds it. The project raises `CONFIG_LWIP_MAX_SOCKETS` from ESP-IDF's default of 10: the listener's httpd takes a socket for each accepted connection in its handshake and each activated one, plus three of its own (19 on the embedded profile), and a build with fewer fails; the dials and mDNS need more, as `tests/esp_idf/sdkconfig.defaults` allows. It raises `CONFIG_LWIP_MAX_ACTIVE_TCP` from 16 too: those sessions, the connections waiting in httpd's backlog (as many as accepted connections in their handshake) and the dials in their handshake (28 on the embedded profile) must fit, or the build fails, and each activated dialed connection takes one more.
 
 ### Tests
 

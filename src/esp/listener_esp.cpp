@@ -62,6 +62,18 @@ static_assert(HTTPD_SESSIONS + HTTPD_OWN_SOCKETS <= CONFIG_LWIP_MAX_SOCKETS,
               "the listener's httpd needs CONFIG_LWIP_MAX_SOCKETS of at least its sessions "
               "(profile::MAX_ACCEPTED_HANDSHAKES + profile::MAX_ACCEPTED_CLIENTS) plus its own 3 "
               "sockets; raise CONFIG_LWIP_MAX_SOCKETS, leaving room for dials and mDNS");
+/// Connections lwIP holds for httpd before it accepts them, as when its sessions are all taken
+constexpr size_t HTTPD_BACKLOG = profile::MAX_ACCEPTED_HANDSHAKES;
+/// lwIP's active TCP connections the caps fill at once: httpd's sessions and backlog and the dials
+/// in their handshake (httpd's listening socket takes a listening one, its control sockets are
+/// UDP). Each activated dialed connection, which no cap bounds, takes one more.
+constexpr size_t CAPPED_TCP_CONNECTIONS = HTTPD_SESSIONS + HTTPD_BACKLOG + profile::MAX_DIALING;
+static_assert(CAPPED_TCP_CONNECTIONS <= CONFIG_LWIP_MAX_ACTIVE_TCP,
+              "CONFIG_LWIP_MAX_ACTIVE_TCP must cover httpd's sessions "
+              "(profile::MAX_ACCEPTED_HANDSHAKES + profile::MAX_ACCEPTED_CLIENTS) and backlog "
+              "(profile::MAX_ACCEPTED_HANDSHAKES) plus the dials in their handshake "
+              "(profile::MAX_DIALING); raise it, leaving room for each activated dialed "
+              "connection");
 /// httpd's control socket's port; other httpd servers in the application (a web server,
 /// sendspin-cpp's server) take the default and the one after it
 constexpr uint16_t HTTPD_CTRL_PORT = ESP_HTTPD_DEF_CTRL_PORT + 2;
@@ -336,7 +348,7 @@ public:
         config.task_priority = HTTPD_PRIORITY;
         config.max_open_sockets = HTTPD_SESSIONS;
         config.max_uri_handlers = 1;
-        config.backlog_conn = static_cast<uint8_t>(profile::MAX_ACCEPTED_HANDSHAKES);
+        config.backlog_conn = static_cast<uint8_t>(HTTPD_BACKLOG);
         config.lru_purge_enable = false;
         config.recv_wait_timeout = HTTPD_RECV_WAIT_S;
         config.open_fn = &Impl::on_session_open;

@@ -5,3 +5,6 @@ CONFIG_DSP_MAX_FFT_SIZE_4096=y
 # src/esp/listener_esp.cpp's httpd needs a socket for each of its sessions plus its own three, and
 # the dials and mDNS need more; ESP-IDF's default of 10 fails its static_assert
 CONFIG_LWIP_MAX_SOCKETS=32
+# src/esp/listener_esp.cpp's TCP check: httpd's sessions and backlog and the dials in their
+# handshake, with room for activated dialed connections; ESP-IDF's default of 16 fails it
+CONFIG_LWIP_MAX_ACTIVE_TCP=32

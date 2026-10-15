@@ -11,7 +11,9 @@ menu "sendspin-server"
         # GET reaches the URI handler instead
         select HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
         # LWIP_MAX_SOCKETS, which a component cannot raise, must cover httpd's sessions and its own
-        # three sockets, besides the dials and mDNS; src/esp/listener_esp.cpp asserts it
+        # three sockets, besides the dials and mDNS, and LWIP_MAX_ACTIVE_TCP httpd's sessions and
+        # backlog and the dials in their handshake, besides activated dialed connections;
+        # src/esp/listener_esp.cpp asserts both
 
     config SENDSPIN_SERVER_MEMORY_STATS
         bool "Log memory statistics"
