@@ -47,7 +47,7 @@ Determine the diff: if `$ARGUMENTS` names a commit range or branch, diff that; o
 
 - Every queue, ring and cache has a fixed capacity and an intentional overflow behavior (`SendQueueCaps`, the reassembly cap, `discovery_limits::MAX_CLIENTS`), or a reason it needs none stated at its declaration. A new unbounded container fed by a peer is a finding: a misbehaving peer is closed, never allowed to grow server memory.
 - An overflow is observable (`SessionEnd`, `on_error()`, a `false` return) or is an ignore documented at the cap's declaration (`discovery_limits::MAX_CLIENTS`); an undocumented silent drop is a finding.
-- A queue is a `Ring` (`ring.h`) or, for closures, a `TaskQueue` (`task_queue.h`), allocated with its owner: a `std::deque` or `std::list` in `src/` allocates as it slides and is a finding. A growing `Ring` names at its declaration what bounds it and why its first capacity; a fixed one is allocated at its cap.
+- A queue is a `Ring` (`ring.h`), for variable-length bytes a `ByteRing` (`byte_ring.h`), or, for closures, a `TaskQueue` (`task_queue.h`), allocated with its owner: a `std::deque` or `std::list` in `src/` allocates as it slides and is a finding. A growing `Ring` names at its declaration what bounds it and why its first capacity; a fixed one is allocated at its cap.
 - Latest-wins state (`PipelineSetSlot`, the snapshots) is a slot, never an ordered queue a flood could grow.
 
 ## Memory placement
