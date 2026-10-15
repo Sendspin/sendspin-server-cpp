@@ -158,11 +158,7 @@ void ServerCore::disconnect(const std::string& client_id) {
         return;
     }
     // Not dialed again on the server's own, through whichever target reached it
-    for (auto& [key, target] : this->targets_) {
-        if (target.known && target.known->client_id == client_id) {
-            this->stop_dialing(target);
-        }
-    }
+    this->for_each_known(client_id, [this](Target& target) { this->stop_dialing(target); });
     // Every connection of the client, also one still in its handshake once its client/init named
     // it
     std::vector<Client*> closing;
@@ -901,10 +897,8 @@ std::string ServerCore::record_owner(const std::string& client_id) const {
     if (!this->log_.enabled(LogLevel::ERROR)) {
         return {};
     }
-    for (const auto& [id, client] : this->clients_) {
-        if (client->active && client->info.client_id == client_id) {
-            return this->describe(*client);
-        }
+    if (const Client* client = this->find_connection(client_id)) {
+        return this->describe(*client);
     }
     return "a client not connected";
 }
@@ -1019,12 +1013,10 @@ void ServerCore::set_player_format(const std::string& client_id,
         this->format_overrides_.erase(client_id);
     }
     // The pump plans the switch, and the group builds the target then
-    for (const auto& [id, client] : this->clients_) {
-        if (client->active && client->info.client_id == client_id) {
-            client->driver->session().set_format_override(format);
-            client->pump();
-        }
-    }
+    this->for_each_connection(client_id, [&format](Client& client) {
+        client.driver->session().set_format_override(format);
+        client.pump();
+    });
 }
 
 void ServerCore::set_approval(const std::string& client_id, std::optional<ApprovalScope> approval) {
@@ -1032,11 +1024,8 @@ void ServerCore::set_approval(const std::string& client_id, std::optional<Approv
         return;
     }
     std::vector<Client*> connected;
-    for (const auto& [id, client] : this->clients_) {
-        if (client->active && client->info.client_id == client_id) {
-            connected.push_back(client.get());
-        }
-    }
+    this->for_each_connection(client_id,
+                              [&connected](Client& client) { connected.push_back(&client); });
     const ClientRecord* existing = this->records_.find(client_id);
     ClientRecord record = existing != nullptr ? *existing : ClientRecord{client_id, std::nullopt};
     record.approval = approval;
@@ -1080,13 +1069,10 @@ void ServerCore::store_long_term_psk(const std::string& client_id, const Psk& ps
     ClientRecord record = before;
     record.long_term_psk = psk;
     record.approval.reset();
-    for (const auto& [id, client] : this->clients_) {
-        if (existing == nullptr && client->active && client->info.client_id == client_id) {
-            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): set once the client is active
-            const ClientHello& hello = *client->driver->session().client_hello();
-            set_details(record, hello.name, hello.unrecognized_identifiers);
-            break;
-        }
+    if (const Client* client = existing == nullptr ? this->find_connection(client_id) : nullptr) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): set once the client is active
+        const ClientHello& hello = *client->driver->session().client_hello();
+        set_details(record, hello.name, hello.unrecognized_identifiers);
     }
     this->unsaved_records_.emplace(client_id,
                                    UnsavedRecord{std::move(before), existing != nullptr, false});
@@ -1097,23 +1083,18 @@ void ServerCore::store_long_term_psk(const std::string& client_id, const Psk& ps
         this->unsaved_records_.erase(found);
         if (saved) {
             const bool paired = this->long_term_psk(id) != nullptr;
-            for (const auto& [key, client] : this->clients_) {
-                if (client->active && client->info.client_id == id) {
-                    client->info.paired = paired;
-                    client->info.approval = this->approval_of(id);
-                }
-            }
+            this->for_each_connection(id, [this, &id, paired](Client& client) {
+                client.info.paired = paired;
+                client.info.approval = this->approval_of(id);
+            });
         } else {
             this->put_back(id, unsaved);
         }
         // done may put the change back too, so the snapshot waits for it
         done(saved, unsaved);
         std::vector<Client*> connected;
-        for (const auto& [key, client] : this->clients_) {
-            if (client->active && client->info.client_id == id) {
-                connected.push_back(client.get());
-            }
-        }
+        this->for_each_connection(id,
+                                  [&connected](Client& client) { connected.push_back(&client); });
         if (!connected.empty()) {
             this->publish_snapshot();
         }
@@ -1142,25 +1123,16 @@ void ServerCore::put_back(const std::string& client_id, const UnsavedRecord& uns
         this->save_record(client_id);
     }
     const bool paired = this->long_term_psk(client_id) != nullptr;
-    for (const auto& [id, client] : this->clients_) {
-        if (client->active && client->info.client_id == client_id) {
-            client->info.paired = paired;
-            client->info.approval = this->approval_of(client_id);
-        }
-    }
-    for (auto& [key, target] : this->targets_) {
-        if (target.known && target.known->client_id == client_id) {
-            target.known->paired = paired;
-        }
-    }
+    this->for_each_connection(client_id, [this, &client_id, paired](Client& client) {
+        client.info.paired = paired;
+        client.info.approval = this->approval_of(client_id);
+    });
+    this->for_each_known(client_id, [paired](Target& target) { target.known->paired = paired; });
 }
 
 void ServerCore::rekey(const std::string& client_id, const HandshakePsk& psk) {
-    for (const auto& [id, client] : this->clients_) {
-        if (client->active && client->info.client_id == client_id) {
-            this->reactivate(*client, psk);
-        }
-    }
+    this->for_each_connection(client_id,
+                              [this, &psk](Client& client) { this->reactivate(client, psk); });
 }
 
 void ServerCore::reactivate(Client& client, const std::optional<HandshakePsk>& rekey,
@@ -1399,11 +1371,11 @@ void ServerCore::place(const std::string& client_id, std::optional<GroupId> targ
     facts.held = held != this->held_.end();
     facts.held_in_target = facts.held && target == held->second.group;
     std::vector<Client*> connections;
-    for (const auto& [id, client] : this->clients_) {
-        if (client->active && client->group != nullptr && client->info.client_id == client_id) {
-            connections.push_back(client.get());
+    this->for_each_connection(client_id, [&connections](Client& client) {
+        if (client.group != nullptr) {
+            connections.push_back(&client);
         }
-    }
+    });
     facts.connected = !connections.empty();
     if (move_action(facts) == MoveAction::MOVE_HELD) {
         Group& group = to();
@@ -1605,12 +1577,11 @@ void ServerCore::on_closed(Client& client) {
     }
     // A target held back while its client was connected through this connection
     if (was_active) {
-        for (auto& [key, target] : this->targets_) {
-            if (&target != client.target && target.known &&
-                target.known->client_id == client.info.client_id) {
+        this->for_each_known(client.info.client_id, [this, &client](Target& target) {
+            if (&target != client.target) {
                 this->dial_if_due(target);
             }
-        }
+        });
     }
     if (client.target != nullptr) {
         this->start_waiting_dials();
@@ -1726,22 +1697,26 @@ void ServerCore::prune_targets(int64_t now_us) {
 
 ServerCore::Target* ServerCore::find_known(const std::string& client_id) {
     Target* found = nullptr;
-    for (auto& [key, target] : this->targets_) {
-        if (!target.known || target.known->client_id != client_id) {
-            continue;
-        }
+    this->for_each_known(client_id, [&found](Target& target) {
         // One still advertised first: its address is the current one
         if (found == nullptr || (target.discovery && target.discovery->present)) {
             found = &target;
         }
-    }
+    });
     return found;
 }
 
+const ServerCore::Client* ServerCore::find_connection(const std::string& client_id) const {
+    for (const auto& [id, client] : this->clients_) {
+        if (client->active && client->info.client_id == client_id) {
+            return client.get();
+        }
+    }
+    return nullptr;
+}
+
 bool ServerCore::connected(const std::string& client_id) const {
-    return std::any_of(this->clients_.begin(), this->clients_.end(), [&](const auto& entry) {
-        return entry.second->active && entry.second->info.client_id == client_id;
-    });
+    return this->find_connection(client_id) != nullptr;
 }
 
 void ServerCore::publish_snapshot() {

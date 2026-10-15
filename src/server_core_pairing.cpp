@@ -272,17 +272,11 @@ void ServerCore::unpair(const std::string& client_id) {
         this->erase_record(client_id, *slot);
     }
     std::vector<Client*> connected;
-    for (const auto& [id, client] : this->clients_) {
-        if (client->active && client->info.client_id == client_id) {
-            client->info.paired = false;
-            connected.push_back(client.get());
-        }
-    }
-    for (auto& [key, target] : this->targets_) {
-        if (target.known && target.known->client_id == client_id) {
-            target.known->paired = false;
-        }
-    }
+    this->for_each_connection(client_id, [&connected](Client& client) {
+        client.info.paired = false;
+        connected.push_back(&client);
+    });
+    this->for_each_known(client_id, [](Target& target) { target.known->paired = false; });
     this->publish_snapshot();
     for (Client* client : connected) {
         Session& session = client->driver->session();
@@ -303,14 +297,11 @@ void ServerCore::unpair(const std::string& client_id) {
 
 ServerCore::Client* ServerCore::pairing_connection(const std::string& client_id) {
     Client* found = nullptr;
-    for (const auto& [id, client] : this->clients_) {
-        if (!client->active || client->closed || client->info.client_id != client_id) {
-            continue;
+    this->for_each_connection(client_id, [&found](Client& client) {
+        if (!client.closed && (found == nullptr || client.reported)) {
+            found = &client;
         }
-        if (found == nullptr || client->reported) {
-            found = client.get();
-        }
-    }
+    });
     return found;
 }
 
