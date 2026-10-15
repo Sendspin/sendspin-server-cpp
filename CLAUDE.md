@@ -1,6 +1,6 @@
 # sendspin-server-cpp
 
-C++ library implementing the server side of the Sendspin synchronized audio streaming protocol, for macOS and Linux (it also builds as an ESP-IDF component). `SendspinServer` (`include/sendspin/server/server.h`) advertises and browses over mDNS, accepts and dials clients, completes the Noise handshake, pairs and approves clients, keeps them time-synced and in groups, and streams each group's host input to its players as PCM, FLAC or Opus, with the controller, metadata, artwork, color, visualizer and source roles. `README.md` has the feature list and the commands.
+C++ library implementing the server side of the Sendspin synchronized audio streaming protocol, for macOS and Linux (it also builds as an ESP-IDF component). `SendspinServer` (`include/sendspin/server/server.h`) advertises and browses over mDNS, accepts and dials clients, completes the Noise handshake, pairs and approves clients, keeps them time-synced and in groups, and streams each group's host input to its players as PCM, FLAC or Opus, with the controller, metadata, artwork, color, visualizer and source roles. `README.md` has the feature list, a usage example with the CMake and ESP-IDF integration, and the commands.
 
 ## Documents
 
@@ -27,7 +27,7 @@ docs/conventions.md       - The normative design standards
 docs/comment-style.md     - The rules for every comment, doc comment and document
 docs/internals.md         - Threads, cross-thread channels, a connection's lifecycle, a group's playback, core thread order
 third_party/              - Vendored micro-resampler and stb (each with its VENDORED.md); re-vendor, never edit
-NOTICES.md                - The licenses of the vendored and fetched dependencies
+NOTICES.md                - The licenses of the vendored and fetched dependencies, and the ESP-IDF build's
 .claude/skills/           - Review checklists applying docs/conventions.md to a diff (docs-sync, house-patterns, realtime-review, test-standards)
 script/clang-tidy.sh      - clang-tidy over src/ using build/compile_commands.json
 ```
@@ -107,7 +107,7 @@ script/clang-tidy.sh      - clang-tidy over src/ using build/compile_commands.js
 All pinned; see `cmake/`.
 
 - Boost.Beast and Boost.Asio, host only: the `-cmake` release tarball (URL and SHA256), or a system Boost at or above the pin. Compiled once in `src/beast_separate_compilation.cpp`; any translation unit that includes them links `sendspin_server_cpp_beast` for the separate-compilation definitions. Within the library, only that file, `src/transport.cpp` and `src/transport_asio.h` include Asio or Beast; `src/transport.h` names no Asio type. Tests that run Asio objects on the core thread reach its io_context through `transport_asio.h`. `server_cli`'s dashboard (`web_ui.cpp`) includes them too, with ArduinoJson for its messages.
-- ESP-IDF: its `lwip` and `esp_http_server` for the transport.
+- ESP-IDF: its `lwip` and `esp_http_server` for the transport, `mbedtls` for AES-GCM, and `espressif/esp-dsp` from the component registry for the visualizer's FFT.
 - ArduinoJson, at the sendspin-cpp pin.
 - noise-c (esphome-libs fork, the sendspin-cpp pin) built as target `noise_c` from a manual source list: reference backend plus OpenSSL 3 AES-GCM. Initialized with `noise_init_framework()`. On ESP-IDF it is the `esphome/noise-c` component (libsodium-backed) instead, with its name tables and the AESGCM id turned on by `cmake/esp_idf.cmake` and weak hooks in `src/esp/noise_esp.cpp`. A `noise_c` target a parent project defined first is used instead, and must define `NOISE_USE_AES=1`.
 - micro-flac at its v0.3.0 release, declared before sendspin-cpp so its declaration wins; `server_cli` links it too, to decode FLAC files.
