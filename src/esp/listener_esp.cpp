@@ -371,10 +371,10 @@ public:
         uri.ws_post_handshake_cb = &Impl::on_upgrade;
 #endif
         if (httpd_register_uri_handler(state->server, &uri) != ESP_OK) {
-            // Stopped here, so the port is free once listen() returns; a session that opened
-            // meanwhile finds the stop taken as it closes
-            state->closed.store(true, std::memory_order_release);
+            // Stopped here, so the port is free once listen() returns. The stop is taken before
+            // closed is set, so a session that opened meanwhile never takes it as it closes.
             state->stopping.store(true, std::memory_order_release);
+            state->closed.store(true, std::memory_order_release);
             if (!stop_httpd(state->server)) {
                 // httpd runs on, holding its state
                 state->keep = state;
