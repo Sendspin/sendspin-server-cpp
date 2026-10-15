@@ -127,6 +127,27 @@ TEST(SchedTimeline, TimeOfAcrossSegmentsAndShifts) {
     EXPECT_EQ(sched::time_of(shifted, 44099), 999977);
 }
 
+// Reusing an anchor leaves nothing of its earlier segments and shifts: it maps time as a new one
+TEST(SchedTimeline, ResetAnchorLeavesOneSegmentAndNoShifts) {
+    Anchor reused = three_segments();
+    sched::add_shift(reused, 10, 30 * MS);
+    reused.shift_base_us = 20 * MS;
+    // Control: the earlier anchor maps the position elsewhere
+    EXPECT_NE(sched::time_of(reused, 5000 + 48000), 2000 * MS);
+
+    sched::reset_anchor(reused, 1000 * MS, 5000, 48000, 2);
+    EXPECT_EQ(reused.t0_us, 1000 * MS);
+    ASSERT_EQ(reused.segments.size(), 1U);
+    EXPECT_EQ(reused.segments[0].position, 5000U);
+    EXPECT_EQ(reused.segments[0].unshifted_us, 1000 * MS);
+    EXPECT_EQ(reused.segments[0].rate, 48000U);
+    EXPECT_EQ(reused.segments[0].channels, 2U);
+    EXPECT_EQ(reused.segments[0].elapsed_ps, 0);
+    EXPECT_EQ(reused.shift_base_us, 0);
+    EXPECT_TRUE(reused.shifts.empty());
+    EXPECT_EQ(sched::time_of(reused, 5000 + 48000), 2000 * MS);
+}
+
 // Cell k begins at the first position whose unshifted time is at or after T0 + k * F, in whichever
 // segment holds that time
 TEST(SchedTimeline, CellPositionAcrossSegments) {

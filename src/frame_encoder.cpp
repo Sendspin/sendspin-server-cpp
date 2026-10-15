@@ -99,14 +99,6 @@ void opus_reset(OpusEncoder* encoder) {
     opus_encoder_ctl(encoder, OPUS_RESET_STATE);
 }
 
-uint32_t opus_lookahead(OpusEncoder* encoder) {
-    opus_int32 lookahead = 0;
-    if (opus_encoder_ctl(encoder, OPUS_GET_LOOKAHEAD(&lookahead)) != OPUS_OK) {
-        return 0;
-    }
-    return static_cast<uint32_t>(lookahead);
-}
-
 /// @return the packet's bytes, 0 when the encoder refused
 size_t opus_encode_frame(OpusEncoder* encoder, const int16_t* input, uint32_t frame_samples,
                          std::span<uint8_t> out) {
@@ -124,10 +116,6 @@ OpusEncoder* opus_create(const sched::AudioFormat& /*format*/) {
 void opus_destroy(OpusEncoder* /*encoder*/) {}
 
 void opus_reset(OpusEncoder* /*encoder*/) {}
-
-uint32_t opus_lookahead(OpusEncoder* /*encoder*/) {
-    return 0;
-}
 
 size_t opus_encode_frame(OpusEncoder* /*encoder*/, const int16_t* /*input*/,
                          uint32_t /*frame_samples*/, std::span<uint8_t> /*out*/) {
@@ -250,10 +238,6 @@ void FrameEncoder::reset() {
     if (this->opus_) {
         opus_reset(this->opus_.get());
     }
-}
-
-uint32_t FrameEncoder::delay_samples() const {
-    return this->opus_ ? opus_lookahead(this->opus_.get()) : 0;
 }
 
 bool FrameEncoder::encode(std::span<const uint8_t> input, SampleFormat in_format,

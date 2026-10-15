@@ -146,11 +146,6 @@ public:
         return this->role_written_;
     }
 
-    /// @brief The channels of the last stream/start written
-    const ArtworkChannels& sent_channels() const {
-        return this->sent_;
-    }
-
 private:
     /// What the messages written leave a channel showing: the image whose announce completed
     /// with a past timestamp, nullopt until one did in this stream configuration, and the

@@ -76,11 +76,6 @@ public:
         return this->message_;
     }
 
-    /// @brief Whether a fragmented message is in flight
-    bool in_progress() const {
-        return this->in_progress_;
-    }
-
     /// @brief Zeros the reassembly buffer, after a message that may carry a secret
     void wipe();
 

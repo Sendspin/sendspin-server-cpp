@@ -53,6 +53,7 @@ using sendspin::server::StartResult;
 using sendspin::server::TraceDirection;
 using sendspin::server::TracedMessage;
 using sendspin::server::test::AlwaysReady;
+using sendspin::server::test::LocalServer;
 using sendspin::server::test::MemoryProvider;
 using sendspin::server::test::Recorder;
 namespace persistence_keys = sendspin::server::persistence_keys;
@@ -337,25 +338,23 @@ size_t index_of(const std::vector<Recorder::Entry>& entries, const std::string& 
 // which counts as connected only once it has the activation, and answers its time requests well
 // enough for its time filter to map the server's clock onto its own
 TEST(ServerConnection, ActivatesASendspinCppClientAndKeepsItTimeSynced) {
-    MemoryProvider provider;
-    Recorder recorder;
+    LocalServer s;
     ServerConfig config = test_config();
-    config.trace = [&recorder](const TracedMessage& message) { recorder.trace(message); };
-    SendspinServer server;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
+    config.trace = [&s](const TracedMessage& message) { s.recorder.trace(message); };
+    ASSERT_EQ(s.start(config), StartResult::OK);
     PeerClient peer;
-    ASSERT_TRUE(server.connect_url(peer.url()));
+    ASSERT_TRUE(s.server.connect_url(peer.url()));
 
     // Two full bursts answered keep the filter fed; the client stays connected throughout
     constexpr size_t BURSTS = 2;
     const size_t replies = BURSTS * sendspin::SendspinClientConfig::DEFAULT_BURST_SIZE;
     peer.run_until([&] {
-        return peer.client().is_time_synced() && recorder.count("out server/time") >= replies;
+        return peer.client().is_time_synced() && s.recorder.count("out server/time") >= replies;
     });
     sendspin::SendspinClient& client = peer.client();
     EXPECT_TRUE(client.is_connected());
     ASSERT_TRUE(client.get_server_information());
-    EXPECT_EQ(client.get_server_information()->server_id, server.server_id());
+    EXPECT_EQ(client.get_server_information()->server_id, s.server.server_id());
     EXPECT_EQ(client.get_server_information()->name, "Test server");
 
     // Far above loopback delay and far below the error of a misplaced stamp, which the two
@@ -363,88 +362,85 @@ TEST(ServerConnection, ActivatesASendspinCppClientAndKeepsItTimeSynced) {
     // on both sides of the server's, so a thread held up between the reads widens nothing
     constexpr int64_t TOLERANCE_US = 100000;
     const int64_t before = client_clock_us();
-    const int64_t mapped = client.get_client_time(server.now_us());
+    const int64_t mapped = client.get_client_time(s.server.now_us());
     const int64_t after = client_clock_us();
     EXPECT_GT(mapped, before - TOLERANCE_US) << mapped - before;
     EXPECT_LT(mapped, after + TOLERANCE_US) << mapped - after;
 
-    recorder.wait_for("connected " + client.client_id());
-    const std::vector<ClientInfo> clients = server.clients();
+    s.recorder.wait_for("connected " + client.client_id());
+    const std::vector<ClientInfo> clients = s.server.clients();
     ASSERT_EQ(clients.size(), 1U);
     EXPECT_EQ(clients[0].client_id, client.client_id());
     EXPECT_EQ(clients[0].name, "sendspin-cpp peer");
     EXPECT_EQ(clients[0].url, peer.url());
     // The client's own messages after activation (its client/state, say) did not close it
     EXPECT_FALSE(
-        recorder.contains("disconnected " + client.client_id() + " " +
-                          std::to_string(static_cast<int>(DisconnectReason::CLOSED_BY_SERVER))));
+        s.recorder.contains("disconnected " + client.client_id() + " " +
+                            std::to_string(static_cast<int>(DisconnectReason::CLOSED_BY_SERVER))));
     // A second dial to a connected URL is kept as the one connection
-    EXPECT_TRUE(server.connect_url(peer.url()));
+    EXPECT_TRUE(s.server.connect_url(peer.url()));
 
     // messaging.md "client/goodbye": the client's stop() says goodbye
     client.stop();
     const std::string disconnected = "disconnected " + client.client_id() + " " +
                                      std::to_string(static_cast<int>(DisconnectReason::GOODBYE));
-    recorder.wait_for(disconnected);
+    s.recorder.wait_for(disconnected);
     // Listed as not connected, since the server can dial its URL again
-    ASSERT_EQ(server.clients().size(), 1U);
-    EXPECT_FALSE(server.clients()[0].connected);
-    EXPECT_EQ(server.clients()[0].client_id, client.client_id());
-    EXPECT_EQ(recorder.count("connected " + client.client_id()), 1U);
+    ASSERT_EQ(s.server.clients().size(), 1U);
+    EXPECT_FALSE(s.server.clients()[0].connected);
+    EXPECT_EQ(s.server.clients()[0].client_id, client.client_id());
+    EXPECT_EQ(s.recorder.count("connected " + client.client_id()), 1U);
 }
 
 // spec connection.md "Client Initiated Connections": a sendspin-cpp client that connects to the
 // server is activated and kept time-synced as a dialed one is, and is not listed once gone, since
 // the server cannot dial it
 TEST(ServerConnection, ActivatesASendspinCppClientThatConnects) {
-    MemoryProvider provider;
-    Recorder recorder;
+    LocalServer s;
     ServerConfig config = test_config();
     config.approve_all_clients = true;
-    SendspinServer server;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
+    ASSERT_EQ(s.start(config), StartResult::OK);
     PeerClient peer;
     sendspin::SendspinClient& client = peer.client();
-    client.connect_to("ws://127.0.0.1:" + std::to_string(server.listen_port()) + "/sendspin");
+    client.connect_to("ws://127.0.0.1:" + std::to_string(s.server.listen_port()) + "/sendspin");
     const std::string id = client.client_id();
-    peer.run_until([&] { return client.is_time_synced() && recorder.contains("connected " + id); });
+    peer.run_until(
+        [&] { return client.is_time_synced() && s.recorder.contains("connected " + id); });
     ASSERT_TRUE(client.get_server_information());
-    EXPECT_EQ(client.get_server_information()->server_id, server.server_id());
-    const std::vector<ClientInfo> clients = server.clients();
+    EXPECT_EQ(client.get_server_information()->server_id, s.server.server_id());
+    const std::vector<ClientInfo> clients = s.server.clients();
     ASSERT_EQ(clients.size(), 1U);
     EXPECT_TRUE(clients[0].accepted);
     EXPECT_EQ(clients[0].url, "");
 
     client.stop();
-    recorder.wait_for("disconnected " + id + " " +
-                      std::to_string(static_cast<int>(DisconnectReason::GOODBYE)));
-    EXPECT_TRUE(server.clients().empty());
+    s.recorder.wait_for("disconnected " + id + " " +
+                        std::to_string(static_cast<int>(DisconnectReason::GOODBYE)));
+    EXPECT_TRUE(s.server.clients().empty());
 }
 
 // The threading contract: listener and trace calls run on one dispatch thread, the provider's
 // too, in the order the core thread produced them
 TEST(ServerThreading, DeliversEveryCallOnTheDispatchThreadInOrder) {
-    MemoryProvider provider;
-    Recorder recorder;
+    LocalServer s;
     ServerConfig config = test_config();
-    config.trace = [&recorder](const TracedMessage& message) { recorder.trace(message); };
-    SendspinServer server;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
+    config.trace = [&s](const TracedMessage& message) { s.recorder.trace(message); };
+    ASSERT_EQ(s.start(config), StartResult::OK);
     PeerClient peer;
-    ASSERT_TRUE(server.connect_url(peer.url()));
-    peer.run_until([&] { return recorder.contains("out server/time"); });
+    ASSERT_TRUE(s.server.connect_url(peer.url()));
+    peer.run_until([&] { return s.recorder.contains("out server/time"); });
     const std::string id = peer.client().client_id();
     peer.client().stop();
     const std::string disconnected =
         "disconnected " + id + " " + std::to_string(static_cast<int>(DisconnectReason::GOODBYE));
-    recorder.wait_for(disconnected);
+    s.recorder.wait_for(disconnected);
 
-    const std::vector<Recorder::Entry> entries = recorder.entries();
+    const std::vector<Recorder::Entry> entries = s.recorder.entries();
     for (const Recorder::Entry& entry : entries) {
         SCOPED_TRACE(entry.what);
-        EXPECT_EQ(entry.thread, provider.thread);
+        EXPECT_EQ(entry.thread, s.provider.thread);
     }
-    EXPECT_NE(provider.thread, std::this_thread::get_id());
+    EXPECT_NE(s.provider.thread, std::this_thread::get_id());
 
     // The handshake, then the connection report ahead of the activation it queued, then time
     // sync, then the goodbye and its report. server/hello is not in the chain: the peer sends
@@ -468,27 +464,25 @@ TEST(ServerThreading, DeliversEveryCallOnTheDispatchThreadInOrder) {
 // stop() from a listener only starts the shutdown, and the clients still connected are reported
 // as stopped after it
 TEST(ServerThreading, StopsFromAListenerAndStartsAgain) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    recorder.stop_on_connect = &server;
-    ASSERT_EQ(server.start(test_config(), &provider, &recorder), StartResult::OK);
-    const std::string server_id = server.server_id();
+    LocalServer s;
+    s.recorder.stop_on_connect = &s.server;
+    ASSERT_EQ(s.start(test_config()), StartResult::OK);
+    const std::string server_id = s.server.server_id();
     PeerClient peer;
-    ASSERT_TRUE(server.connect_url(peer.url()));
+    ASSERT_TRUE(s.server.connect_url(peer.url()));
     const std::string id = peer.client().client_id();
     const std::string stopped = "disconnected " + id + " " +
                                 std::to_string(static_cast<int>(DisconnectReason::SERVER_STOPPED));
-    peer.run_until([&] { return recorder.contains(stopped); });
-    EXPECT_TRUE(server.clients().empty());
-    EXPECT_EQ(server.server_id(), "");
-    EXPECT_FALSE(server.connect_url(peer.url()));
+    peer.run_until([&] { return s.recorder.contains(stopped); });
+    EXPECT_TRUE(s.server.clients().empty());
+    EXPECT_EQ(s.server.server_id(), "");
+    EXPECT_FALSE(s.server.connect_url(peer.url()));
     // The client sees the server close the connection
     peer.run_until([&] { return !peer.client().is_connected(); });
 
-    recorder.stop_on_connect = nullptr;
-    ASSERT_EQ(server.start(test_config(), &provider, &recorder), StartResult::OK);
-    EXPECT_EQ(server.server_id(), server_id);
+    s.recorder.stop_on_connect = nullptr;
+    ASSERT_EQ(s.start(test_config()), StartResult::OK);
+    EXPECT_EQ(s.server.server_id(), server_id);
 }
 
 // A listener call made for the destructor's stop may call the server while the destructor waits
@@ -550,15 +544,13 @@ TEST(ServerThreading, DestructorWaitsForTheListenerCallsOfItsStop) {
 // operator's dial intent: its first activation declares `playback`, where a later dial on the
 // server's own would be idle
 TEST(ServerConnection, RetriesAUrlUntilItsClientListens) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
     ServerConfig config = test_config();
     config.timing.handshake_backoff_min_us = 20000;
     config.timing.handshake_backoff_max_us = 20000;
     config.approve_all_clients = true;
     std::mutex mutex;
     std::vector<std::string> activations;
+    LocalServer s;
     config.trace = [&](const TracedMessage& message) {
         const std::string text(message.plaintext.begin(), message.plaintext.end());
         if (message.direction == TraceDirection::OUTBOUND &&
@@ -567,19 +559,19 @@ TEST(ServerConnection, RetriesAUrlUntilItsClientListens) {
             activations.push_back(text);
         }
     };
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
+    ASSERT_EQ(s.start(config), StartResult::OK);
     sendspin::server::test::UnlistenedPort unlistened;
     const uint16_t port = unlistened.port();
     const std::string url = sendspin::server::test::peer_url(port);
     sendspin::server::ConnectOptions options;
     options.retry_until_connected = true;
-    ASSERT_TRUE(server.connect_url(url, options));
-    recorder.wait_for("error " + std::to_string(static_cast<int>(ErrorKind::DIAL_FAILED)) + " " +
-                      url);
+    ASSERT_TRUE(s.server.connect_url(url, options));
+    s.recorder.wait_for("error " + std::to_string(static_cast<int>(ErrorKind::DIAL_FAILED)) + " " +
+                        url);
     unlistened.release();
     PeerClient peer(port);
     const std::string id = peer.client().client_id();
-    peer.run_until([&] { return recorder.contains("connected " + id); });
+    peer.run_until([&] { return s.recorder.contains("connected " + id); });
     const std::lock_guard<std::mutex> lock(mutex);
     ASSERT_FALSE(activations.empty());
     EXPECT_NE(activations.front().find(R"("activities":["playback"])"), std::string::npos)
@@ -589,42 +581,38 @@ TEST(ServerConnection, RetriesAUrlUntilItsClientListens) {
 // SendspinServer::disconnect(): the client goes with DISCONNECTED_BY_HOST and stays listed as one
 // the server does not dial on its own, though a drop of the connection would have it reconnect
 TEST(ServerConnection, DisconnectsAClientAndStopsDialingIt) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    ASSERT_EQ(server.start(test_config(), &provider, &recorder), StartResult::OK);
+    LocalServer s;
+    ASSERT_EQ(s.start(test_config()), StartResult::OK);
     PeerClient peer;
-    EXPECT_FALSE(server.disconnect("not-a-client"));
-    ASSERT_TRUE(server.connect_url(peer.url()));
+    EXPECT_FALSE(s.server.disconnect("not-a-client"));
+    ASSERT_TRUE(s.server.connect_url(peer.url()));
     const std::string id = peer.client().client_id();
-    peer.run_until([&] { return recorder.contains("connected " + id); });
-    ASSERT_TRUE(server.disconnect(id));
+    peer.run_until([&] { return s.recorder.contains("connected " + id); });
+    ASSERT_TRUE(s.server.disconnect(id));
     peer.run_until([&] {
-        return recorder.contains(
+        return s.recorder.contains(
             "disconnected " + id + " " +
             std::to_string(static_cast<int>(DisconnectReason::DISCONNECTED_BY_HOST)));
     });
-    const std::vector<ClientInfo> clients = server.clients();
+    const std::vector<ClientInfo> clients = s.server.clients();
     ASSERT_EQ(clients.size(), 1U);
     EXPECT_FALSE(clients.front().connected);
     EXPECT_FALSE(clients.front().reconnecting);
-    EXPECT_FALSE(server.disconnect(id));
+    EXPECT_FALSE(s.server.disconnect(id));
 }
 
 TEST(ServerConnection, ReportsADialThatCannotConnect) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    EXPECT_FALSE(server.connect_url("ws://127.0.0.1:1/sendspin"));
-    ASSERT_EQ(server.start(test_config(), &provider, &recorder), StartResult::OK);
-    EXPECT_FALSE(server.connect_url("http://127.0.0.1:1/sendspin"));
-    EXPECT_FALSE(server.connect_url("ws://"));
+    LocalServer s;
+    EXPECT_FALSE(s.server.connect_url("ws://127.0.0.1:1/sendspin"));
+    ASSERT_EQ(s.start(test_config()), StartResult::OK);
+    EXPECT_FALSE(s.server.connect_url("http://127.0.0.1:1/sendspin"));
+    EXPECT_FALSE(s.server.connect_url("ws://"));
     const sendspin::server::test::UnlistenedPort unlistened;
     const std::string url = "ws://127.0.0.1:" + std::to_string(unlistened.port()) + "/sendspin";
-    ASSERT_TRUE(server.connect_url(url));
-    recorder.wait_for("error " + std::to_string(static_cast<int>(ErrorKind::DIAL_FAILED)) + " " +
-                      url);
-    EXPECT_TRUE(server.clients().empty());
+    ASSERT_TRUE(s.server.connect_url(url));
+    s.recorder.wait_for("error " + std::to_string(static_cast<int>(ErrorKind::DIAL_FAILED)) + " " +
+                        url);
+    EXPECT_TRUE(s.server.clients().empty());
 }
 
 }  // namespace

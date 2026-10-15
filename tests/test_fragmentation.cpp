@@ -112,7 +112,8 @@ TEST(Reassembler, FollowsTheFragmentSequenceRules) {
             EXPECT_EQ(Bytes(reassembler.message().begin(), reassembler.message().end()),
                       row.message);
         }
-        EXPECT_FALSE(reassembler.in_progress());
+        // No fragmented message is left in flight: an unfragmented one is taken whole
+        EXPECT_EQ(reassembler.accept(Bytes{JSON, 'z'}), Outcome::MESSAGE);
     }
 }
 

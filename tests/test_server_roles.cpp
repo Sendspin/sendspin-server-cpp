@@ -21,6 +21,7 @@
 #include "raw_client.h"
 #include "test_ports.h"
 #include "test_recorder.h"
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 
@@ -68,10 +69,11 @@ using sendspin::server::StreamFormat;
 using sendspin::server::TransportCommand;
 using sendspin::server::test::AlwaysReady;
 using sendspin::server::test::client_at;
-using sendspin::server::test::MemoryProvider;
+using sendspin::server::test::LocalServer;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
 namespace persistence_keys = sendspin::server::persistence_keys;
+namespace wire = sendspin::server::test::wire;
 
 // ==============================================================================
 // Raw client messages
@@ -194,29 +196,27 @@ constexpr const char* ALL_ROLES = R"(["player@v1","controller@v1","metadata@v1"]
 // roles' server/state (messaging.md "server/state") and, for the player, a move into the server's
 // group.
 TEST(ServerApproval, ApprovesAndRevokesAClientOverTheWire) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
+    LocalServer s;
     ServerConfig config = sendspin::server::test::local_config();
     config.name = "Roles";
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-    const std::string default_group = group_id(*server.default_group());
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    const std::string default_group = group_id(*s.server.default_group());
     RawClient client;
     const std::string id = client_id_of(client);
     const std::string hello_json =
         hello("Kitchen", {"player@v1", "controller@v1", "metadata@v1"}, true);
-    ASSERT_NO_FATAL_FAILURE(connect(server, client, hello_json));
+    ASSERT_NO_FATAL_FAILURE(connect(s.server, client, hello_json));
 
     ASSERT_EQ(payload(next(client)), R"({"activities":[],"active_roles":[]})");
     JsonDocument update = next(client);
     ASSERT_EQ(type(update), "group/update");
     EXPECT_NE(update["payload"]["group_id"].as<std::string>(), default_group);
-    recorder.wait_for("approval needed " + id);
-    ASSERT_EQ(server.clients().size(), 1U);
-    EXPECT_FALSE(server.clients()[0].approval);
-    EXPECT_TRUE(server.clients()[0].unpaired_access);
+    s.recorder.wait_for("approval needed " + id);
+    ASSERT_EQ(s.server.clients().size(), 1U);
+    EXPECT_FALSE(s.server.clients()[0].approval);
+    EXPECT_TRUE(s.server.clients()[0].unpaired_access);
 
-    ASSERT_TRUE(server.approve(id, ApprovalScope::PLAYBACK));
+    ASSERT_TRUE(s.server.approve(id, ApprovalScope::PLAYBACK));
     EXPECT_EQ(payload(next(client)),
               std::string(R"({"activities":[],"active_roles":)") + ALL_ROLES + "}");
     update = next(client);
@@ -230,7 +230,7 @@ TEST(ServerApproval, ApprovesAndRevokesAClientOverTheWire) {
               R"({"supported_commands":["switch"],"volume":100,"muted":false,"repeat":"off",)"
               R"("shuffle":false})");
     // metadata/v1.md: with nothing set, a state of its timestamp alone, now or past
-    EXPECT_LE(state["payload"]["metadata"]["timestamp"].as<int64_t>(), server.now_us());
+    EXPECT_LE(state["payload"]["metadata"]["timestamp"].as<int64_t>(), s.server.now_us());
     EXPECT_EQ(state["payload"]["metadata"].size(), 1U);
     // The player's client/state makes its volume the group's
     client.send_json(player_state(true, {"volume", "mute"}, 30, false));
@@ -244,56 +244,54 @@ TEST(ServerApproval, ApprovesAndRevokesAClientOverTheWire) {
               R"({"supported_commands":["volume","mute","switch"],"volume":30,"muted":false,)"
               R"("repeat":"off","shuffle":false})");
     EXPECT_EQ(payload(next(client)), R"({"player":{"command":"mute","mute":true}})");
-    EXPECT_FALSE(server.approve("not a client id", ApprovalScope::PLAYBACK));
+    EXPECT_FALSE(s.server.approve("not a client id", ApprovalScope::PLAYBACK));
 
     // The approval persists: a new run activates the client for playback at once
-    server.stop();
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-    ASSERT_NO_FATAL_FAILURE(connect(server, client, hello_json));
+    s.server.stop();
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    ASSERT_NO_FATAL_FAILURE(connect(s.server, client, hello_json));
     EXPECT_EQ(payload(next(client)),
               std::string(R"({"activities":["playback"],"active_roles":)") + ALL_ROLES + "}");
     // Connected once it takes the connection with its client/state
     client.send_json(player_state(true, {}, std::nullopt, std::nullopt));
-    recorder.wait_for_count("connected " + id, 2);
-    EXPECT_EQ(server.clients()[0].approval, ApprovalScope::PLAYBACK);
+    s.recorder.wait_for_count("connected " + id, 2);
+    EXPECT_EQ(s.server.clients()[0].approval, ApprovalScope::PLAYBACK);
 
     // A revocation: no activities and no roles, and out of the server's group
-    ASSERT_TRUE(server.revoke_approval(id));
+    ASSERT_TRUE(s.server.revoke_approval(id));
     EXPECT_EQ(payload(next(client, "server/activate")), R"({"activities":[],"active_roles":[]})");
     update = next(client, "group/update");
-    EXPECT_NE(update["payload"]["group_id"].as<std::string>(), group_id(*server.default_group()));
-    recorder.wait_for_count("approval needed " + id, 2);
+    EXPECT_NE(update["payload"]["group_id"].as<std::string>(), group_id(*s.server.default_group()));
+    s.recorder.wait_for_count("approval needed " + id, 2);
     // Saved through the provider, which the event after it shows is done: the server key, then
     // the approval and its revocation
-    EXPECT_EQ(provider.saves, 3);
-    EXPECT_EQ(provider.commits, 3);
-    const std::vector<uint8_t>& blob = provider.blobs.at(persistence_keys::client_record_key(0));
+    EXPECT_EQ(s.provider.saves, 3);
+    EXPECT_EQ(s.provider.commits, 3);
+    const std::vector<uint8_t>& blob = s.provider.blobs.at(persistence_keys::client_record_key(0));
     ASSERT_EQ(blob.size(), persistence_keys::CLIENT_RECORD_SIZE);
     EXPECT_EQ(blob.back(), 0);
-    EXPECT_EQ(provider.blobs.count(persistence_keys::client_record_key(1)), 0U);
+    EXPECT_EQ(s.provider.blobs.count(persistence_keys::client_record_key(1)), 0U);
 }
 
 // pairing.md "Unpaired Access": a client without unpaired access stays at no activities, approved
 // or not, and the host hears that it needs pairing rather than approval. An approval that cannot
 // be saved is reported.
 TEST(ServerApproval, HoldsAClientWithoutUnpairedAccess) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
+    LocalServer s;
     ServerConfig config = sendspin::server::test::local_config();
     config.approve_all_clients = true;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-    provider.refuse_save = true;
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    s.provider.refuse_save = true;
     RawClient client;
     const std::string id = client_id_of(client);
-    ASSERT_NO_FATAL_FAILURE(connect(server, client, hello("Locked", {"player@v1"}, false)));
+    ASSERT_NO_FATAL_FAILURE(connect(s.server, client, hello("Locked", {"player@v1"}, false)));
     ASSERT_EQ(payload(next(client)), R"({"activities":[],"active_roles":[]})");
-    recorder.wait_for("pairing required " + id);
-    EXPECT_FALSE(recorder.contains("approval needed " + id));
-    EXPECT_FALSE(server.clients()[0].unpaired_access);
+    s.recorder.wait_for("pairing required " + id);
+    EXPECT_FALSE(s.recorder.contains("approval needed " + id));
+    EXPECT_FALSE(s.server.clients()[0].unpaired_access);
 
-    ASSERT_TRUE(server.approve(id, ApprovalScope::PLAYBACK));
-    const sendspin::server::ServerError error = recorder.wait_for_error("");
+    ASSERT_TRUE(s.server.approve(id, ApprovalScope::PLAYBACK));
+    const sendspin::server::ServerError error = s.recorder.wait_for_error("");
     EXPECT_EQ(error.kind, ErrorKind::PERSISTENCE_FAILED);
     EXPECT_EQ(error.client_id, id);
     // The approval has run on core: the next message is the time reply, no activation. A
@@ -315,16 +313,14 @@ TEST(ServerApproval, HoldsAClientWithoutUnpairedAccess) {
 // seek is not offered, else to the track's length; the rest reach the host in order. An offered
 // command with an invalid parameter is a protocol error.
 TEST(ServerController, FiltersCommandsAndForwardsTransportCommands) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
+    LocalServer s;
     ServerConfig config = sendspin::server::test::local_config();
     config.approve_all_clients = true;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-    const GroupId group = *server.default_group();
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    const GroupId group = *s.server.default_group();
     RawClient client;
     const std::string id = client_id_of(client);
-    ASSERT_NO_FATAL_FAILURE(connect(server, client, hello("Remote", {"controller@v1"}, true)));
+    ASSERT_NO_FATAL_FAILURE(connect(s.server, client, hello("Remote", {"controller@v1"}, true)));
     EXPECT_EQ(payload(next(client)),
               R"({"activities":["playback"],"active_roles":["controller@v1"]})");
     // The client takes the connection (connection.md "Multiple servers (server-initiated)")
@@ -343,7 +339,7 @@ TEST(ServerController, FiltersCommandsAndForwardsTransportCommands) {
     caps.repeat = RepeatMode::ALL;
     caps.shuffle = true;
     caps.seek_max_ms = 60000;
-    ASSERT_TRUE(server.set_controller_caps(group, caps));
+    ASSERT_TRUE(s.server.set_controller_caps(group, caps));
     EXPECT_EQ(payload(next(client)),
               R"({"controller":{"supported_commands":["play","switch","seek_relative"],)"
               R"("volume":100,"muted":false,"repeat":"all","shuffle":true}})");
@@ -356,18 +352,18 @@ TEST(ServerController, FiltersCommandsAndForwardsTransportCommands) {
     // Answered only once the commands before it are taken in: the connection is still open
     client.send_json(sendspin::server::test::client_time_json(1));
     ASSERT_EQ(type(next(client)), "server/time");
-    recorder.wait_for(relative);
+    s.recorder.wait_for(relative);
     // Posted before the commands below are sent, so core takes it in first
     Metadata metadata;
     metadata.progress = MetadataProgress{10000, 0, 1000};
-    ASSERT_TRUE(server.set_metadata(group, metadata, server.now_us()));
+    ASSERT_TRUE(s.server.set_metadata(group, metadata, s.server.now_us()));
     client.send_json(controller_command(R"({"command":"seek_relative","offset_ms":100000})"));
     client.send_json(controller_command(R"({"command":"seek_relative","offset_ms":-15000})"));
     // Taken in while seek is not offered
-    recorder.wait_for_count(relative, 3);
+    s.recorder.wait_for_count(relative, 3);
 
     caps.commands.push_back(TransportCommand::SEEK);
-    ASSERT_TRUE(server.set_controller_caps(group, caps));
+    ASSERT_TRUE(s.server.set_controller_caps(group, caps));
     EXPECT_EQ(payload(next(client)),
               R"({"controller":{"supported_commands":["play","switch","seek","seek_relative"],)"
               R"("volume":100,"muted":false,"repeat":"all","shuffle":true,"seek_max_ms":60000}})");
@@ -375,20 +371,20 @@ TEST(ServerController, FiltersCommandsAndForwardsTransportCommands) {
     client.send_json(controller_command(R"({"command":"seek","position_ms":-1})"));
     client.send_json(controller_command(R"({"command":"seek","position_ms":60000})"));
     client.send_json(controller_command(R"({"command":"play"})"));
-    recorder.wait_for("command " + group_id(group) + " " +
-                      std::to_string(static_cast<int>(TransportCommand::PLAY)) + " " + id);
+    s.recorder.wait_for("command " + group_id(group) + " " +
+                        std::to_string(static_cast<int>(TransportCommand::PLAY)) + " " + id);
 
     // No seek_max_ms: the track's length bounds it
     ControllerCaps relative_only;
     relative_only.commands = {TransportCommand::SEEK_RELATIVE};
-    ASSERT_TRUE(server.set_controller_caps(group, relative_only));
+    ASSERT_TRUE(s.server.set_controller_caps(group, relative_only));
     next(client, "server/state");
     metadata.progress = MetadataProgress{10000, 30000, 1000};
-    ASSERT_TRUE(server.set_metadata(group, metadata, server.now_us()));
+    ASSERT_TRUE(s.server.set_metadata(group, metadata, s.server.now_us()));
     client.send_json(controller_command(R"({"command":"seek_relative","offset_ms":100000})"));
-    recorder.wait_for_count(relative, 4);
+    s.recorder.wait_for_count(relative, 4);
 
-    const std::vector<std::pair<TransportCommand, CommandArgs>> commands = recorder.commands();
+    const std::vector<std::pair<TransportCommand, CommandArgs>> commands = s.recorder.commands();
     ASSERT_EQ(commands.size(), 6U);
     // No position known yet: the host clamps
     EXPECT_EQ(commands[0].first, TransportCommand::SEEK_RELATIVE);
@@ -405,8 +401,8 @@ TEST(ServerController, FiltersCommandsAndForwardsTransportCommands) {
 
     client.send_json(controller_command(R"({"command":"seek_relative","offset_ms":"x"})"));
     client.expect_silent_close();
-    recorder.wait_for("disconnected " + id + " " +
-                      std::to_string(static_cast<int>(DisconnectReason::CLOSED_BY_SERVER)));
+    s.recorder.wait_for("disconnected " + id + " " +
+                        std::to_string(static_cast<int>(DisconnectReason::CLOSED_BY_SERVER)));
 }
 
 // controller/v1.md "Setting group volume" and "Setting group mute": one command per player that
@@ -414,23 +410,21 @@ TEST(ServerController, FiltersCommandsAndForwardsTransportCommands) {
 // does not offer to set is left out of the group's volume and gets no command
 // (roles/player/v1.md "Supported commands")
 TEST(ServerController, SetsGroupVolumeAndMuteOnThePlayers) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
+    LocalServer s;
     ServerConfig config = sendspin::server::test::local_config();
     config.approve_all_clients = true;
-    config.trace = [&recorder](const sendspin::server::TracedMessage& message) {
-        recorder.trace(message);
+    config.trace = [&s](const sendspin::server::TracedMessage& message) {
+        s.recorder.trace(message);
     };
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
+    ASSERT_EQ(s.start(config), StartResult::OK);
     RawClient a;
     RawClient b;
     RawClient fixed;
-    ASSERT_NO_FATAL_FAILURE(connect(server, a, hello("A", {"player@v1", "controller@v1"}, true)));
+    ASSERT_NO_FATAL_FAILURE(connect(s.server, a, hello("A", {"player@v1", "controller@v1"}, true)));
     next(a, "server/state");
-    ASSERT_NO_FATAL_FAILURE(connect(server, b, hello("B", {"player@v1"}, true)));
+    ASSERT_NO_FATAL_FAILURE(connect(s.server, b, hello("B", {"player@v1"}, true)));
     next(b, "group/update");
-    ASSERT_NO_FATAL_FAILURE(connect(server, fixed, hello("Fixed", {"player@v1"}, true)));
+    ASSERT_NO_FATAL_FAILURE(connect(s.server, fixed, hello("Fixed", {"player@v1"}, true)));
     next(fixed, "group/update");
 
     a.send_json(player_state(true, {"volume", "mute"}, 50, false));
@@ -442,7 +436,7 @@ TEST(ServerController, SetsGroupVolumeAndMuteOnThePlayers) {
               R"({"controller":{"supported_commands":["volume","mute","switch"],"volume":70,)"
               R"("muted":false,"repeat":"off","shuffle":false}})");
     fixed.send_json(player_state(true, {}, 0, true));
-    recorder.wait_for_count("in client/state", 3);
+    s.recorder.wait_for_count("in client/state", 3);
 
     // From 50 and 90 to 100: 80 and 120, the clamped 20 to the other
     a.send_json(controller_command(R"({"command":"volume","volume":100})"));
@@ -454,11 +448,11 @@ TEST(ServerController, SetsGroupVolumeAndMuteOnThePlayers) {
     EXPECT_EQ(payload(next(a, "server/command")), R"({"player":{"command":"mute","mute":true}})");
     EXPECT_EQ(payload(next(b, "server/command")), R"({"player":{"command":"mute","mute":true}})");
     // The host's group volume: the players have reported no change, so from 50 and 90 again
-    ASSERT_TRUE(server.set_group_volume(*server.default_group(), 30));
+    ASSERT_TRUE(s.server.set_group_volume(*s.server.default_group(), 30));
     EXPECT_EQ(payload(next(a, "server/command")), R"({"player":{"command":"volume","volume":10}})");
     EXPECT_EQ(payload(next(b, "server/command")), R"({"player":{"command":"volume","volume":50}})");
-    EXPECT_FALSE(server.set_group_volume(*server.default_group(), 101));
-    EXPECT_FALSE(server.set_group_volume(GroupId{999}, 30));
+    EXPECT_FALSE(s.server.set_group_volume(*s.server.default_group(), 101));
+    EXPECT_FALSE(s.server.set_group_volume(GroupId{999}, 30));
     // The player without the commands got none: its next message answers its time request
     fixed.send_json(sendspin::server::test::client_time_json(1));
     EXPECT_EQ(type(next(fixed)), "server/time");
@@ -493,26 +487,24 @@ std::vector<std::string> metadata_until_caps(SendspinServer& server, GroupId gro
 // hold; a pause sends the state at speed 0 with the position reached, and the resume the same
 // position at the speed the pause took away, from the run's first sample on
 TEST(ServerMetadata, JoinsWithCurrentThenScheduledAndFollowsPauseAndResume) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
+    LocalServer s;
     ServerConfig config = sendspin::server::test::local_config();
     config.approve_all_clients = true;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-    const GroupId group = *server.default_group();
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    const GroupId group = *s.server.default_group();
     Metadata current;
     current.title = "A";
     current.progress = MetadataProgress{1000, 100000, 1000};
-    const int64_t set_at = server.now_us();
-    ASSERT_TRUE(server.set_metadata(group, current, set_at));
+    const int64_t set_at = s.server.now_us();
+    ASSERT_TRUE(s.server.set_metadata(group, current, set_at));
     Metadata scheduled;
     scheduled.title = "B";
     constexpr int64_t AHEAD_US = 10000000;
-    ASSERT_TRUE(server.set_metadata(group, scheduled, set_at + AHEAD_US));
+    ASSERT_TRUE(s.server.set_metadata(group, scheduled, set_at + AHEAD_US));
 
     RawClient client;
     ASSERT_NO_FATAL_FAILURE(
-        connect(server, client, hello("Display", {"controller@v1", "metadata@v1"}, true)));
+        connect(s.server, client, hello("Display", {"controller@v1", "metadata@v1"}, true)));
     ASSERT_EQ(type(next(client)), "server/activate");
     ASSERT_EQ(type(next(client)), "group/update");
     JsonDocument state = next(client);
@@ -520,26 +512,26 @@ TEST(ServerMetadata, JoinsWithCurrentThenScheduledAndFollowsPauseAndResume) {
     EXPECT_EQ(state["payload"]["metadata"]["title"], "A");
     EXPECT_EQ(state["payload"]["metadata"]["timestamp"].as<int64_t>(), set_at);
     bool toggle = true;
-    EXPECT_EQ(metadata_until_caps(server, group, client, toggle),
+    EXPECT_EQ(metadata_until_caps(s.server, group, client, toggle),
               std::vector<std::string>{R"({"timestamp":)" + std::to_string(set_at + AHEAD_US) +
                                        R"(,"title":"B"})"});
 
     sendspin::server::InputOptions options;
     options.format = {48000, 2, sendspin::server::SampleFormat::S16};
     const std::shared_ptr<sendspin::server::GroupInput> input =
-        server.open_input(group, options).input;
+        s.server.open_input(group, options).input;
     ASSERT_TRUE(input);
     const std::vector<uint8_t> silence(size_t{48000} * 4, 0);
     while (input->write(silence.data(), 48000).frames == 0) {
         input->wait_writable(std::numeric_limits<int64_t>::max());
     }
     const std::string name = "group " + std::to_string(group.value);
-    recorder.wait_for(name + " playing");
-    const size_t stops = recorder.count(name + " stopped");
+    s.recorder.wait_for(name + " playing");
+    const size_t stops = s.recorder.count(name + " stopped");
     input->pause();
     // The run's end queues the state in the handler that reports the group stopped
-    recorder.wait_for_count(name + " stopped", stops + 1);
-    std::vector<std::string> states = metadata_until_caps(server, group, client, toggle);
+    s.recorder.wait_for_count(name + " stopped", stops + 1);
+    std::vector<std::string> states = metadata_until_caps(s.server, group, client, toggle);
     ASSERT_EQ(states.size(), 1U);
     JsonDocument paused;
     deserializeJson(paused, states[0]);
@@ -549,10 +541,10 @@ TEST(ServerMetadata, JoinsWithCurrentThenScheduledAndFollowsPauseAndResume) {
     EXPECT_GE(position, 1000U);
     const int64_t paused_at = paused["timestamp"].as<int64_t>();
 
-    const size_t plays = recorder.count(name + " playing");
+    const size_t plays = s.recorder.count(name + " playing");
     input->resume();
-    recorder.wait_for_count(name + " playing", plays + 1);
-    states = metadata_until_caps(server, group, client, toggle);
+    s.recorder.wait_for_count(name + " playing", plays + 1);
+    states = metadata_until_caps(s.server, group, client, toggle);
     ASSERT_EQ(states.size(), 1U);
     JsonDocument resumed;
     deserializeJson(resumed, states[0]);
@@ -569,26 +561,23 @@ TEST(ServerMetadata, JoinsWithCurrentThenScheduledAndFollowsPauseAndResume) {
 // messaging.md "client/goodbye": the reason reaches the host with the disconnect; one this
 // server does not recognize is reported as none. Control: a drop without a goodbye.
 TEST(ServerDisconnect, ReportsTheGoodbyeReason) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    ASSERT_EQ(server.start(sendspin::server::test::local_config(), &provider, &recorder),
-              StartResult::OK);
+    LocalServer s;
+    ASSERT_EQ(s.start(), StartResult::OK);
     RawClient client;
     const std::string id = client_id_of(client);
     const std::string reasons[] = {"another_server", "moving", ""};
     for (size_t i = 0; i < std::size(reasons); ++i) {
         SCOPED_TRACE(reasons[i]);
-        ASSERT_NO_FATAL_FAILURE(connect(server, client, hello("Leaving", {}, true)));
+        ASSERT_NO_FATAL_FAILURE(connect(s.server, client, hello("Leaving", {}, true)));
         next(client, "group/update");
         if (reasons[i].empty()) {
             client.drop();
         } else {
             client.send_json(sendspin::server::test::client_goodbye_json(reasons[i]));
         }
-        recorder.wait_for_disconnects(i + 1);
+        s.recorder.wait_for_disconnects(i + 1);
     }
-    const std::vector<ClientDisconnect> disconnects = recorder.disconnects();
+    const std::vector<ClientDisconnect> disconnects = s.recorder.disconnects();
     ASSERT_EQ(disconnects.size(), 3U);
     EXPECT_EQ(disconnects[0].reason, DisconnectReason::GOODBYE);
     EXPECT_EQ(disconnects[0].goodbye_reason, GoodbyeReason::ANOTHER_SERVER);
@@ -608,22 +597,20 @@ TEST(ServerGroups, AClientBackWithinTheGraceRejoinsItsGroup) {
     for (const Leaves leaves : {Leaves::WITHIN, Leaves::PAST, Leaves::ANOTHER_SERVER}) {
         SCOPED_TRACE(static_cast<int>(leaves));
         const bool within = leaves == Leaves::WITHIN;
-        MemoryProvider provider;
-        Recorder recorder;
-        SendspinServer server;
+        LocalServer s;
         ServerConfig config = sendspin::server::test::local_config();
         config.approve_all_clients = true;
         if (leaves == Leaves::PAST) {
             config.timing.group_rejoin_grace_us = 1;
         }
-        ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-        const std::string default_group = group_id(*server.default_group());
+        ASSERT_EQ(s.start(config), StartResult::OK);
+        const std::string default_group = group_id(*s.server.default_group());
         RawClient a;
         RawClient b;
         const std::string hello_json = hello("A", {"player@v1"}, true);
-        ASSERT_NO_FATAL_FAILURE(connect(server, a, hello_json));
+        ASSERT_NO_FATAL_FAILURE(connect(s.server, a, hello_json));
         EXPECT_EQ(next(a, "group/update")["payload"]["group_id"].as<std::string>(), default_group);
-        ASSERT_NO_FATAL_FAILURE(connect(server, b, hello("B", {"player@v1"}, true)));
+        ASSERT_NO_FATAL_FAILURE(connect(s.server, b, hello("B", {"player@v1"}, true)));
         next(b, "group/update");
         // The first client/state is an initial value; the second a transition
         a.send_json(player_state(true, {}, std::nullopt, std::nullopt));
@@ -638,9 +625,9 @@ TEST(ServerGroups, AClientBackWithinTheGraceRejoinsItsGroup) {
             a.send_json(sendspin::server::test::client_goodbye_json("another_server"));
         }
         a.close();
-        recorder.wait_for_disconnects(1);
+        s.recorder.wait_for_disconnects(1);
         const auto has_solo = [&] {
-            const std::vector<GroupInfo> groups = server.groups();
+            const std::vector<GroupInfo> groups = s.server.groups();
             return std::any_of(groups.begin(), groups.end(),
                                [&](const GroupInfo& group) { return group_id(group.id) == solo; });
         };
@@ -649,7 +636,7 @@ TEST(ServerGroups, AClientBackWithinTheGraceRejoinsItsGroup) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
         }
-        ASSERT_NO_FATAL_FAILURE(connect(server, a, hello_json));
+        ASSERT_NO_FATAL_FAILURE(connect(s.server, a, hello_json));
         EXPECT_EQ(type(next(a)), "server/activate");
         const JsonDocument rejoined = next(a);
         ASSERT_EQ(type(rejoined), "group/update");
@@ -662,13 +649,13 @@ TEST(ServerGroups, AClientBackWithinTheGraceRejoinsItsGroup) {
 // ==============================================================================
 
 /// A started server that approves every client
-class GroupsServer {
+class GroupsServer : public LocalServer {
 public:
     GroupsServer() {
         ServerConfig config = sendspin::server::test::local_config();
         config.name = "Living room";
         config.approve_all_clients = true;
-        EXPECT_EQ(this->server.start(config, &this->provider, &this->recorder), StartResult::OK);
+        EXPECT_EQ(this->start(config), StartResult::OK);
     }
 
     /// Connects client with every implemented role, reporting a volume of 50 it offers to set, and
@@ -700,9 +687,6 @@ public:
         }
     }
 
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
     /// The renames expect_nothing_queued() made
     int renames{0};
 };
@@ -754,7 +738,7 @@ JsonDocument next_json(RawClient& client, std::string_view type) {
             ADD_FAILURE() << "the connection closed while waiting for " << type;
             return JsonDocument();
         }
-        if (plaintext->empty() || plaintext->front() != 0) {
+        if (plaintext->empty() || plaintext->front() != wire::JSON_ID) {
             continue;
         }
         JsonDocument doc;
@@ -777,7 +761,7 @@ JsonDocument next_join(RawClient& client) {
             ADD_FAILURE() << "the connection closed while waiting for the join";
             return JsonDocument();
         }
-        if (plaintext->empty() || plaintext->front() != 0) {
+        if (plaintext->empty() || plaintext->front() != wire::JSON_ID) {
             continue;
         }
         JsonDocument doc;
@@ -1275,36 +1259,34 @@ std::ptrdiff_t last_index(const std::vector<Recorder::Entry>& entries, const std
 // state; revoking it ends the stream, with stream/end ahead of the activation that removes the
 // role (messaging.md "server/activate"), and the client drops its controller and metadata state
 TEST(ServerRolesInProcess, ApprovalStartsAndRevocationEndsAPlayersStream) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
+    LocalServer s;
     ServerConfig config = sendspin::server::test::local_config();
-    config.trace = [&recorder](const sendspin::server::TracedMessage& message) {
-        recorder.trace(message);
+    config.trace = [&s](const sendspin::server::TracedMessage& message) {
+        s.recorder.trace(message);
     };
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-    const GroupId group = *server.default_group();
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    const GroupId group = *s.server.default_group();
     Peer peer("Kitchen", true, 40);
-    ASSERT_TRUE(server.connect_url(peer.url()));
+    ASSERT_TRUE(s.server.connect_url(peer.url()));
     std::string id;
     run_until({&peer}, [&] {
-        id = client_at(server, peer.url());
-        return !id.empty() && recorder.contains("approval needed " + id);
+        id = client_at(s.server, peer.url());
+        return !id.empty() && s.recorder.contains("approval needed " + id);
     });
 
     sendspin::server::InputOptions options;
     options.format = {48000, 2, sendspin::server::SampleFormat::S16};
     const std::shared_ptr<sendspin::server::GroupInput> input =
-        server.open_input(group, options).input;
+        s.server.open_input(group, options).input;
     ASSERT_TRUE(input);
     const std::vector<uint8_t> silence(size_t{960} * 4, 0);
     const auto write = [&] { input->write(silence.data(), 960); };
     const std::string playing = "group " + std::to_string(group.value) + " playing";
-    run_until({&peer}, [&] { return recorder.contains(playing); }, write);
+    run_until({&peer}, [&] { return s.recorder.contains(playing); }, write);
     EXPECT_EQ(peer.events.starts, 0);
     EXPECT_FALSE(peer.events.controller);
 
-    ASSERT_TRUE(server.approve(id, ApprovalScope::PLAYBACK));
+    ASSERT_TRUE(s.server.approve(id, ApprovalScope::PLAYBACK));
     run_until(
         {&peer},
         [&] {
@@ -1314,12 +1296,12 @@ TEST(ServerRolesInProcess, ApprovalStartsAndRevocationEndsAPlayersStream) {
         write);
     EXPECT_TRUE(peer.events.offers(sendspin::SendspinControllerCommand::VOLUME));
 
-    ASSERT_TRUE(server.revoke_approval(id));
+    ASSERT_TRUE(s.server.revoke_approval(id));
     run_until(
         {&peer},
         [&] { return peer.events.ends >= 1 && !peer.events.controller && !peer.events.metadata; },
         write);
-    const std::vector<Recorder::Entry> entries = recorder.entries();
+    const std::vector<Recorder::Entry> entries = s.recorder.entries();
     const std::ptrdiff_t end = last_index(entries, "out stream/end");
     ASSERT_GE(end, 0);
     EXPECT_LT(end, last_index(entries, "out server/activate"));
@@ -1329,17 +1311,15 @@ TEST(ServerRolesInProcess, ApprovalStartsAndRevocationEndsAPlayersStream) {
 // its volume command sets each player's, a transport command the host offers reaches it, and the
 // metadata role shows the group's metadata, a scheduled update included (metadata/v1.md)
 TEST(ServerRolesInProcess, ControllerAndMetadataReachASendspinCppClient) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
+    LocalServer s;
     ServerConfig config = sendspin::server::test::local_config();
     config.approve_all_clients = true;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-    const GroupId group = *server.default_group();
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    const GroupId group = *s.server.default_group();
     Peer a("A", true, 20);
     Peer b("B", false, 80);
-    ASSERT_TRUE(server.connect_url(a.url()));
-    ASSERT_TRUE(server.connect_url(b.url()));
+    ASSERT_TRUE(s.server.connect_url(a.url()));
+    ASSERT_TRUE(s.server.connect_url(b.url()));
     const std::vector<Peer*> peers = {&a, &b};
     run_until(peers, [&] { return a.events.controller && a.events.controller->volume == 50; });
 
@@ -1353,22 +1333,22 @@ TEST(ServerRolesInProcess, ControllerAndMetadataReachASendspinCppClient) {
 
     ControllerCaps caps;
     caps.commands = {TransportCommand::PLAY};
-    ASSERT_TRUE(server.set_controller_caps(group, caps));
+    ASSERT_TRUE(s.server.set_controller_caps(group, caps));
     run_until(peers, [&] { return a.events.offers(sendspin::SendspinControllerCommand::PLAY); });
     ASSERT_TRUE(a.controller->send_command({.command = sendspin::SendspinControllerCommand::PLAY}));
     const std::string played = "command " + std::to_string(group.value) + " " +
                                std::to_string(static_cast<int>(TransportCommand::PLAY)) + " " +
-                               client_at(server, a.url());
-    run_until(peers, [&] { return recorder.contains(played); });
+                               client_at(s.server, a.url());
+    run_until(peers, [&] { return s.recorder.contains(played); });
 
     Metadata now;
     now.title = "Now";
-    ASSERT_TRUE(server.set_metadata(group, now, server.now_us()));
+    ASSERT_TRUE(s.server.set_metadata(group, now, s.server.now_us()));
     run_until(peers, [&] { return a.events.metadata && a.events.metadata->title == "Now"; });
     Metadata next_track;
     next_track.title = "Next";
     constexpr int64_t AHEAD_US = 300000;
-    ASSERT_TRUE(server.set_metadata(group, next_track, server.now_us() + AHEAD_US));
+    ASSERT_TRUE(s.server.set_metadata(group, next_track, s.server.now_us() + AHEAD_US));
     run_until(peers, [&] { return a.events.metadata && a.events.metadata->title == "Next"; });
 }
 
@@ -1392,15 +1372,14 @@ TEST(ServerTrace, TracesCompletedWritesOnlyWhenAsked) {
         std::mutex mutex;
         std::condition_variable changed;
         std::vector<Seen> seen;
-        MemoryProvider provider;
-        Recorder recorder;
-        SendspinServer server;
+        LocalServer s;
         ServerConfig config = sendspin::server::test::local_config();
         config.approve_all_clients = true;
         config.trace_writes = trace_writes;
         config.trace = [&](const sendspin::server::TracedMessage& message) {
             std::string message_type;
-            if (!message.plaintext.empty() && (!message.binary || message.plaintext.front() == 0)) {
+            if (!message.plaintext.empty() &&
+                (!message.binary || message.plaintext.front() == wire::JSON_ID)) {
                 const size_t offset = message.binary ? 1 : 0;
                 JsonDocument doc;
                 if (deserializeJson(doc, message.plaintext.data() + offset,
@@ -1417,9 +1396,9 @@ TEST(ServerTrace, TracesCompletedWritesOnlyWhenAsked) {
             }
             changed.notify_all();
         };
-        ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
+        ASSERT_EQ(s.start(config), StartResult::OK);
         RawClient client;
-        ASSERT_NO_FATAL_FAILURE(connect(server, client, hello("Timer", {"metadata@v1"}, true)));
+        ASSERT_NO_FATAL_FAILURE(connect(s.server, client, hello("Timer", {"metadata@v1"}, true)));
         next(client, "group/update");
         client.send_json(sendspin::server::test::client_time_json(1));
         next(client, "server/time");

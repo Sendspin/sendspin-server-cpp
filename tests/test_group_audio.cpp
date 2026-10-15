@@ -30,6 +30,7 @@
 #include "sched/leads.h"
 #include "transport_asio.h"
 #include "visualizer_analysis.h"
+#include "wire_messages.h"
 #include <boost/asio/io_context.hpp>
 #include <gtest/gtest.h>
 
@@ -68,6 +69,7 @@ using sendspin::server::now_us;
 using sendspin::server::SampleFormat;
 using sendspin::server::test::job_view_of;
 using sendspin::server::test::ReferenceResampler;
+namespace wire = sendspin::server::test::wire;
 namespace sched = sendspin::server::sched;
 using Bytes = std::vector<uint8_t>;
 
@@ -1963,11 +1965,7 @@ std::vector<int64_t> message_timestamps(const std::vector<GroupEvent>& events, u
         const Bytes& payload = ready->frame.payload;
         for (size_t at = 0; at < payload.size(); at += bytes) {
             EXPECT_EQ(payload[at], id);
-            int64_t ts = 0;
-            for (size_t i = 1; i < 9; ++i) {
-                ts = (ts << 8) | payload[at + i];
-            }
-            out.push_back(ts);
+            out.push_back(wire::timestamp_at(payload, at + wire::TIMESTAMP_AT));
         }
     }
     return out;
@@ -2005,7 +2003,7 @@ TEST(GroupAudioAnalyses, AnalyzeEachCellOnTheTimelineThroughADrain) {
     for (int64_t j = 0; (j * 1000000 / 30) < 500000; ++j) {
         expected.push_back(t0 + (j * 1000000 / 30));
     }
-    EXPECT_EQ(message_timestamps(events, 16, 11), expected);
+    EXPECT_EQ(message_timestamps(events, wire::LOUDNESS_ID, wire::VISUALIZER_HEADER + 2), expected);
 }
 
 // A message carries its instant shifted as its cell is, so a stall rebase moves the analyses'
@@ -2037,7 +2035,7 @@ TEST_F(GroupAudioTest, ShiftsAnalysisMessagesWithTheFrames) {
     for (const auto& [index, ts_us] : frames) {
         shifted.push_back(ts_us);
     }
-    EXPECT_EQ(message_timestamps(events, 16, 11), shifted);
+    EXPECT_EQ(message_timestamps(events, wire::LOUDNESS_ID, wire::VISUALIZER_HEADER + 2), shifted);
 }
 
 /// The analysis frames among events: index to timestamp

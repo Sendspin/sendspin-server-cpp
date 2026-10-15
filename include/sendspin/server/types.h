@@ -28,7 +28,7 @@
 namespace sendspin::server {
 
 /// @brief The outcome of SendspinServer::start()
-enum class StartResult : uint8_t {
+enum class [[nodiscard]] StartResult : uint8_t {
     OK,
     /// The server is running, or another start() is in progress
     ALREADY_RUNNING,
@@ -387,6 +387,10 @@ constexpr uint32_t NORMAL_PLAYBACK_SPEED = 1000;
 /// @brief The largest MetadataProgress::playback_speed SendspinServer::set_metadata() takes:
 /// 100 times normal speed
 constexpr uint32_t MAX_PLAYBACK_SPEED = 100 * NORMAL_PLAYBACK_SPEED;
+
+/// @brief The largest group or player volume (spec roles/player/v1.md "client/state player
+/// object"), the most SendspinServer::set_group_volume() takes
+constexpr uint32_t MAX_VOLUME = 100;
 
 /// @brief Playback progress (spec metadata/v1.md "server/state metadata object")
 struct MetadataProgress {

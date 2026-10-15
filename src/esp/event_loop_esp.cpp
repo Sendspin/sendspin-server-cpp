@@ -114,8 +114,7 @@ void Wakeup::signal(const Handle& handle) {
 // ==============================================================================
 
 LoopCore::LoopCore()
-    : drains_(DRAIN_SLOTS),
-      ready_(xSemaphoreCreateBinary()),
+    : ready_(xSemaphoreCreateBinary()),
       inbound_(
           profile::INBOUND_RING_BYTES, profile::INBOUND_RING_MESSAGES,
           [this](uint64_t place) { this->queue_drain(place); }, [this] { this->resume_parked(); }) {
@@ -144,14 +143,11 @@ void LoopCore::queue_drain(uint64_t place) {
         if (this->closed_) {
             return;
         }
-        if (this->drain_count_ < this->drains_.size()) {
-            this->drains_[(this->drain_head_ + this->drain_count_) % this->drains_.size()] = {
-                ++this->order_, place};
-            ++this->drain_count_;
-        } else {
+        const uint64_t order = ++this->order_;
+        if (!this->drains_.try_push(Drain{order, place})) {
             // Past the slots, a drain is a handler like any other, in the same order
             auto drain = [this, place] { this->inbound_.drain(place); };
-            this->posted_.push(TaskRef(drain), ++this->order_);
+            this->posted_.push(TaskRef(drain), order);
         }
     }
     this->notify();
@@ -207,7 +203,7 @@ void LoopCore::close() {
         const std::lock_guard<std::mutex> lock(this->mutex_);
         this->closed_ = true;
         posted.swap(this->posted_);
-        this->drain_count_ = 0;
+        this->drains_.clear();
         wakeups = this->wake_head_;
         this->wake_head_ = nullptr;
         this->wake_tail_ = nullptr;
@@ -232,11 +228,10 @@ void LoopCore::take(TaskQueue& posted, std::vector<Drain>& drains, Wakeup::Impl*
     const std::lock_guard<std::mutex> lock(this->mutex_);
     posted.swap(this->posted_);
     drains.clear();
-    for (size_t i = 0; i < this->drain_count_; ++i) {
-        drains.push_back(this->drains_[(this->drain_head_ + i) % this->drains_.size()]);
+    for (size_t i = 0; i < this->drains_.size(); ++i) {
+        drains.push_back(this->drains_[i]);
     }
-    this->drain_head_ = (this->drain_head_ + this->drain_count_) % this->drains_.size();
-    this->drain_count_ = 0;
+    this->drains_.clear();
     wakeups = this->wake_head_;
     this->wake_head_ = nullptr;
     this->wake_tail_ = nullptr;

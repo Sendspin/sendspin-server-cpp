@@ -16,6 +16,7 @@
 
 #include "fragmentation.h"
 #include "messages.h"
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -410,7 +411,7 @@ std::string RawClient::receive_json() {
         return {};
     }
     const std::optional<Bytes> plaintext = this->noise.decrypt(message->bytes);
-    if (!plaintext || plaintext->empty() || plaintext->front() != MESSAGE_ID_JSON) {
+    if (!plaintext || plaintext->empty() || plaintext->front() != wire::JSON_ID) {
         ADD_FAILURE() << "not an encrypted JSON message";
         return {};
     }
@@ -441,7 +442,7 @@ std::string RawClient::receive_until(std::string_view type) {
         if (!plaintext) {
             return {};
         }
-        if (plaintext->empty() || plaintext->front() != MESSAGE_ID_JSON) {
+        if (plaintext->empty() || plaintext->front() != wire::JSON_ID) {
             continue;
         }
         std::string json(plaintext->begin() + 1, plaintext->end());

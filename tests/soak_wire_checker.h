@@ -18,6 +18,7 @@
 #pragma once
 
 #include "flac_reader.h"
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 
 #include <sendspin/server/config.h>
@@ -121,12 +122,12 @@ public:
         if (!message.binary || message.plaintext.empty()) {
             return;
         }
-        if (message.plaintext[0] == 0) {
+        if (message.plaintext[0] == wire::JSON_ID) {
             this->on_json(message);
-        } else if (message.plaintext[0] == CHUNK_ID && message.plaintext.size() > HEADER_BYTES) {
+        } else if (message.plaintext[0] == wire::AUDIO_CHUNK_ID &&
+                   message.plaintext.size() > wire::AUDIO_CHUNK_HEADER) {
             this->on_chunk(message);
-        } else if (message.plaintext[0] >= FIRST_VISUALIZER_ID &&
-                   message.plaintext[0] <= LAST_VISUALIZER_ID) {
+        } else if (wire::is_visualizer(message.plaintext[0])) {
             this->on_visualizer(message);
         }
     }
@@ -197,14 +198,6 @@ public:
 private:
     using Bytes = std::vector<uint8_t>;
 
-    static constexpr uint8_t CHUNK_ID = 4;
-    /// The visualizer role's binary message types (spec messaging.md "Binary Message ID
-    /// Structure"), and a visualization message's type byte and timestamp
-    static constexpr uint8_t FIRST_VISUALIZER_ID = 16;
-    static constexpr uint8_t LAST_VISUALIZER_ID = 23;
-    static constexpr size_t VISUALIZER_HEADER_BYTES = 9;
-    /// Message ID, timestamp and send_ahead
-    static constexpr size_t HEADER_BYTES = 13;
     static constexpr size_t MAX_ANOMALIES_KEPT = 40;
     /// A cell is kept past the write-ahead's 10 s, while every player of the group can still get it
     static constexpr int64_t CELL_KEPT_US = 30 * SECOND_US;
@@ -302,7 +295,7 @@ private:
     }
 
     void on_inbound(const TracedMessage& message) {
-        if (!message.binary || message.plaintext.empty() || message.plaintext[0] != 0) {
+        if (!message.binary || message.plaintext.empty() || message.plaintext[0] != wire::JSON_ID) {
             return;
         }
         JsonDocument doc;
@@ -429,14 +422,11 @@ private:
         Client& client = this->clients_[message.client_id];
         VisualizerSide& visualizer = client.visualizer;
         const std::string& id = message.client_id;
-        if (message.plaintext.size() < VISUALIZER_HEADER_BYTES) {
+        if (message.plaintext.size() < wire::VISUALIZER_HEADER) {
             this->anomaly(id, "visualizer size", "a visualization message under its header");
             return;
         }
-        int64_t ts = 0;
-        for (size_t i = 1; i < VISUALIZER_HEADER_BYTES; ++i) {
-            ts = (ts << 8) | message.plaintext[i];
-        }
+        const int64_t ts = wire::timestamp_at(message.plaintext);
         const int64_t stamp = message.stamp_us;
         const auto bytes = static_cast<int64_t>(message.plaintext.size());
         if (!visualizer.active) {
@@ -487,14 +477,11 @@ private:
     void on_chunk(const TracedMessage& message) {
         Client& client = this->clients_[message.client_id];
         const std::string& id = message.client_id;
-        int64_t ts = 0;
-        for (size_t i = 1; i < 1 + sizeof(int64_t); ++i) {
-            ts = (ts << 8) | message.plaintext[i];
-        }
+        const int64_t ts = wire::timestamp_at(message.plaintext);
         const int64_t stamp = message.stamp_us;
         const auto bytes = static_cast<int64_t>(message.plaintext.size());
-        const std::span<const uint8_t> payload(message.plaintext.data() + HEADER_BYTES,
-                                               message.plaintext.size() - HEADER_BYTES);
+        const std::span<const uint8_t> payload =
+            wire::payload_after(message.plaintext, wire::AUDIO_CHUNK_HEADER);
         if (!client.active || client.format.rate == 0) {
             this->anomaly(id, "outside a stream", "a chunk outside a stream");
             return;
