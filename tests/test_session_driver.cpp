@@ -464,8 +464,9 @@ TEST(SessionDriverWrites, AWriteCarriesEveryMessageReadyAsItStarts) {
 
 // messaging.md "Transmit timestamps": a time reply ends its write, so no message is built between
 // its stamp and its write, while the messages ready beside it follow in the next write. The reply
-// is taken with them ready: the client sends its request while a message larger than the socket
-// buffers keeps the server writing, and reads only after.
+// is taken with them ready: the client sends its request once the server has taken the first
+// fragment of a message larger than the socket buffers, which keeps it writing, and reads only
+// after. A request that reached core before that fragment would be answered ahead of it.
 TEST(SessionDriverWrites, ATimeReplyEndsItsWrite) {
     ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
     constexpr size_t BIG_BYTES = size_t{16} * 1024 * 1024;
@@ -480,6 +481,7 @@ TEST(SessionDriverWrites, ATimeReplyEndsItsWrite) {
     const std::vector<std::string> numbered = numbered_messages(4);
     messages.insert(messages.end(), numbered.begin(), numbered.end());
     active.queue(messages);
+    active.events_from(before, 1);
     active.client.send_json(sendspin::server::test::client_time_json(1));
     EXPECT_NE(active.client.receive_until("server/time"), "");
     for (const std::string& expected : numbered) {
