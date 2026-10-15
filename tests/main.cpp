@@ -16,18 +16,21 @@
 /// @brief Test entry point with an in-process hang watchdog. Tests wait on events with no
 /// timeout, so a regression hangs; this aborts the run with the hung test's name and the main
 /// thread's stack, which the CTest TIMEOUT alone cannot provide and a direct run has no other
-/// guard for.
+/// guard for. It also raises the open file limit the suite needs.
 
 #include <execinfo.h>
 #include <gtest/gtest.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <thread>
 
@@ -37,7 +40,26 @@ namespace {
 // diagnostic; CTest remains the backstop if this thread cannot run.
 constexpr auto WATCHDOG_BUDGET = std::chrono::seconds(55);
 
+// The open files the suite needs: raw clients filling connection_limits' caps on accepted
+// connections exceed macOS's default soft limit of 256; 1024 is Linux's default and within
+// FD_SETSIZE.
+constexpr rlim_t OPEN_FILES = 1024;
+
 pthread_t main_thread;
+
+/// Raises a soft open file limit below OPEN_FILES to it and keeps a higher one
+/// @return false, with errno set, when the hard limit or the system refuses it
+bool raise_open_file_limit() {
+    rlimit limit{};
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        return false;
+    }
+    if (limit.rlim_cur < OPEN_FILES) {
+        limit.rlim_cur = OPEN_FILES;
+        return setrlimit(RLIMIT_NOFILE, &limit) == 0;
+    }
+    return true;
+}
 
 // Signal handler run on the main thread, where every blocking test helper waits.
 // backtrace_symbols_fd writes straight to the fd, so nothing here allocates.
@@ -122,6 +144,11 @@ extern "C" const char* __asan_default_options() {
 }
 
 int main(int argc, char** argv) {
+    if (!raise_open_file_limit()) {
+        std::fprintf(stderr, "cannot raise the open file limit to %llu: %s\n",
+                     static_cast<unsigned long long>(OPEN_FILES), std::strerror(errno));
+        return EXIT_FAILURE;
+    }
     main_thread = pthread_self();
     struct sigaction action {};
     action.sa_handler = dump_stack;
