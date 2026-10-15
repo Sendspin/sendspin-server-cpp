@@ -174,8 +174,10 @@ set_source_files_properties(test_group_audio.cpp PROPERTIES COMPILE_OPTIONS -fno
 # on a Group with no input (playing_, epoch_, anchor_, rings_, pipelines_.analyses), call its
 # on_frame(), on_anchor_shift() and report_stalls() as the group-to-core FIFO and its timer do, and
 # set Group::stalls_.reported_us to a chosen last report, so a held-back report is due within the
-# test rather than after 10 s. It reads HostView::slew_ and next_slew_ on core, under
-# HostView::mutex_, as only their storage shows that core freed the slew a write left it.
+# test rather than after 10 s. It calls Group::on_wake() as the group's wakeup does, since a
+# write's signal can fold into a pipeline job's that is not posted yet, and reads HostView::slew_
+# and next_slew_ under HostView::mutex_, as only their storage shows that core freed the slew a
+# write left it.
 set_source_files_properties(test_session.cpp test_server_core.cpp test_session_driver.cpp
                             test_server_trust.cpp test_audio_workers.cpp
                             PROPERTIES COMPILE_OPTIONS -fno-access-control)

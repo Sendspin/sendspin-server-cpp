@@ -480,7 +480,9 @@ TEST(GroupAudioThread, AnswersAFullRingOnceTheJobFreesIt) {
 }
 
 // The write that takes up set_format()'s slew leaves the slew it replaced in the view, and core
-// frees it on the wakeup the write signals. White-box: HostView::slew_, next_slew_, mutex_.
+// frees it as it handles the group's wakeup. The pipeline jobs signal that wakeup too, so a write's
+// signal can fold into one whose handler is not posted yet: the test runs the handler itself.
+// White-box: Group::on_wake(), HostView::slew_, next_slew_, mutex_.
 TEST(GroupAudioThread, FreesTheSlewAWriteReplacedOnCore) {
     using sendspin::server::Group;
     constexpr uint32_t RATE = 48000;
@@ -515,8 +517,8 @@ TEST(GroupAudioThread, FreesTheSlewAWriteReplacedOnCore) {
         return view->next_slew_.output();
     }();
     ASSERT_GT(view->write(pcm.data(), RATE / 50).frames, 0U);
-    // Core handles the write's wakeup before this
     const auto [adopted, retired] = on_core(loop, [&] {
+        group->on_wake();
         const std::lock_guard<std::mutex> lock(view->mutex_);
         return std::pair{view->slew_.output() == made, view->next_slew_.ready()};
     });
