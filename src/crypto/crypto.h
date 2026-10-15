@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 extern "C" {
 #include <noise/protocol/constants.h>
@@ -41,6 +42,16 @@ inline void secure_zero(void* p, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         vp[i] = 0;
     }
+}
+
+/// @brief Zeros a byte vector's contents and the first `bytes` bytes of its storage, spare capacity
+/// included, with secure_zero(), so what longer contents left there is wiped too; its size is
+/// unchanged
+inline void secure_zero_storage(std::vector<uint8_t>& storage, size_t bytes) {
+    const size_t size = storage.size();
+    storage.resize(std::max(size, std::min(bytes, storage.capacity())));
+    secure_zero(storage.data(), storage.size());
+    storage.resize(size);
 }
 
 constexpr size_t SHA256_DIGEST_SIZE = 32;

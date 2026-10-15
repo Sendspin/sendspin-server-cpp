@@ -34,6 +34,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -1140,6 +1141,112 @@ TEST_P(SessionTest, CountsPairingActivationsAndHandsOverPairingMessages) {
 
     h.send(h.client.encrypt_json(R"({"type":"client/pair-init","payload":{}})"));
     EXPECT_EQ(h.session.end(), SessionEnd::PROTOCOL_ERROR);
+}
+
+// Whether a vector's bytes, read to its capacity, hold needle. The spare capacity is outside the
+// container's annotation, so the scan is not instrumented and calls nothing that is.
+__attribute__((no_sanitize("address"))) bool holds_to_capacity(const std::vector<uint8_t>& bytes,
+                                                               std::string_view needle) {
+    const uint8_t* data = bytes.data();
+    for (size_t start = 0; start + needle.size() <= bytes.capacity(); ++start) {
+        size_t matched = 0;
+        while (matched < needle.size() &&
+               data[start + matched] == static_cast<uint8_t>(needle[matched])) {
+            ++matched;
+        }
+        if (matched == needle.size()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// pairing.md "client/pair-finalize": a pair-finalize carrying both long_term_psk and wrapped_psk
+// fails validation, and its PSK is wiped from the decrypted message and the reassembly buffer,
+// spare capacity included, as a valid one's is (the Control), and as it is from a body whose type
+// cannot be read and from a fragment sequence that fails or outgrows the cap with the PSK buffered.
+// The first fragment's check that the scan finds the PSK is the Control of the scan.
+TEST_P(SessionTest, WipesTheSecretOfAPairingMessageWhetherOrNotItPassesValidation) {
+    using sendspin::server::FRAGMENT_FLAG_FIRST;
+    using sendspin::server::FRAGMENT_FLAG_LAST;
+    using sendspin::server::FRAGMENT_FLAGS_RESERVED;
+    const std::string psk = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
+    const std::string valid_head =
+        R"({"type":"client/pair-finalize","payload":{"long_term_psk":")" + psk;
+    const std::string valid_tail = R"("}})";
+    const std::string head = valid_head + R"(","wrapped_psk":"AAAA)";
+    const std::string tail = R"("}})";
+    struct Case {
+        const char* name;
+        std::string head;
+        std::string tail;
+        // Whether head and tail go as two fragments rather than one message
+        bool fragmented;
+        // The second fragment's flags: LAST completes the message, a reserved bit fails it
+        uint8_t second_flags;
+        std::optional<SessionEnd> end;
+        // The cap on a reassembled message: the head fits, head and tail do not
+        size_t max_reassembled_bytes{sendspin::server::DEFAULT_MAX_REASSEMBLED_BYTES};
+    };
+    const std::vector<Case> cases{
+        {"Control: a valid one in one message", valid_head, valid_tail, false, 0, std::nullopt},
+        {"Control: a valid one in two fragments", valid_head, valid_tail, true, FRAGMENT_FLAG_LAST,
+         std::nullopt},
+        {"in one message", head, tail, false, 0, SessionEnd::PROTOCOL_ERROR},
+        {"in a body that is not JSON, its type unread", head, "", false, 0,
+         SessionEnd::PROTOCOL_ERROR},
+        {"in two fragments, the PSK in the first", head, tail, true, FRAGMENT_FLAG_LAST,
+         SessionEnd::PROTOCOL_ERROR},
+        {"in a fragment sequence that fails", head, tail, true, FRAGMENT_FLAGS_RESERVED,
+         SessionEnd::MALFORMED_FRAGMENTS},
+        {"in a fragment sequence that outgrows the cap", head, tail, true, FRAGMENT_FLAG_LAST,
+         SessionEnd::MESSAGE_TOO_LARGE, head.size()},
+    };
+    for (const Case& c : cases) {
+        SCOPED_TRACE(c.name);
+        SessionSettings settings = test_settings();
+        settings.max_reassembled_bytes = c.max_reassembled_bytes;
+        Harness h(GetParam(), settings);
+        ASSERT_NO_FATAL_FAILURE(h.activate());
+        if (c.fragmented) {
+            Bytes first{sendspin::server::MESSAGE_ID_JSON};
+            const Bytes head_bytes = bytes_of(c.head);
+            first.insert(first.end(), head_bytes.begin(), head_bytes.end());
+            h.send(h.fragment(FRAGMENT_FLAG_FIRST, first));
+            EXPECT_TRUE(holds_to_capacity(h.session.scratch_, psk));
+            EXPECT_TRUE(holds_to_capacity(h.session.reassembler_.buffer_, psk));
+            h.send(h.fragment(c.second_flags, bytes_of(c.tail)));
+        } else {
+            h.send(h.client.encrypt_json(c.head + c.tail));
+        }
+        EXPECT_EQ(h.session.end(), c.end);
+        EXPECT_EQ(h.session.take_pairing_messages().size(), c.end ? 0U : 1U);
+        EXPECT_FALSE(holds_to_capacity(h.session.scratch_, psk));
+        EXPECT_FALSE(holds_to_capacity(h.session.reassembler_.buffer_, psk));
+    }
+}
+
+// A wipe reaches the reassembly buffer's storage past a shorter message, where a longer one
+// written since the last wipe left its bytes. Before the wipe the scan finds them: the Control.
+TEST(Reassembler, WipesTheStoragePastTheMessage) {
+    using sendspin::server::FRAGMENT_FLAG_FIRST;
+    using sendspin::server::FRAGMENT_FLAG_LAST;
+    const std::string secret = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
+    Reassembler reassembler(sendspin::server::DEFAULT_MAX_REASSEMBLED_BYTES,
+                            [](uint8_t) { return true; });
+    const auto whole = [](const std::string& text) {
+        Bytes plaintext{sendspin::server::MESSAGE_ID_FRAGMENT,
+                        FRAGMENT_FLAG_FIRST | FRAGMENT_FLAG_LAST,
+                        sendspin::server::MESSAGE_ID_JSON};
+        plaintext.insert(plaintext.end(), text.begin(), text.end());
+        return plaintext;
+    };
+    ASSERT_EQ(reassembler.accept(whole("{\"longer\":\"" + secret + "\"}")),
+              Reassembler::Outcome::MESSAGE);
+    ASSERT_EQ(reassembler.accept(whole("{}")), Reassembler::Outcome::MESSAGE);
+    EXPECT_TRUE(holds_to_capacity(reassembler.buffer_, secret));
+    reassembler.wipe();
+    EXPECT_FALSE(holds_to_capacity(reassembler.buffer_, secret));
 }
 
 // A session that ends between message 2 and the frozen activation's write, here on a client/goodbye

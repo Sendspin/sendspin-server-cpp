@@ -14,6 +14,8 @@
 
 #include "fragmentation.h"
 
+#include "crypto/crypto.h"
+
 #include <algorithm>
 
 namespace sendspin::server {
@@ -29,9 +31,15 @@ constexpr size_t FIRST_HEADER_SIZE = CONTINUATION_HEADER_SIZE + 1;
 Reassembler::Reassembler(size_t max_message_bytes, bool (*is_buffered)(uint8_t message_id))
     : max_message_bytes_(max_message_bytes), is_buffered_(is_buffered) {}
 
+Reassembler::~Reassembler() {
+    this->wipe();
+}
+
 Reassembler::Outcome Reassembler::fail(Outcome outcome) {
     this->in_progress_ = false;
     this->discarding_ = false;
+    // The message it held may carry a secret
+    this->wipe();
     this->buffer_.clear();
     return outcome;
 }
@@ -87,6 +95,7 @@ Reassembler::Outcome Reassembler::accept(std::span<const uint8_t> plaintext) {
             return this->fail(Outcome::TOO_LARGE);
         }
         this->buffer_.insert(this->buffer_.end(), data.begin(), data.end());
+        this->written_ = std::max(this->written_, this->buffer_.size());
     }
 
     if ((flags & FRAGMENT_FLAG_LAST) == 0) {
@@ -127,7 +136,8 @@ size_t write_fragment(uint8_t orig_type, std::span<const uint8_t> payload, size_
 }
 
 void Reassembler::wipe() {
-    std::fill(this->buffer_.begin(), this->buffer_.end(), uint8_t{0});
+    secure_zero_storage(this->buffer_, this->written_);
+    this->written_ = 0;
 }
 
 }  // namespace sendspin::server

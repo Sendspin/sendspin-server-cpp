@@ -159,7 +159,10 @@ set_source_files_properties(test_live_slew.cpp PROPERTIES COMPILE_OPTIONS -fno-a
 # publish for admission, which only shows in admission's bounds.
 set_source_files_properties(test_group_audio.cpp PROPERTIES COMPILE_OPTIONS -fno-access-control)
 # White-box: test_session.cpp queues a control message behind the initial server/activate through
-# Session::queue_json(), since the server queues no other control message there.
+# Session::queue_json(), since the server queues no other control message there. It reads
+# Session::scratch_, the buffer_ of Session::reassembler_ and of a Reassembler of its own to their
+# capacity to show a pairing message's PSK, or a longer message's bytes, wiped from them, which
+# nothing the session sends or reports shows.
 # test_server_core.cpp reads ServerCore::targets_ to show a dial waiting out its backoff, and a
 # lost instance's target gone with its wait, and a dial that waited not started once no longer due,
 # which only the absence of a dial would otherwise show, calls ServerCore::prune_targets() with a chosen

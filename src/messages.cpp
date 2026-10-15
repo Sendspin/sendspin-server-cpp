@@ -1244,6 +1244,11 @@ std::optional<std::string> build_server_activate(const ServerActivate& activate)
 // Inbound application messages
 // ==============================================================================
 
+bool is_pairing_type(std::string_view type) {
+    return std::any_of(PAIRING_TYPES.begin(), PAIRING_TYPES.end(),
+                       [type](const auto& entry) { return entry.first == type; });
+}
+
 ClientMessage parse_client_message(std::string_view json, int64_t rx_us) {
     // A pairing message may carry a secret
     JsonDocument doc(WipingAllocator::instance());
