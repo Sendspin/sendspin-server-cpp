@@ -70,6 +70,9 @@ constexpr int64_t LOWERING_MIN_US = 2 * CELL_US;
 /// hears; 100 ms comes off in about five and a half minutes
 constexpr int64_t LOWERING_SLEW_PPM = 300;
 
+/// @brief The least time between two of a group's stall reports (stalls.h)
+constexpr int64_t STALL_REPORT_US = 10 * US_PER_SECOND;
+
 namespace timing_defaults {
 constexpr int64_t PUMP_MARGIN_US = 10000;
 constexpr int64_t JOIN_MIN_US = 100000;

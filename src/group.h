@@ -32,6 +32,7 @@
 #include "metadata.h"
 #include "sched/constants.h"
 #include "sched/frames.h"
+#include "sched/stalls.h"
 #include "sched/timeline.h"
 #include "sched/types.h"
 #include "scheduled_updates.h"
@@ -213,8 +214,8 @@ private:
     void on_drain_started(const DrainStarted& drain);
     void on_anchor_shift(const AnchorShift& shift);
     void on_frame(FrameReady& ready);
-    /// Logs the rebases and late frames counted since the last report, at most every
-    /// STALL_REPORT_US, arming stall_timer_ for counts it holds back
+    /// Logs the stalls counted since the last report once one is due (sched::StallCount), arming
+    /// stall_timer_ for counts it holds back
     void report_stalls(int64_t now);
     void on_instance_final(const InstanceFinal& final);
     /// Excludes the format until the run ends, ends the streams on it and reports each player that
@@ -313,19 +314,8 @@ private:
     PipelineSet pipelines_;
     std::map<sched::InstanceId, sched::FrameRing> rings_;
     bool drain_check_posted_{false};
-    /// Since the last report: the rebases the pipelines posted (AnchorShift: the frames about to
-    /// be produced had too little lead, whether the pipelines fell behind, the input came late
-    /// or a joiner raised the group's lead) and the player frames that reached their ring at or
-    /// past their play time, counted per instance, so a cell late in two formats counts twice
-    struct Stalls {
-        static constexpr int64_t STALL_REPORT_US = 10'000'000;
-        uint32_t rebases{0};
-        int64_t shifted_us{0};
-        uint32_t late_frames{0};
-        int64_t reported_us{0};
-    };
-    Stalls stalls_;
-    /// Fires once a report held back by STALL_REPORT_US is due
+    sched::StallCount stalls_;
+    /// Fires once a stall report held back is due
     Timer stall_timer_;
     Timer writable_timer_;
     Timer drain_timer_;

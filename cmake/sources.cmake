@@ -66,6 +66,7 @@ set(SENDSPIN_SERVER_SOURCES
     src/sched/lowering.cpp
     src/sched/run_view.cpp
     src/sched/selection.cpp
+    src/sched/stalls.cpp
     src/sched/timeline.cpp
     src/send_queues.cpp
     src/server.cpp
