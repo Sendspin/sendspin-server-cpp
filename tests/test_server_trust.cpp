@@ -15,35 +15,27 @@
 /// @file test_server_trust.cpp
 /// @brief Trust end to end: a paired sendspin-cpp client plays under its long-term PSK, one that
 /// lost its record falls back to the Sentinel and is held, newer clients are reported, and
-/// through ServerCore on its own core thread a pairing PSK is referenced, a long-term PSK is
-/// used only once it is durable, one change at a time, and holds the client's unpaired sessions,
-/// a save may outlive the core, and re-handshakes switch keys under playback and end a mismatch.
-///
-/// White-box: the ServerCore tests set ServerCore::pairing_psks_, the state an operator-started
-/// Pairing PSK pairing sets, call ServerCore::rekey() and handshake_psk(), which pairing drives,
-/// and read ServerCore::records_ for the record (see tests/CMakeLists.txt).
+/// through ServerCore on its own core thread a long-term PSK holds the client's unpaired sessions,
+/// a save may outlive the core, a failed removal or put-back is kept and retried, an unconfirmed
+/// long-term PSK stays off disk and an attempt whose client stops answering ends.
 
 #include "client_records.h"
 #include "crypto/base64url.h"
 #include "crypto/keys.h"
 #include "dispatcher.h"
-#include "host_view.h"
 #include "peer.h"
-#include "player_sink.h"
 #include "raw_client.h"
 #include "server_core.h"
 #include "test_ports.h"
 #include "test_recorder.h"
 #include "transport.h"
 #include "trust_fixtures.h"
-#include "wire_messages.h"
-#include <ArduinoJson.h>
+#include "trust_harness.h"
 #include <gtest/gtest.h>
 #include <noise/protocol.h>
 
 #include <sendspin/client.h>
 #include <sendspin/metadata_role.h>
-#include <sendspin/player_role.h>
 #include <sendspin/server/server.h>
 
 #include <algorithm>
@@ -52,13 +44,10 @@
 #include <cstdint>
 #include <functional>
 #include <future>
-#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <thread>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -66,152 +55,32 @@ namespace {
 
 using sendspin::server::ClientInfo;
 using sendspin::server::ClientRecord;
-using sendspin::server::HandshakePsk;
 using sendspin::server::Identity;
 using sendspin::server::Psk;
-using sendspin::server::PskCategory;
 using sendspin::server::SendspinServer;
 using sendspin::server::ServerConfig;
 using sendspin::server::StartResult;
-using sendspin::server::TraceDirection;
 using sendspin::server::TracedMessage;
 using sendspin::server::test::Bytes;
+using sendspin::server::test::Capture;
 using sendspin::server::test::ClientStore;
+using sendspin::server::test::Core;
+using sendspin::server::test::HeldProvider;
 using sendspin::server::test::MemoryProvider;
+using sendspin::server::test::Peer;
+using sendspin::server::test::player_hello;
 using sendspin::server::test::psk_of;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
+using sendspin::server::test::ScriptedProvider;
 using sendspin::server::test::stored_record;
 namespace persistence_keys = sendspin::server::persistence_keys;
-namespace wire = sendspin::server::test::wire;
 
 Bytes record_blob(const ClientRecord& record) {
     sendspin::server::ClientRecordBlob blob{};
     EXPECT_TRUE(sendspin::server::encode_client_record(record, blob));
     return {blob.begin(), blob.end()};
 }
-
-constexpr uint32_t RATE = 48000;
-
-/// The trust a sendspin-cpp client reports for its connection: USER for a long-term PSK, NONE for
-/// the Sentinel or a pairing PSK
-class TrustListener : public sendspin::SendspinClientListener {
-public:
-    void on_trust_changed(sendspin::ConnectionTrust trust) override {
-        this->trust = trust;
-        ++this->reports;
-    }
-
-    std::atomic<sendspin::ConnectionTrust> trust{sendspin::ConnectionTrust::NONE};
-    std::atomic<int> reports{0};
-};
-
-/// A sendspin-cpp player listening on a loopback port for the server to dial, with a real-time
-/// audio output. Its main loop runs on the test thread through run_until().
-class Peer {
-public:
-    struct Options {
-        bool unpaired_access{true};
-        std::optional<Psk> pairing_psk;
-    };
-
-    explicit Peer(ClientStore& store, const Options& options)
-        : port_(sendspin::server::test::free_port()), client_(make_config(port_, options)) {
-        sendspin::PlayerRoleConfig player;
-        // One format, assigned by count: GCC 13 -Warray-bounds misreads an initializer-list
-        // assignment
-        player.audio_formats.assign(1, sendspin::AudioSupportedFormatObject{
-                                           sendspin::SendspinCodecFormat::PCM, 2, RATE, 16});
-        player.min_buffer_ms = 150;
-        sendspin::PlayerRole& role = this->client_.add_player(player);
-        this->sink_ = std::make_unique<sendspin::server::test::Sink>(role, 4, RATE);
-        role.set_listener(this->sink_.get());
-        this->client_.add_metadata();
-        this->client_.set_network_provider(&this->network_);
-        this->client_.set_persistence_provider(&store);
-        this->client_.set_listener(&this->trust_);
-        this->client_.set_unpaired_access_enabled(options.unpaired_access);
-        EXPECT_TRUE(this->client_.start());
-    }
-
-    ~Peer() {
-        this->client_.stop();
-    }
-
-    Peer(const Peer&) = delete;
-    Peer& operator=(const Peer&) = delete;
-
-    std::string url() const {
-        return sendspin::server::test::peer_url(this->port_);
-    }
-
-    sendspin::SendspinClient& client() {
-        return this->client_;
-    }
-
-    const sendspin::server::test::Sink& sink() const {
-        return *this->sink_;
-    }
-
-    const TrustListener& trust() const {
-        return this->trust_;
-    }
-
-    /// Runs the client's main loop until done() holds, with no timeout
-    template <typename Predicate>
-    void run_until(Predicate done) {
-        sendspin::server::test::run_until(this->client_, done);
-    }
-
-private:
-    static sendspin::SendspinClientConfig make_config(uint16_t port, const Options& options) {
-        sendspin::SendspinClientConfig config =
-            sendspin::server::test::peer_config("sendspin-cpp peer", port);
-        if (options.pairing_psk) {
-            config.pairing_psk = sendspin::SendspinPsk(*options.pairing_psk);
-        }
-        return config;
-    }
-
-    uint16_t port_;
-    sendspin::server::test::AlwaysReady network_;
-    TrustListener trust_;
-    sendspin::SendspinClient client_;
-    std::unique_ptr<sendspin::server::test::Sink> sink_;
-};
-
-/// Collects the plaintext of the server/activate messages and the log lines a server produces
-class Capture {
-public:
-    void trace(const TracedMessage& message) {
-        const std::string text(message.plaintext.begin(), message.plaintext.end());
-        if (message.direction == TraceDirection::OUTBOUND &&
-            text.find(R"("type":"server/activate")") != std::string::npos) {
-            const std::lock_guard<std::mutex> lock(this->mutex_);
-            this->activations_.push_back(text.substr(1));
-        }
-    }
-
-    void log(std::string_view line) {
-        const std::lock_guard<std::mutex> lock(this->mutex_);
-        this->lines_.emplace_back(line);
-    }
-
-    std::vector<std::string> activations() const {
-        const std::lock_guard<std::mutex> lock(this->mutex_);
-        return this->activations_;
-    }
-
-    std::vector<std::string> lines() const {
-        const std::lock_guard<std::mutex> lock(this->mutex_);
-        return this->lines_;
-    }
-
-private:
-    mutable std::mutex mutex_;
-    std::vector<std::string> activations_;
-    std::vector<std::string> lines_;
-};
 
 /// A server whose key is known before it starts, so a client can hold a record for it
 struct KnownServer {
@@ -378,406 +247,6 @@ TEST(ServerTrust, ReportsTheIdentifiersOfANewerClient) {
 // ==============================================================================
 // ServerCore on its own core thread
 // ==============================================================================
-
-/// A ServerCore with every client approved, running on its own thread until stopped, which then
-/// destroys it as a run's core thread does
-class Core {
-public:
-    explicit Core(sendspin::server::ClientRecords records = {},
-                  sendspin::server::PersistenceProvider* provider = nullptr)
-        : dispatcher(std::make_shared<sendspin::server::Dispatcher>()),
-          identity(*Identity::generate()) {
-        this->settings.approve_all_clients = true;
-        // The capture first, so that an activation the recorder lists is captured
-        this->settings.trace = [this](const TracedMessage& message) {
-            this->capture.trace(message);
-            this->recorder.trace(message);
-        };
-        this->core = std::make_unique<sendspin::server::ServerCore>(
-            this->loop, this->workers, *this->dispatcher, &this->recorder, this->identity,
-            this->settings, this->snapshot, this->groups, this->inputs, this->group_ids, provider,
-            std::move(records));
-        this->thread = std::thread([this] {
-            this->loop.run();
-            this->core.reset();
-        });
-    }
-
-    ~Core() {
-        this->stop();
-        this->dispatcher->finish();
-        this->dispatcher->join();
-    }
-
-    /// Shuts the core down and waits until its thread destroyed it; the dispatcher runs on
-    void stop() {
-        if (this->thread.joinable()) {
-            this->loop.post([this] { this->core->shutdown(0); });
-            this->thread.join();
-        }
-    }
-
-    Core(const Core&) = delete;
-    Core& operator=(const Core&) = delete;
-
-    /// Runs fn on the core thread and returns its result
-    template <typename Fn>
-    auto on_core(Fn fn) {
-        std::promise<decltype(fn())> result;
-        this->loop.post([&] {
-            if constexpr (std::is_void_v<decltype(fn())>) {
-                fn();
-                result.set_value();
-            } else {
-                result.set_value(fn());
-            }
-        });
-        return result.get_future().get();
-    }
-
-    void dial(const std::string& url) {
-        this->loop.post(
-            [this, url] { this->core->connect_url(url, *sendspin::server::parse_ws_url(url)); });
-    }
-
-    /// Opens an input on the server's group
-    std::shared_ptr<sendspin::server::HostView> open_input(uint32_t rate) {
-        auto view = std::make_shared<sendspin::server::HostView>(
-            this->core->default_group(), sendspin::server::InputId{this->next_input++},
-            sendspin::server::InputOptions{
-                sendspin::server::InputFormat{rate, 2, sendspin::server::SampleFormat::S16}},
-            sendspin::server::GroupParams{250000, 0, 0}, this->dispatcher, &this->recorder);
-        EXPECT_TRUE(this->inputs.add(view));
-        this->loop.post([this, view] { this->core->attach_input(view); });
-        return view;
-    }
-
-    sendspin::server::EventLoop loop;
-    sendspin::server::AudioWorkers workers{1};
-    std::shared_ptr<sendspin::server::Dispatcher> dispatcher;
-    Identity identity;
-    sendspin::server::CoreSettings settings;
-    sendspin::server::ClientSnapshot snapshot;
-    sendspin::server::GroupSnapshot groups;
-    sendspin::server::InputRegistry inputs;
-    std::atomic<uint64_t> group_ids{1};
-    Recorder recorder;
-    Capture capture;
-    std::unique_ptr<sendspin::server::ServerCore> core;
-    std::thread thread;
-    uint64_t next_input{1};
-};
-
-/// Writes the test signal into an input until stopped, from a thread of its own
-class Feeder {
-public:
-    explicit Feeder(std::shared_ptr<sendspin::server::HostView> view)
-        : view_(std::move(view)), thread_([this] { this->run(); }) {}
-
-    ~Feeder() {
-        this->stop_ = true;
-        this->thread_.join();
-    }
-
-    Feeder(const Feeder&) = delete;
-    Feeder& operator=(const Feeder&) = delete;
-
-private:
-    void run() {
-        constexpr uint32_t BLOCK = 960;
-        constexpr int64_t WAIT_US = 20000;
-        const sendspin::server::test::Signal signal(16);
-        Bytes block(size_t{BLOCK} * signal.frame_bytes());
-        uint32_t position = 0;
-        while (!this->stop_) {
-            for (uint32_t i = 0; i < BLOCK; ++i) {
-                signal.put(&block[i * signal.frame_bytes()], position + i);
-            }
-            uint32_t written = 0;
-            while (written < BLOCK && !this->stop_) {
-                written += static_cast<uint32_t>(
-                    this->view_->write(&block[written * signal.frame_bytes()], BLOCK - written)
-                        .frames);
-                if (written < BLOCK) {
-                    this->view_->wait_writable(WAIT_US);
-                }
-            }
-            position += BLOCK;
-        }
-    }
-
-    std::shared_ptr<sendspin::server::HostView> view_;
-    std::atomic<bool> stop_{false};
-    std::thread thread_;
-};
-
-std::string player_hello(const std::string& name) {
-    return sendspin::server::test::player_hello_json(
-        name, R"([{"codec":"pcm","sample_rate":48000,"channels":2,"bit_depth":16}])", 400000);
-}
-
-/// What a raw client player reads: chunks by timestamp and duration, JSON messages by text
-struct Reading {
-    std::optional<int64_t> ts;
-    int64_t duration_us{0};
-    std::string json;
-};
-
-/// The next message the raw client reads, as a Reading; json empty and ts unset once closed
-Reading read_one(RawClient& client) {
-    Reading reading;
-    const std::optional<Bytes> plaintext = client.receive_plaintext();
-    if (!plaintext || plaintext->empty()) {
-        return reading;
-    }
-    if (plaintext->front() == wire::JSON_ID) {
-        reading.json.assign(plaintext->begin() + 1, plaintext->end());
-        return reading;
-    }
-    if (plaintext->front() == wire::AUDIO_CHUNK_ID &&
-        plaintext->size() > wire::AUDIO_CHUNK_HEADER) {
-        reading.ts = wire::timestamp_at(*plaintext);
-        const auto frames =
-            static_cast<int64_t>((plaintext->size() - wire::AUDIO_CHUNK_HEADER) / 4);
-        reading.duration_us = frames * 1000000 / RATE;
-    }
-    return reading;
-}
-
-bool is_type(const std::string& json, const std::string& type) {
-    return json.find(R"("type":")" + type + '"') != std::string::npos;
-}
-
-// While the operator has started a Pairing PSK pairing for a client, message 1 references its
-// pairing PSK as 'pr', and a client holding it keys the session with it, which unpaired access and
-// approval let play (messaging.md "server/activate"). Control: another client is referenced under
-// the Sentinel.
-TEST(ServerCoreTrust, ReferencesAPairingPskTheOperatorStarted) {
-    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
-    Core core;
-    const Psk pairing = psk_of(0x70);
-    RawClient paired;
-    RawClient other;
-    const std::string id = paired.noise.identity().peer_id();
-    core.on_core(
-        [&] { core.core->pairing_psks_.emplace(id, HandshakePsk{PskCategory::PAIRING, pairing}); });
-    core.dial(paired.url());
-    core.dial(other.url());
-    paired.noise.psk = pairing;
-    ASSERT_NO_FATAL_FAILURE(paired.activate(player_hello("Paired")));
-    ASSERT_NO_FATAL_FAILURE(other.activate(player_hello("Other")));
-    JsonDocument payload;
-    ASSERT_EQ(deserializeJson(payload, paired.noise.message_1_payload), DeserializationError::Ok);
-    EXPECT_EQ(payload["psk_category"], "pr");
-    EXPECT_EQ(payload["psk_id"], sendspin::server::psk_id_for(pairing));
-    ASSERT_EQ(deserializeJson(payload, other.noise.message_1_payload), DeserializationError::Ok);
-    EXPECT_EQ(payload["psk_category"], "sn");
-}
-
-// The same with sendspin-cpp, which keeps its pairing PSK among its candidates at all times
-// (pairing.md "Pairing PSK Flow"): matched, the session plays as an approved unpaired one. A
-// client holding another pairing PSK answers under the Sentinel, and that session is held with no
-// roles (a wrong pairing token).
-TEST(ServerCoreTrust, KeysASendspinCppSessionWithItsPairingPsk) {
-    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
-    struct Row {
-        const char* name;
-        Psk client_psk;
-        bool roles;
-    };
-    const Psk pairing = psk_of(0x90);
-    const Row rows[] = {
-        {"Control: the client holds the pairing PSK", pairing, true},
-        {"the client holds another", psk_of(0x91), false},
-    };
-    for (const Row& row : rows) {
-        SCOPED_TRACE(row.name);
-        Core core;
-        ClientStore store;
-        Peer peer(store, {true, row.client_psk});
-        const std::string id = peer.client().client_id();
-        core.on_core([&] {
-            core.core->pairing_psks_.emplace(id, HandshakePsk{PskCategory::PAIRING, pairing});
-        });
-        core.dial(peer.url());
-        // A client held with no roles is connected before its activation is written
-        peer.run_until([&] {
-            return core.recorder.contains("connected " + id) &&
-                   core.recorder.contains("out server/activate");
-        });
-        const std::vector<std::string> activations = core.capture.activations();
-        ASSERT_FALSE(activations.empty());
-        EXPECT_EQ(activations.front().find("player@v1") != std::string::npos, row.roles)
-            << activations.front();
-        EXPECT_EQ(peer.trust().trust, sendspin::ConnectionTrust::NONE);
-    }
-}
-
-/// A provider whose first saves succeed or fail as scripted; every later save succeeds
-class ScriptedProvider : public MemoryProvider {
-public:
-    explicit ScriptedProvider(std::vector<bool> accepted = {}) : accepted_(std::move(accepted)) {}
-
-    bool save_blob(const std::string& key, const uint8_t* data, size_t len) override {
-        const auto index = static_cast<size_t>(this->saves);
-        if (index < this->accepted_.size() && !this->accepted_[index]) {
-            ++this->saves;
-            return false;
-        }
-        return MemoryProvider::save_blob(key, data, len);
-    }
-
-private:
-    std::vector<bool> accepted_;
-};
-
-/// A provider whose saves wait for release(), then succeed or fail as scripted, and fail when told
-/// to
-class HeldProvider : public ScriptedProvider {
-public:
-    using ScriptedProvider::ScriptedProvider;
-
-    bool save_blob(const std::string& key, const uint8_t* data, size_t len) override {
-        std::unique_lock<std::mutex> lock(this->mutex_);
-        this->changed_.wait(lock, [this] { return this->released_ > 0; });
-        --this->released_;
-        lock.unlock();
-        return ScriptedProvider::save_blob(key, data, len);
-    }
-
-    /// Lets count saves through
-    void release(int count) {
-        {
-            const std::lock_guard<std::mutex> lock(this->mutex_);
-            this->released_ += count;
-        }
-        this->changed_.notify_all();
-    }
-
-private:
-    std::mutex mutex_;
-    std::condition_variable changed_;
-    int released_{0};
-};
-
-// pairing.md "server/pair-finalize": a long-term PSK is used only once its record is durable.
-// While the save is in flight handshakes reference the record as it was; a durable save makes the
-// new PSK the one referenced and discards the approval (pairing.md "Unpaired Access"); a failed
-// save or commit puts the record back, saves it again and reports the failure.
-TEST(ServerCoreTrust, UsesALongTermPskOnlyOnceItIsDurable) {
-    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
-    struct Row {
-        const char* name;
-        bool refuse_save;
-        bool refuse_commit;
-        bool durable;
-    };
-    const Row rows[] = {
-        {"Control: saved and committed", false, false, true},
-        {"the save refused", true, false, false},
-        {"the commit refused", false, true, false},
-    };
-    for (const Row& row : rows) {
-        SCOPED_TRACE(row.name);
-        const std::string id = Identity::generate()->peer_id();
-        sendspin::server::ClientRecords records;
-        records.add_loaded(0, ClientRecord{id, sendspin::server::ApprovalScope::PLAYBACK});
-        HeldProvider provider;
-        provider.refuse_save = row.refuse_save;
-        provider.refuse_commit = row.refuse_commit;
-        Core core(std::move(records), &provider);
-        const Psk long_term = psk_of(0xA0);
-        std::promise<bool> done;
-        const PskCategory in_flight = core.on_core([&] {
-            core.core->store_long_term_psk(
-                id, long_term, [&](bool saved, const auto& /*unsaved*/) { done.set_value(saved); });
-            return core.core->handshake_psk(id).category;
-        });
-        EXPECT_EQ(in_flight, PskCategory::SENTINEL);
-        // The pairing's save, and for a failure the save that puts the record back and its retry
-        // at shutdown
-        provider.release(row.durable ? 2 : 3);
-        EXPECT_EQ(done.get_future().get(), row.durable);
-        const HandshakePsk referenced = core.on_core([&] { return core.core->handshake_psk(id); });
-        const ClientRecord record = core.on_core([&] { return *core.core->records_.find(id); });
-        if (row.durable) {
-            EXPECT_EQ(referenced.category, PskCategory::LONG_TERM);
-            EXPECT_EQ(referenced.psk, long_term);
-            EXPECT_EQ(record.long_term_psk, long_term);
-            EXPECT_FALSE(record.approval);
-            const std::optional<ClientRecord> stored = stored_record(provider, 0);
-            ASSERT_TRUE(stored);
-            EXPECT_EQ(stored->long_term_psk, long_term);
-            EXPECT_FALSE(stored->approval);
-        } else {
-            EXPECT_EQ(referenced.category, PskCategory::SENTINEL);
-            EXPECT_FALSE(record.long_term_psk);
-            EXPECT_EQ(record.approval, sendspin::server::ApprovalScope::PLAYBACK);
-            // Both saves fail, each reported
-            core.recorder.wait_for_count("error " +
-                                             std::to_string(static_cast<int>(
-                                                 sendspin::server::ErrorKind::PERSISTENCE_FAILED)) +
-                                             " ",
-                                         2);
-            EXPECT_EQ(provider.saves, 2);
-        }
-    }
-}
-
-// One long-term PSK change per client is in flight: a second store meanwhile is refused at once
-// and never applies. A failed save puts back only what the change set, so a name a connection
-// refreshed and an approval the operator set meanwhile stay (pairing.md "server/pair-finalize").
-// Control: a durable save keeps the first PSK with those changes.
-TEST(ServerCoreTrust, HoldsOneLongTermPskChangePerClient) {
-    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
-    struct Row {
-        const char* name;
-        bool refuse_save;
-    };
-    const Row rows[] = {
-        {"Control: saved", false},
-        {"the save refused", true},
-    };
-    const Psk first = psk_of(0xA0);
-    for (const Row& row : rows) {
-        SCOPED_TRACE(row.name);
-        RawClient client;
-        const std::string id = client.noise.identity().peer_id();
-        sendspin::server::ClientRecords records;
-        ClientRecord loaded{id, std::nullopt};
-        loaded.name = "Old";
-        records.add_loaded(0, loaded);
-        HeldProvider provider;
-        provider.refuse_save = row.refuse_save;
-        Core core(std::move(records), &provider);
-        std::promise<bool> done;
-        std::optional<bool> second;
-        core.on_core([&] {
-            core.core->store_long_term_psk(
-                id, first, [&](bool saved, const auto& /*unsaved*/) { done.set_value(saved); });
-            core.core->store_long_term_psk(
-                id, psk_of(0xB0), [&](bool saved, const auto& /*unsaved*/) { second = saved; });
-        });
-        EXPECT_EQ(second, std::optional(false));
-        // Meanwhile the client connects under a new name and the operator approves it
-        core.dial(client.url());
-        ASSERT_NO_FATAL_FAILURE(client.activate(player_hello("New")));
-        core.on_core(
-            [&] { core.core->set_approval(id, sendspin::server::ApprovalScope::PLAYBACK); });
-        // The pairing's, the name's, the approval's, then the pairing's again for a durable save,
-        // or the restoring save and its retry at shutdown for a failure
-        provider.release(row.refuse_save ? 5 : 4);
-        EXPECT_EQ(done.get_future().get(), !row.refuse_save);
-        const ClientRecord record = core.on_core([&] { return *core.core->records_.find(id); });
-        if (row.refuse_save) {
-            EXPECT_FALSE(record.long_term_psk);
-        } else {
-            EXPECT_EQ(record.long_term_psk, first);
-        }
-        EXPECT_EQ(record.name, "New");
-        EXPECT_EQ(record.approval, sendspin::server::ApprovalScope::PLAYBACK);
-    }
-}
 
 // A save that finishes after the core thread destroyed the core reaches only the loop, whose
 // handler never runs: done is dropped and nothing touches the core (ASan reports a use after free
@@ -1180,230 +649,6 @@ TEST(ServerCoreTrust, HoldsTheUnpairedSessionOfAClientOncePaired) {
     EXPECT_EQ(stored, std::optional(true));
     EXPECT_EQ(client.receive_until("server/activate"),
               R"({"type":"server/activate","payload":{"activities":[],"active_roles":[]}})");
-}
-
-// connection.md "Sentinel Fallback": a client that fell back from its long-term PSK reports the
-// mismatch until a re-handshake completes, not once it is queued
-TEST(ServerCoreTrust, ClearsTheMismatchOnceARekeyCompletes) {
-    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
-    RawClient client;
-    const std::string id = client.noise.identity().peer_id();
-    sendspin::server::ClientRecords records;
-    ClientRecord record{id, std::nullopt};
-    record.long_term_psk = psk_of(0xF0);
-    records.add_loaded(0, record);
-    Core core(std::move(records));
-    core.dial(client.url());
-    ASSERT_NO_FATAL_FAILURE(client.activate(player_hello("Lost")));
-    const auto mismatch = [&] {
-        for (const ClientInfo& info : core.snapshot.read()) {
-            if (info.client_id == id) {
-                return info.credential_mismatch;
-            }
-        }
-        return false;
-    };
-    ASSERT_TRUE(core.on_core(mismatch));
-    EXPECT_TRUE(core.on_core([&] {
-        core.core->rekey(id, HandshakePsk{});
-        return mismatch();
-    }));
-    const std::string message_1 = client.receive_until("noise/handshake");
-    ASSERT_TRUE(client.noise.read_rekey_message_1(message_1));
-    client.send_binary(client.noise.rekey_message_2());
-    EXPECT_FALSE(client.receive_until("server/activate").empty());
-    EXPECT_FALSE(core.on_core(mismatch));
-}
-
-// connection.md "Re-handshake", end to end during playback: the raw client reads message 1 between
-// chunks, sends a time request under the old keys before message 2, and gets the frozen
-// server/activate first under the new keys (no active_roles, which persist), then the time reply,
-// then chunks that continue the timeline where they left off, with no stream message in between
-TEST(ServerCoreTrust, RekeysDuringPlaybackAndPlaysOn) {
-    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
-    Core core;
-    RawClient client;
-    const std::string id = client.noise.identity().peer_id();
-    core.dial(client.url());
-    ASSERT_NO_FATAL_FAILURE(client.activate(player_hello("Player")));
-    client.send_json(sendspin::server::test::client_state_json(
-        true, sendspin::server::test::player_state_json(150, 300, 0)));
-    const Feeder feeder(core.open_input(RATE));
-    ASSERT_FALSE(client.receive_until("stream/start").empty());
-    int64_t next_ts = 0;
-    for (int chunks = 0; chunks < 3;) {
-        const Reading reading = read_one(client);
-        ASSERT_TRUE(reading.ts || !reading.json.empty());
-        if (reading.ts) {
-            EXPECT_TRUE(chunks == 0 || *reading.ts == next_ts) << *reading.ts << " " << next_ts;
-            next_ts = *reading.ts + reading.duration_us;
-            ++chunks;
-        }
-    }
-
-    core.on_core([&] { core.core->rekey(id, HandshakePsk{}); });
-    std::string message_1;
-    while (message_1.empty()) {
-        const Reading reading = read_one(client);
-        ASSERT_TRUE(reading.ts || !reading.json.empty());
-        if (reading.ts) {
-            EXPECT_EQ(*reading.ts, next_ts);
-            next_ts = *reading.ts + reading.duration_us;
-        } else if (is_type(reading.json, "noise/handshake")) {
-            message_1 = reading.json;
-        } else {
-            EXPECT_FALSE(is_type(reading.json, "stream/end")) << reading.json;
-        }
-    }
-    ASSERT_TRUE(client.noise.read_rekey_message_1(message_1));
-    client.send_json(sendspin::server::test::client_time_json(77));
-    client.send_binary(client.noise.rekey_message_2());
-
-    EXPECT_EQ(client.receive_json(),
-              R"({"type":"server/activate","payload":{"activities":["playback"]}})");
-    JsonDocument time;
-    ASSERT_EQ(deserializeJson(time, client.receive_json()), DeserializationError::Ok);
-    EXPECT_EQ(time["type"], "server/time");
-    EXPECT_EQ(time["payload"]["client_transmitted"], 77);
-    EXPECT_LE(time["payload"]["server_received"].as<int64_t>(),
-              time["payload"]["server_transmitted"].as<int64_t>());
-    for (int chunks = 0; chunks < 3;) {
-        const Reading reading = read_one(client);
-        ASSERT_TRUE(reading.ts || !reading.json.empty());
-        if (reading.ts) {
-            EXPECT_EQ(*reading.ts, next_ts);
-            next_ts = *reading.ts + reading.duration_us;
-            ++chunks;
-        } else {
-            EXPECT_FALSE(is_type(reading.json, "stream/start") ||
-                         is_type(reading.json, "stream/clear") ||
-                         is_type(reading.json, "stream/end"))
-                << reading.json;
-        }
-    }
-    JsonDocument payload;
-    ASSERT_EQ(deserializeJson(payload, client.noise.message_1_payload), DeserializationError::Ok);
-    EXPECT_EQ(payload["psk_category"], "sn");
-}
-
-// messaging.md "server/activate": when the activation after a re-handshake removes a stream role,
-// its stream/end goes before message 1. Here a paired client playing under its long-term PSK is
-// re-handshaken to the Sentinel, as before a code pairing: the session becomes unpaired while the
-// record exists, so the frozen activation removes every role and 'playback' (connection.md
-// "Sentinel Fallback", "Re-handshake": the activation rules apply under the newly matched PSK), and
-// the client is moved alone into a stopped group.
-TEST(ServerCoreTrust, EndsTheStreamsARekeyRemovesBeforeMessage1) {
-    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
-    const Psk long_term = psk_of(0xC0);
-    RawClient client;
-    const std::string id = client.noise.identity().peer_id();
-    sendspin::server::ClientRecords records;
-    ClientRecord record{id, std::nullopt};
-    record.long_term_psk = long_term;
-    records.add_loaded(0, record);
-    Core core(std::move(records));
-    core.dial(client.url());
-    client.noise.psk = long_term;
-    ASSERT_NO_FATAL_FAILURE(client.activate(player_hello("Paired")));
-    JsonDocument payload;
-    ASSERT_EQ(deserializeJson(payload, client.noise.message_1_payload), DeserializationError::Ok);
-    EXPECT_EQ(payload["psk_category"], "lt");
-    client.send_json(sendspin::server::test::client_state_json(
-        true, sendspin::server::test::player_state_json(150, 300, 0)));
-    const Feeder feeder(core.open_input(RATE));
-    ASSERT_FALSE(client.receive_until("stream/start").empty());
-
-    core.on_core([&] { core.core->rekey(id, HandshakePsk{}); });
-    bool ended = false;
-    std::string message_1;
-    while (message_1.empty()) {
-        const Reading reading = read_one(client);
-        ASSERT_TRUE(reading.ts || !reading.json.empty());
-        if (reading.ts) {
-            EXPECT_FALSE(ended) << "a chunk after stream/end";
-        } else if (is_type(reading.json, "stream/end")) {
-            ended = true;
-        } else if (is_type(reading.json, "noise/handshake")) {
-            message_1 = reading.json;
-        }
-    }
-    EXPECT_TRUE(ended);
-    client.noise.psk = sendspin::server::SENTINEL_PSK;
-    ASSERT_TRUE(client.noise.read_rekey_message_1(message_1));
-    ASSERT_EQ(deserializeJson(payload, client.noise.message_1_payload), DeserializationError::Ok);
-    EXPECT_EQ(payload["psk_category"], "sn");
-    client.send_binary(client.noise.rekey_message_2());
-    EXPECT_EQ(client.receive_json(),
-              R"({"type":"server/activate","payload":{"activities":[],"active_roles":[]}})");
-    const std::string update = client.receive_until("group/update");
-    EXPECT_NE(update.find(R"("playback_state":"stopped")"), std::string::npos) << update;
-}
-
-// The step after a pairing (pairing.md "Pairing"), with sendspin-cpp: an approved player streaming
-// under the Sentinel gets a long-term PSK it already holds, the record is saved, and the server
-// re-handshakes to it. The player keeps playing the signal in order and stays time-synced, and its
-// record, saved, holds the PSK and no approval. The player plays in real time, so the test takes
-// the 400 ms of audio it waits for on either side of the switch, and more.
-TEST(ServerCoreTrust, PromotesAPlayingSendspinCppClientToItsLongTermPsk) {
-    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
-    MemoryProvider provider;
-    Core core({}, &provider);
-    const Psk long_term = psk_of(0xE0);
-    ClientStore store;
-    store.hold_record(core.identity.peer_id(), long_term);
-    Peer peer(store, {true, std::nullopt});
-    const std::string id = peer.client().client_id();
-    core.dial(peer.url());
-    peer.run_until([&] { return core.recorder.contains("connected " + id); });
-    EXPECT_EQ(peer.trust().trust, sendspin::ConnectionTrust::NONE);
-    const Feeder feeder(core.open_input(RATE));
-    peer.run_until([&] { return peer.sink().audible() >= RATE / 5; });
-
-    const size_t replies = core.recorder.count("out server/time");
-    std::atomic<bool> stored{false};
-    core.on_core([&] {
-        core.core->store_long_term_psk(id, long_term, [&](bool saved, const auto& /*unsaved*/) {
-            EXPECT_TRUE(saved);
-            stored = true;
-            core.core->rekey(id, HandshakePsk{PskCategory::LONG_TERM, long_term});
-        });
-    });
-    peer.run_until([&] { return core.recorder.count("out server/activate") >= 2; });
-    const size_t audible = peer.sink().audible();
-    peer.run_until([&] {
-        return peer.sink().audible() >= audible + RATE / 5 &&
-               core.recorder.count("out server/time") >= replies + 2;
-    });
-    EXPECT_TRUE(stored);
-    EXPECT_TRUE(peer.client().is_connected());
-    EXPECT_TRUE(peer.client().is_time_synced());
-    EXPECT_EQ(peer.trust().trust, sendspin::ConnectionTrust::USER);
-    EXPECT_EQ(core.recorder.count("out stream/start"), 1U);
-    EXPECT_EQ(core.recorder.count("out stream/end"), 0U);
-
-    // The signal plays in order across the switch: no frame repeated or out of order
-    const sendspin::server::test::Signal signal(16);
-    const Bytes played = peer.sink().played();
-    std::optional<uint32_t> previous;
-    size_t positions = 0;
-    for (size_t offset = 0; offset + 4 <= played.size(); offset += 4) {
-        const std::optional<uint32_t> position = signal.get(&played[offset]);
-        if (!position) {
-            continue;
-        }
-        if (previous) {
-            EXPECT_GT(*position, *previous);
-        }
-        previous = position;
-        ++positions;
-    }
-    EXPECT_GE(positions, size_t{RATE} / 5);
-
-    // Saved on the dispatch thread before the activation it led to was traced there
-    const std::optional<ClientRecord> saved = stored_record(provider, 0);
-    ASSERT_TRUE(saved);
-    EXPECT_EQ(saved->long_term_psk, long_term);
-    EXPECT_FALSE(saved->approval);
 }
 
 }  // namespace

@@ -13,12 +13,10 @@
 // limitations under the License.
 
 /// @file test_dispatcher.cpp
-/// @brief Dispatcher::on_thread(): true on the dispatch thread alone, and on no thread once it
-/// ended; a task a task posts runs behind those queued before it, and one posted after finish()
-/// is dropped. Compiled with -fno-access-control (tests/CMakeLists.txt).
+/// @brief Dispatcher's queue: a task a task posts runs behind those queued before it, and one
+/// posted after finish() is dropped.
 
 #include "dispatcher.h"
-#include "thread_setup.h"
 #include <gtest/gtest.h>
 
 #include <future>
@@ -28,33 +26,6 @@
 namespace {
 
 using sendspin::server::Dispatcher;
-
-/// Whether watched's on_thread() is true on the thread running dispatcher's tasks
-bool on_thread_of(Dispatcher& dispatcher, const Dispatcher& watched) {
-    std::promise<bool> seen;
-    dispatcher.post([&seen, &watched] { seen.set_value(watched.on_thread()); });
-    return seen.get_future().get();
-}
-
-// The dispatch thread alone is on its thread, and no thread is once it ended. A later thread given
-// the ended thread's token would show a token left set, but a host need not hand one out again, so
-// the test reads the token.
-TEST(Dispatcher, KnowsItsThreadWhileItRunsAndNoneOnceItEnded) {
-    Dispatcher first;
-    EXPECT_TRUE(on_thread_of(first, first));
-    EXPECT_FALSE(first.on_thread());
-    {
-        Dispatcher second;
-        EXPECT_FALSE(on_thread_of(second, first));
-        EXPECT_FALSE(on_thread_of(first, second));
-    }
-    first.finish();
-    first.join();
-    EXPECT_FALSE(first.on_thread());
-    Dispatcher later;
-    EXPECT_FALSE(on_thread_of(later, first));
-    EXPECT_EQ(first.token_.load(), nullptr);
-}
 
 // A task posted from a task goes behind the tasks already queued
 TEST(Dispatcher, RunsATasksPostBehindTheQueue) {

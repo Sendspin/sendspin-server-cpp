@@ -32,7 +32,7 @@ Back every claim with a command: a "checked and clean" statement, a mutation res
 ## No test seams in production
 
 - `src/` and `include/` acquire no friends, test-only hooks, widened visibility, extra template parameters, injectable clocks or transports, or fixture-aware naming for a test. The fix is extraction, a test-side technique, or a named gap.
-- Allowed test-side techniques: tests include private headers from `src/` and construct internal classes directly (`HostView`, `GroupAudio`, `Session`); a test file that reaches private members compiles with `-fno-access-control`, set on that file in `tests/CMakeLists.txt` beside a comment naming each member it reaches and why. A test that reaches a private member the comment does not name is a finding.
+- Allowed test-side techniques: tests include private headers from `src/` and construct internal classes directly (`HostView`, `GroupAudio`, `Session`); a test file that reaches private members compiles with `-fno-access-control`, set on that file in `tests/CMakeLists.txt` beside a comment naming each member it reaches and why. A test that reaches a private member the comment does not name is a finding, and so is a test that needs no private member in a file compiled with the flag when the class has a file without it.
 
 ## Mutation survival
 

@@ -20,9 +20,9 @@
 #include "crypto/crypto.h"
 #include "crypto/keys.h"
 #include "freed_blocks.h"
+#include "hex.h"
 #include <gtest/gtest.h>
 
-#include <cstdio>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -38,16 +38,7 @@ using sendspin::server::PEER_ID_SIZE;
 using sendspin::server::public_key_from_peer_id;
 using sendspin::server::PublicKey;
 using sendspin::server::secure_reserve;
-
-std::string hex(const uint8_t* data, size_t size) {
-    std::string out;
-    for (size_t i = 0; i < size; ++i) {
-        char byte[3];
-        std::snprintf(byte, sizeof(byte), "%02x", data[i]);
-        out += byte;
-    }
-    return out;
-}
+using sendspin::server::test::hex;
 
 constexpr std::string_view SECRET = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
 

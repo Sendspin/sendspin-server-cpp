@@ -14,6 +14,7 @@ add_executable(sendspin_server_cpp_tests
     test_artwork.cpp
     test_audio_source.cpp
     test_audio_workers.cpp
+    test_audio_workers_internals.cpp
     test_backoff.cpp
     test_beast.cpp
     test_byte_ring.cpp
@@ -23,16 +24,20 @@ add_executable(sendspin_server_cpp_tests
     test_controller.cpp
     test_crypto.cpp
     test_dispatcher.cpp
+    test_dispatcher_internals.cpp
     test_discovery_policy.cpp
     test_feeder.cpp
     test_fragmentation.cpp
     test_frame_encoder.cpp
     test_group_audio.cpp
+    test_group_audio_internals.cpp
     test_host_view.cpp
+    test_host_view_internals.cpp
     test_inbound_hold.cpp
     test_inbound_ring.cpp
     test_live_feeder.cpp
     test_live_slew.cpp
+    test_live_slew_internals.cpp
     test_messages.cpp
     test_memory.cpp
     test_metadata.cpp
@@ -40,9 +45,11 @@ add_executable(sendspin_server_cpp_tests
     test_micro_resampler.cpp
     test_noise.cpp
     test_noise_initiator.cpp
+    test_noise_initiator_internals.cpp
     test_one_group.cpp
     test_pairing.cpp
     test_pairing_crypto.cpp
+    test_pairing_crypto_internals.cpp
     test_pcm_convert.cpp
     test_peer.cpp
     test_pipeline_stages.cpp
@@ -65,6 +72,7 @@ add_executable(sendspin_server_cpp_tests
     test_server_accept.cpp
     test_server_artwork.cpp
     test_server_core.cpp
+    test_server_core_internals.cpp
     test_server_discovery.cpp
     test_server_limits.cpp
     test_server_log.cpp
@@ -76,9 +84,12 @@ add_executable(sendspin_server_cpp_tests
     test_server_roles.cpp
     test_server_source.cpp
     test_server_trust.cpp
+    test_server_trust_internals.cpp
     test_server_visualizer.cpp
     test_session.cpp
     test_session_driver.cpp
+    test_session_driver_internals.cpp
+    test_session_internals.cpp
     test_source_clock.cpp
     test_source_decoder.cpp
     test_source_sink.cpp
@@ -129,75 +140,94 @@ target_include_directories(sendspin_server_cpp_tests PRIVATE ${PROJECT_SOURCE_DI
 target_compile_definitions(sendspin_server_cpp_tests PRIVATE
                            ${_sendspin_server_profile_definitions})
 
-# White-box: test_dispatcher.cpp reads Dispatcher::token_ once the thread has ended: a later
-# thread given the ended thread's token would show it, but a host need not hand a token out again.
-set_source_files_properties(test_dispatcher.cpp PROPERTIES COMPILE_OPTIONS -fno-access-control)
-# White-box: test_noise_initiator.cpp fixes the initiator's ephemeral key for the cacophony
-# vectors through NoiseInitiator::state_, the only holder of the handshake state, and flips a byte
-# of NoiseInitiator::payload_1_ or message_1_ to show the replay refusing a changed message 1.
-set_source_files_properties(test_noise_initiator.cpp PROPERTIES COMPILE_OPTIONS -fno-access-control)
-# White-box: test_pairing_crypto.cpp fixes a CPace run's scalar through CPace::scalar_ and
-# public_share_ to reach the known answers, since start() samples the scalar from the CSPRNG.
-set_source_files_properties(test_pairing_crypto.cpp PROPERTIES COMPILE_OPTIONS -fno-access-control)
-# White-box: test_host_view.cpp leaves the outbox as a host call does between deciding a callback and posting
-# it, so that close() racing that host call can be checked without a race. It sets
-# HostView::lowering_ to a window of live writes already behind the input, so a latency slew is
-# checked without waiting out the window in real time (under HostView::mutex_ where a writer
-# thread runs), and runs a slewed write's steps (HostView::begin_slewed(), write_slewed()) apart,
-# so a call between them is checked without a race. It reads HostView::slew_ and next_slew_, as
-# only their storage shows which slew a write left for core to free. It calls
-# HostView::deliver_outbox() and reads the outbox's capacity, as only its storage shows that a
-# delivery left it reusable.
-set_source_files_properties(test_host_view.cpp PROPERTIES COMPILE_OPTIONS -fno-access-control)
-# White-box: test_live_slew.cpp reads LiveSlew::asrc_ to show an ASRC that refused is kept, not
-# freed in the write it refused in; the slew no longer runs it, so nothing else shows it.
-set_source_files_properties(test_live_slew.cpp PROPERTIES COMPILE_OPTIONS -fno-access-control)
-# White-box: test_group_audio.cpp swaps an instance's encoder (GroupAudio::instances_) for one that
+# White-box: each file below compiles with -fno-access-control, beside the private members it
+# reaches and why; a class's other tests are in a file that compiles without it.
+# test_audio_workers_internals.cpp reads AudioWorkers::pool_ (Pool::mutex and stopping) to let a
+# job finish only once a stop has begun, which no observable state shows. It wraps a group's
+# pipeline job (Group::audio_) with group_job.h, to hold it running while core erases the group or
+# to learn when its next run is over, and reads Group::playing_ and input_ on core to show a
+# release ended the run and detached the input. Its stall tests set the state an epoch's start
+# sets on a Group with no input (playing_, epoch_, anchor_, rings_, pipelines_.analyses), call its
+# on_frame(), on_anchor_shift() and report_stalls() as the group-to-core FIFO and its timer do,
+# and replace Group::stalls_ with a count whose last report was made at a chosen time, so a
+# held-back report is due within the test rather than after 10 s, and take from it to read the
+# counts, which only the log line shows otherwise. It calls Group::on_wake() as the group's wakeup
+# does, since a write's signal can fold into a pipeline job's that is not posted yet, and reads
+# HostView::slew_ and next_slew_ under HostView::mutex_, as only their storage shows that core
+# freed the slew a write left it.
+# group_job.h, which only the files given the flag include, waits for a task between runs under
+# its pool's mutex (AudioWorkers::Task::pool_, running_ and queued_) to replace its job
+# (Task::job_), and reads a group's pipelines from the job (Group::PipelineJob::audio).
+set_source_files_properties(test_audio_workers_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
+# test_dispatcher_internals.cpp reads Dispatcher::token_ once the thread has ended: a later thread
+# given the ended thread's token would show it, but a host need not hand a token out again.
+set_source_files_properties(test_dispatcher_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
+# test_group_audio_internals.cpp swaps an instance's encoder (GroupAudio::instances_) for one that
 # refuses, the only way to show a pipeline failure: no format the server selects makes an encoder
-# or the resampler refuse. It calls GroupAudio::cut_to() on its own to extend a short stretch,
-# which the stages never give, and sets HostView::p_pause_ to resume from a chosen position, which
-# pause() takes from the time. It reads HostView::rebase_latency_us_, the `L_p` the pipelines
-# publish for admission, which only shows in admission's bounds.
-set_source_files_properties(test_group_audio.cpp PROPERTIES COMPILE_OPTIONS -fno-access-control)
-# White-box: test_session.cpp queues a control message behind the initial server/activate through
-# Session::queue_json(), since the server queues no other control message there. It reads
-# Session::scratch_, the buffer_ of Session::reassembler_ and of a Reassembler of its own to their
-# capacity to show a pairing message's PSK, or a longer message's bytes, wiped from them, and
-# reads the capacity of the first two to show a longer message grew them, which nothing the session
-# sends or reports shows.
-# test_server_core.cpp reads ServerCore::targets_ (a target's phase: ServerCore::RetryArmed, a
-# PendingDial) to show a dial waiting out its backoff, and a lost instance's target gone with its
-# wait, and a dial that waited not started once no longer due,
-# which only the absence of a dial would otherwise show, calls ServerCore::prune_targets() with a chosen
-# time, and shortens HandshakeBackoff::next_dial_us_ so the deferred dial needs no full wait; it
-# also wraps a group's pipeline job (Group::audio_, AudioWorkers::Task::job_, replaced under the
-# pool's mutex between two jobs) with a step that swaps its encoder (GroupAudio::instances_) for
-# one that refuses on the group audio thread, to show core's handling of a pipeline failure. It
-# finds a connection in ServerCore::clients_ and, once its SessionDriver::writing_ and waiting_
+# or the resampler refuse, and counts the instances configured there to show a job builds one
+# resampler. It calls GroupAudio::cut_to() on a GroupAudio::Instance of its own to extend a short
+# stretch, which the stages never give, and sets HostView::p_pause_ to resume from a chosen
+# position, which pause() takes from the time. It reads HostView::rebase_latency_us_, the `L_p`
+# the pipelines publish for admission, which only shows in admission's bounds.
+set_source_files_properties(test_group_audio_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
+# test_host_view_internals.cpp leaves the outbox (HostView::outbox_, outbox_posted_) as a host call
+# does between deciding a callback and posting it, so that close() racing that host call can be
+# checked without a race. It sets HostView::lowering_ to a window of live writes already behind
+# the input, so a latency slew is checked without waiting out the window in real time (under
+# HostView::mutex_ where a writer thread runs), and runs a slewed write's steps
+# (HostView::begin_slewed(), its HostView::SlewedWrite, write_slewed()) apart, so a call between
+# them is checked without a race. It reads HostView::slew_ and next_slew_, as only their storage
+# shows which slew a write left for core to free. It calls HostView::deliver_outbox() and reads
+# the outbox's capacity, as only its storage shows that a delivery left it reusable.
+set_source_files_properties(test_host_view_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
+# test_live_slew_internals.cpp reads LiveSlew::asrc_ to show an ASRC that refused is kept, not
+# freed in the write it refused in; the slew no longer runs it, so nothing else shows it.
+set_source_files_properties(test_live_slew_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
+# test_noise_initiator_internals.cpp fixes the initiator's ephemeral key for the cacophony vectors
+# through NoiseInitiator::state_, the only holder of the handshake state, and flips a byte of
+# NoiseInitiator::payload_1_ or message_1_ to show the replay refusing a changed message 1.
+set_source_files_properties(test_noise_initiator_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
+# test_pairing_crypto_internals.cpp fixes a CPace run's scalar through CPace::scalar_ and
+# public_share_ to reach the known answers, since start() samples the scalar from the CSPRNG.
+set_source_files_properties(test_pairing_crypto_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
+# test_server_core_internals.cpp reads ServerCore::targets_ (a ServerCore::Target's phase:
+# ServerCore::RetryArmed, a PendingDial) to show a dial waiting out its backoff, and a lost
+# instance's target gone with its wait, and a dial that waited not started once no longer due,
+# which only the absence of a dial would otherwise show; it calls ServerCore::prune_targets() with
+# a chosen time and ServerCore::dial_if_due() on a target, and shortens
+# HandshakeBackoff::next_dial_us_ so the deferred dial needs no full wait. It finds the group in
+# ServerCore::groups_ and wraps its pipeline job (Group::audio_) with group_job.h, with a step that
+# swaps the encoders of its pipelines (GroupAudio::instances_) for ones that refuse, on the group
+# audio thread, to show core's handling of a pipeline failure. It finds a connection (a
+# ServerCore::Client) in ServerCore::clients_ and, once its SessionDriver::writing_ and waiting_
 # show no write outstanding, so that its end closes it at once, caps its control FIFO at what it
 # holds (Session::queues_, SendQueues::caps_ and control_bytes_), so the next message queued,
 # inside a group's move or stop, overflows it: no client can time the FIFO's last free byte.
-# test_session_driver.cpp reads SessionDriver::writing_ and waiting_ and the session's fragment
-# progress to send a goodbye while a write is stalled, and writing_ again at the close to tell
-# which end closed, states nothing else shows; ActiveDriver::activate() reads writing_ and waiting_
-# to wait until the activation's write has completed, which the client cannot see.
-# test_server_trust.cpp sets ServerCore::pairing_psks_, the state an operator-started Pairing PSK
-# pairing sets, calls ServerCore::rekey() and handshake_psk(), which pairing drives, and reads
-# ServerCore::records_ for a record, which no listener call carries.
-# test_audio_workers.cpp wraps a group's pipeline job the same way, to hold it running while core
-# erases the group, and reads AudioWorkers::Pool::stopping to let a job finish only once a stop
-# has begun, which no observable state shows. Its stall tests set the state an epoch's start sets
-# on a Group with no input (playing_, epoch_, anchor_, rings_, pipelines_.analyses), call its
-# on_frame(), on_anchor_shift() and report_stalls() as the group-to-core FIFO and its timer do, and
-# replace Group::stalls_ with a count whose last report was made at a chosen time, so a held-back
-# report is due within the test rather than after 10 s, and take from it to read the counts, which
-# only the log line shows otherwise. It calls Group::on_wake() as the group's wakeup does, since a
-# write's signal can fold into a pipeline job's that is not posted yet, and reads HostView::slew_
-# and next_slew_ under HostView::mutex_, as only their storage shows that core freed the slew a
-# write left it.
-set_source_files_properties(test_session.cpp test_server_core.cpp test_session_driver.cpp
-                            test_server_trust.cpp test_audio_workers.cpp
-                            PROPERTIES COMPILE_OPTIONS -fno-access-control)
+set_source_files_properties(test_server_core_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
+# test_server_trust_internals.cpp sets ServerCore::pairing_psks_, the state an operator-started
+# Pairing PSK pairing sets, calls ServerCore::rekey() and handshake_psk(), which pairing drives,
+# and reads ServerCore::records_ for a record, which no listener call carries.
+set_source_files_properties(test_server_trust_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
+# test_session_driver_internals.cpp reads SessionDriver::writing_ and waiting_ and the session's
+# fragment progress (Session::queues_, SendQueues::fragmenting_) to send a goodbye while a write is
+# stalled, and writing_ again at the close to tell which end closed, states nothing else shows.
+set_source_files_properties(test_session_driver_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
+# test_session_internals.cpp reads Session::scratch_, the buffer_ of Session::reassembler_ and of a
+# Reassembler of its own to their capacity to show a pairing message's PSK, or a longer message's
+# bytes, wiped from them, and reads the capacity of the first two to show a longer message grew
+# them, which nothing the session sends or reports shows.
+set_source_files_properties(test_session_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
 
 # sendspin_server_cpp_beast last: a system Boost's include directory (e.g. /opt/homebrew/include) must
 # not shadow the fetched dependencies' headers.
