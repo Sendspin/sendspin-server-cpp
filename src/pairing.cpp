@@ -14,6 +14,7 @@
 
 #include "pairing.h"
 
+#include "byte_order.h"
 #include "crypto/crypto.h"
 #include "crypto/pairing_token.h"
 
@@ -31,12 +32,6 @@ constexpr std::string_view PAKE_AD_CLIENT = "client";
 
 std::vector<uint8_t> bytes_of(std::string_view text) {
     return {text.begin(), text.end()};
-}
-
-void append_be32(std::vector<uint8_t>& out, uint32_t value) {
-    for (int shift = 24; shift >= 0; shift -= 8) {
-        out.push_back(static_cast<uint8_t>((value >> shift) & 0xFF));
-    }
 }
 
 void wipe(std::vector<uint8_t>& bytes) {
@@ -259,8 +254,8 @@ PairingContext PairingAttempt::context(uint32_t written_index, bool rekeying) co
 std::vector<uint8_t> PairingAttempt::sid() const {
     std::vector<uint8_t> sid = bytes_of(PAKE_SID_LABEL);
     sid.insert(sid.end(), this->h_.begin(), this->h_.end());
-    append_be32(sid, this->index_);
-    append_be32(sid, this->round_);
+    append_be(sid, this->index_);
+    append_be(sid, this->round_);
     return sid;
 }
 

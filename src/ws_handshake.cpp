@@ -14,6 +14,7 @@
 
 #include "ws_handshake.h"
 
+#include "byte_order.h"
 #include "crypto/base64url.h"
 
 #include <algorithm>
@@ -61,15 +62,11 @@ public:
         }
         std::fill(this->block_.begin() + static_cast<std::ptrdiff_t>(this->buffered_),
                   this->block_.end() - LENGTH_BYTES, 0);
-        for (size_t i = 0; i < LENGTH_BYTES; ++i) {
-            this->block_[BLOCK - 1 - i] = static_cast<uint8_t>(bits >> (8U * i));
-        }
+        put_be(this->block_.data() + BLOCK - LENGTH_BYTES, bits);
         this->process();
         std::array<uint8_t, SHA1_DIGEST_BYTES> digest{};
         for (size_t i = 0; i < this->h_.size(); ++i) {
-            for (size_t j = 0; j < 4; ++j) {
-                digest[(i * 4) + j] = static_cast<uint8_t>(this->h_[i] >> (8U * (3 - j)));
-            }
+            put_be(digest.data() + (i * sizeof(uint32_t)), this->h_[i]);
         }
         return digest;
     }
@@ -94,9 +91,7 @@ private:
     void process() {
         std::array<uint32_t, ROUNDS> w{};
         for (size_t t = 0; t < BLOCK_WORDS; ++t) {
-            w[t] = (uint32_t{this->block_[t * 4]} << 24U) |
-                   (uint32_t{this->block_[(t * 4) + 1]} << 16U) |
-                   (uint32_t{this->block_[(t * 4) + 2]} << 8U) | this->block_[(t * 4) + 3];
+            w[t] = read_be<uint32_t>(this->block_.data() + (t * sizeof(uint32_t)));
         }
         for (size_t t = BLOCK_WORDS; t < ROUNDS; ++t) {
             w[t] = rotl(w[t - SCHEDULE_TAPS[0]] ^ w[t - SCHEDULE_TAPS[1]] ^
