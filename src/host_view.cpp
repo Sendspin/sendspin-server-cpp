@@ -873,11 +873,7 @@ void HostView::resolve_empty_drain(AfterUnlock& after) {
 
 void HostView::build_anchor(sched::Anchor& anchor, int64_t t0_us, uint64_t p0) const {
     const InputFormat& first = this->segment_at(p0).format;
-    anchor.t0_us = t0_us;
-    anchor.segments.clear();
-    anchor.segments.push_back({p0, t0_us, first.sample_rate, first.channels});
-    anchor.shift_base_us = 0;
-    anchor.shifts.clear();
+    sched::reset_anchor(anchor, t0_us, p0, first.sample_rate, first.channels);
     for (const StagedSegment& segment : this->segments_) {
         if (segment.position > p0) {
             sched::add_segment(anchor, segment.position, segment.format.sample_rate,

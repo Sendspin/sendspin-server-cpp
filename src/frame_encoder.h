@@ -84,9 +84,6 @@ public:
     /// cleared. At every epoch start.
     void reset();
 
-    /// @brief The Opus encoder's lookahead as libopus reports it; 0 for PCM and FLAC
-    uint32_t delay_samples() const;
-
     /// @brief Encodes one frame
     /// @param input whole samples in in_format at the format's channel count: one frame's, or
     /// fewer for a drained epoch's last frame, which ends a FLAC stream and which Opus pads with

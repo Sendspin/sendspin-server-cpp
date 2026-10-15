@@ -112,7 +112,6 @@ OutboundPlaintext SendQueues::take_rekey() {
     OutboundPlaintext activation = std::move(this->control_.front().message);
     this->control_.pop_front();
     this->control_bytes_ -= activation.bytes.size();
-    ++this->control_taken_;
     return activation;
 }
 
@@ -127,7 +126,6 @@ OutboundPlaintext SendQueues::take_control(size_t max_fragment_plaintext) {
                                    max_fragment_plaintext);
     }
     this->control_bytes_ -= head.bytes.size();
-    ++this->control_taken_;
     return head;
 }
 
@@ -140,7 +138,6 @@ OutboundPlaintext SendQueues::next_fragment(Fragmenting& fragmenting,
                                         max_fragment_plaintext, fragment.bytes);
     if (fragmenting.offset == payload.size()) {
         this->control_bytes_ -= bytes.size();
-        ++this->control_taken_;
         this->fragmenting_.reset();
     }
     return fragment;

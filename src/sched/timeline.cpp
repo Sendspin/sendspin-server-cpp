@@ -42,9 +42,16 @@ int64_t offset_us(const Segment& segment, uint64_t position) {
 
 Anchor make_anchor(int64_t t0_us, uint64_t p0, uint32_t rate, uint8_t channels) {
     Anchor anchor;
-    anchor.t0_us = t0_us;
-    anchor.segments.push_back({p0, t0_us, rate, channels});
+    reset_anchor(anchor, t0_us, p0, rate, channels);
     return anchor;
+}
+
+void reset_anchor(Anchor& anchor, int64_t t0_us, uint64_t p0, uint32_t rate, uint8_t channels) {
+    anchor.t0_us = t0_us;
+    anchor.segments.clear();
+    anchor.segments.push_back({p0, t0_us, rate, channels});
+    anchor.shift_base_us = 0;
+    anchor.shifts.clear();
 }
 
 void add_segment(Anchor& anchor, uint64_t position, uint32_t rate, uint8_t channels) {

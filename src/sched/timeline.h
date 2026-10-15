@@ -76,6 +76,9 @@ struct Anchor {
 /// @brief An anchor with one segment: `p0` at rate and channels, its unshifted time t0_us
 Anchor make_anchor(int64_t t0_us, uint64_t p0, uint32_t rate, uint8_t channels);
 
+/// @brief make_anchor() into anchor, reusing its storage
+void reset_anchor(Anchor& anchor, int64_t t0_us, uint64_t p0, uint32_t rate, uint8_t channels);
+
 /// @brief Starts a new segment at position (at or after the last segment's start)
 void add_segment(Anchor& anchor, uint64_t position, uint32_t rate, uint8_t channels);
 
