@@ -13,4 +13,4 @@ Sources copied or adapted from [sendspin-cpp](https://github.com/Sendspin/sendsp
 | `crypto/psk_wrap.h`, `crypto/psk_wrap.cpp` | `src/crypto/psk_wrap.h`, `src/crypto/psk_wrap.cpp` |
 | `fragmentation.h`, `fragmentation.cpp` | The reassembly and fragmentation of `src/noise_transport.cpp` (`NoiseTransport::accept_plaintext()`, `NoiseTransport::fragment_and_send()`) |
 
-The known answers in `tests/test_pairing_crypto.cpp` come from sendspin-cpp's `tests/test_cpace.cpp`, `tests/test_pairing_code.cpp` and `tests/test_psk_wrap.cpp` at the same commit.
+The known answers in `tests/test_pairing_crypto.cpp` and `tests/test_pairing_crypto_internals.cpp` come from sendspin-cpp's `tests/test_cpace.cpp`, `tests/test_pairing_code.cpp` and `tests/test_psk_wrap.cpp` at the same commit.

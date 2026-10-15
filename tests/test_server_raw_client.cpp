@@ -496,8 +496,8 @@ TEST(ServerRawClient, ReportsAGoodbyeAtEachPhase) {
 }
 
 // messaging.md "client/goodbye": a client that closes right after its goodbye, however it closes,
-// is reported as leaving with the goodbye. test_session_driver.cpp has the goodbye arrive while a
-// write is in flight.
+// is reported as leaving with the goodbye. test_session_driver_internals.cpp has the goodbye arrive
+// while a write is in flight.
 TEST(ServerRawClient, ReportsAGoodbyeFollowedByAnImmediateClose) {
     enum class Close : uint8_t { RESET, HALF_CLOSE, CLOSE_FRAME };
     struct Row {

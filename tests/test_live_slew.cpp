@@ -185,32 +185,4 @@ TEST(LiveSlew, WritesNoMoreThanItsCapacityAndKeepsBackTheRest) {
     EXPECT_TRUE(std::equal(outputs[1].begin(), outputs[1].end(), outputs[0].begin()));
 }
 
-// An ASRC that refuses a block falls the slew back to dropped frames until it is prepared again,
-// restarted or not, and the slew keeps it, so the write it refused in frees nothing. White-box:
-// LiveSlew::asrc_.
-TEST(LiveSlew, FallsBackToDroppedFramesKeepingTheAsrc) {
-    std::vector<uint8_t> in;
-    for (size_t k = 0; k < BLOCK; ++k) {
-        const std::vector<uint8_t> bytes = tone_frame(k, SampleFormat::F32);
-        in.insert(in.end(), bytes.begin(), bytes.end());
-    }
-    LiveSlew slew;
-    slew.prepare({RATE, 1, SampleFormat::F32}, true, ResamplerQuality::MEDIUM);
-    slew.start(0);
-    ASSERT_TRUE(slew.engaged());
-    // An empty first block cannot prime it
-    EXPECT_EQ(slew.process(in.data(), 0, 300, 1000000).written, 0U);
-    EXPECT_FALSE(slew.engaged());
-    EXPECT_NE(slew.asrc_, nullptr);
-    slew.restart();
-    EXPECT_FALSE(slew.awaits_start());
-    // At no slew a block passes as it came
-    const LiveSlew::Block block = slew.process(in.data(), BLOCK, 0, 1000000);
-    ASSERT_EQ(block.written, BLOCK);
-    EXPECT_EQ(std::memcmp(slew.output(), in.data(), in.size()), 0);
-    // Control: prepared again, it waits for start()
-    slew.prepare({RATE, 1, SampleFormat::F32}, true, ResamplerQuality::MEDIUM);
-    EXPECT_TRUE(slew.awaits_start());
-}
-
 }  // namespace

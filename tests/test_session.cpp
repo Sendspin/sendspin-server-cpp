@@ -20,10 +20,10 @@
 #include "clock.h"
 #include "crypto/keys.h"
 #include "fragmentation.h"
-#include "freed_blocks.h"
 #include "messages.h"
 #include "raw_client.h"
 #include "session.h"
+#include "session_harness.h"
 #include "trust_fixtures.h"
 #include "wire_messages.h"
 #include <ArduinoJson.h>
@@ -41,7 +41,6 @@
 namespace {
 
 using sendspin::server::CipherSuite;
-using sendspin::server::Identity;
 using sendspin::server::MessageKind;
 using sendspin::server::OutboundMessage;
 using sendspin::server::Reassembler;
@@ -55,20 +54,15 @@ using sendspin::server::test::Bytes;
 using sendspin::server::test::bytes_of;
 using sendspin::server::test::client_hello_json;
 using sendspin::server::test::client_time_json;
+using sendspin::server::test::Harness;
 using sendspin::server::test::NoiseResponder;
 using sendspin::server::test::psk_of;
+using sendspin::server::test::SessionTest;
+using sendspin::server::test::START_US;
+using sendspin::server::test::test_settings;
 using sendspin::server::test::text_of;
+using sendspin::server::test::TIMEOUT_US;
 namespace wire = sendspin::server::test::wire;
-
-constexpr int64_t START_US = 1000;
-constexpr int64_t TIMEOUT_US = 5000;
-
-SessionSettings test_settings() {
-    SessionSettings settings;
-    settings.hello.name = "Test server";
-    settings.step_timeout_us = TIMEOUT_US;
-    return settings;
-}
 
 /// A CredentialSource that references one PSK
 class FixedCredentials : public sendspin::server::CredentialSource {
@@ -82,113 +76,6 @@ public:
 
 private:
     sendspin::server::HandshakePsk psk_;
-};
-
-// A session and its client. Not movable: the session refers to the identity and settings.
-class Harness {
-public:
-    explicit Harness(CipherSuite suite, SessionSettings settings = test_settings(),
-                     SessionTrace* trace = nullptr,
-                     sendspin::server::CredentialSource* credentials = nullptr)
-        : settings_(std::move(settings)),
-          session(this->identity, this->settings_, trace, credentials),
-          client(suite) {
-        this->session.start(START_US);
-    }
-
-    Harness(const Harness&) = delete;
-    Harness& operator=(const Harness&) = delete;
-
-    std::vector<OutboundMessage> take_all() {
-        std::vector<OutboundMessage> out;
-        while (std::optional<OutboundMessage> message = this->session.take_message()) {
-            out.push_back(std::move(*message));
-        }
-        return out;
-    }
-
-    // Sends client/init and has the client read Noise message 1 under the spec's prologue
-    void exchange_init(int64_t rx_us = START_US) {
-        this->client_init = this->client.client_init();
-        this->session.on_message(MessageKind::TEXT, bytes_of(this->client_init), rx_us);
-        ASSERT_EQ(this->session.phase(), SessionPhase::AWAIT_NOISE_MSG2);
-        const std::vector<OutboundMessage> sent = this->take_all();
-        ASSERT_EQ(sent.size(), 2U);
-        ASSERT_EQ(sent[0].kind, MessageKind::TEXT);
-        ASSERT_EQ(sent[1].kind, MessageKind::TEXT);
-        this->server_init = text_of(sent[0].bytes);
-        this->noise_message_1 = text_of(sent[1].bytes);
-        ASSERT_TRUE(this->client.read_message_1(bytes_of(this->client_init + this->server_init),
-                                                this->server_init, this->noise_message_1));
-    }
-
-    // Through Noise message 2 and the server/hello it releases
-    void complete_handshake(int64_t rx_us = START_US) {
-        ASSERT_NO_FATAL_FAILURE(this->exchange_init(rx_us));
-        this->session.on_message(MessageKind::TEXT, bytes_of(this->client.message_2()), rx_us);
-        ASSERT_EQ(this->session.phase(), SessionPhase::AWAIT_CLIENT_HELLO);
-        const std::vector<OutboundMessage> sent = this->take_all();
-        ASSERT_EQ(sent.size(), 1U);
-        ASSERT_EQ(sent[0].kind, MessageKind::BINARY);
-        this->server_hello = this->client.decrypt(sent[0].bytes);
-        ASSERT_TRUE(this->server_hello);
-    }
-
-    // Through client/hello and the initial server/activate, which the client decrypts
-    void activate() {
-        ASSERT_NO_FATAL_FAILURE(this->complete_handshake());
-        this->send(this->client.encrypt_json(client_hello_json()));
-        ASSERT_EQ(this->session.phase(), SessionPhase::READY_FOR_ACTIVATION);
-        this->session.activate(ServerActivate{false, std::vector<std::string>{}, std::nullopt});
-        ASSERT_EQ(this->session.phase(), SessionPhase::ACTIVATING);
-        const std::vector<OutboundMessage> sent = this->take_all();
-        ASSERT_EQ(sent.size(), 1U);
-        ASSERT_EQ(this->session.phase(), SessionPhase::ACTIVE);
-        EXPECT_EQ(this->decrypt_json(sent[0]),
-                  R"({"type":"server/activate","payload":{"activities":[],"active_roles":[]}})");
-    }
-
-    // The JSON a binary server message carries; empty when it is not one
-    std::string decrypt_json(const OutboundMessage& message) {
-        EXPECT_EQ(message.kind, MessageKind::BINARY);
-        const std::optional<Bytes> plaintext = this->client.decrypt(message.bytes);
-        if (!plaintext || plaintext->empty() || plaintext->front() != wire::JSON_ID) {
-            ADD_FAILURE() << "not an encrypted JSON message";
-            return {};
-        }
-        return {plaintext->begin() + 1, plaintext->end()};
-    }
-
-    void send(const Bytes& message, int64_t rx_us = START_US) {
-        this->session.on_message(MessageKind::BINARY, message, rx_us);
-    }
-
-    // A fragment of a message, encrypted
-    Bytes fragment(uint8_t flags, const Bytes& data) {
-        Bytes plaintext{sendspin::server::MESSAGE_ID_FRAGMENT, flags};
-        plaintext.insert(plaintext.end(), data.begin(), data.end());
-        return this->client.encrypt(plaintext);
-    }
-
-    Identity identity{*Identity::generate()};
-
-private:
-    SessionSettings settings_;
-
-public:
-    Session session;
-    NoiseResponder client;
-    std::string client_init;
-    std::string server_init;
-    std::string noise_message_1;
-    std::optional<Bytes> server_hello;
-};
-
-class SessionTest : public testing::TestWithParam<CipherSuite> {
-protected:
-    static void SetUpTestSuite() {
-        ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
-    }
 };
 
 TEST_P(SessionTest, CompletesTheHandshakeAndTheHelloExchange) {
@@ -620,7 +507,7 @@ TEST_P(SessionTest, BecomesActiveWhenTheActivationIsTaken) {
     h.send(h.client.encrypt_json(client_hello_json()));
     h.session.activate(ServerActivate{false, std::vector<std::string>{}, std::nullopt});
     const std::string follower = R"({"type":"group/update","payload":{}})";
-    ASSERT_TRUE(h.session.queue_json(follower));
+    h.session.queue_json_message(follower);
     const std::optional<OutboundMessage> activation = h.session.take_message();
     ASSERT_TRUE(activation);
     EXPECT_NE(h.decrypt_json(*activation).find("server/activate"), std::string::npos);
@@ -1142,216 +1029,6 @@ TEST_P(SessionTest, CountsPairingActivationsAndHandsOverPairingMessages) {
 
     h.send(h.client.encrypt_json(R"({"type":"client/pair-init","payload":{}})"));
     EXPECT_EQ(h.session.end(), SessionEnd::PROTOCOL_ERROR);
-}
-
-// Whether a vector's bytes, read to its capacity, hold needle. The spare capacity is outside the
-// container's annotation, so the scan is not instrumented and calls nothing that is.
-__attribute__((no_sanitize("address"))) bool holds_to_capacity(const std::vector<uint8_t>& bytes,
-                                                               std::string_view needle) {
-    const uint8_t* data = bytes.data();
-    for (size_t start = 0; start + needle.size() <= bytes.capacity(); ++start) {
-        size_t matched = 0;
-        while (matched < needle.size() &&
-               data[start + matched] == static_cast<uint8_t>(needle[matched])) {
-            ++matched;
-        }
-        if (matched == needle.size()) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// pairing.md "client/pair-finalize": a pair-finalize carrying both long_term_psk and wrapped_psk
-// fails validation, and its PSK is wiped from the decrypted message and the reassembly buffer,
-// spare capacity included, as a valid one's is (the Control), and as it is from a body whose type
-// cannot be read and from a fragment sequence that fails or outgrows the cap with the PSK buffered.
-// The first fragment's check that the scan finds the PSK is the Control of the scan.
-TEST_P(SessionTest, WipesTheSecretOfAPairingMessageWhetherOrNotItPassesValidation) {
-    using sendspin::server::FRAGMENT_FLAG_FIRST;
-    using sendspin::server::FRAGMENT_FLAG_LAST;
-    using sendspin::server::FRAGMENT_FLAGS_RESERVED;
-    const std::string psk = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
-    const std::string valid_head =
-        R"({"type":"client/pair-finalize","payload":{"long_term_psk":")" + psk;
-    const std::string valid_tail = R"("}})";
-    const std::string head = valid_head + R"(","wrapped_psk":"AAAA)";
-    const std::string tail = R"("}})";
-    struct Case {
-        const char* name;
-        std::string head;
-        std::string tail;
-        // Whether head and tail go as two fragments rather than one message
-        bool fragmented;
-        // The second fragment's flags: LAST completes the message, a reserved bit fails it
-        uint8_t second_flags;
-        std::optional<SessionEnd> end;
-        // The cap on a reassembled message: the head fits, head and tail do not
-        size_t max_reassembled_bytes{sendspin::server::DEFAULT_MAX_REASSEMBLED_BYTES};
-    };
-    const std::vector<Case> cases{
-        {"Control: a valid one in one message", valid_head, valid_tail, false, 0, std::nullopt},
-        {"Control: a valid one in two fragments", valid_head, valid_tail, true, FRAGMENT_FLAG_LAST,
-         std::nullopt},
-        {"in one message", head, tail, false, 0, SessionEnd::PROTOCOL_ERROR},
-        {"in a body that is not JSON, its type unread", head, "", false, 0,
-         SessionEnd::PROTOCOL_ERROR},
-        {"in two fragments, the PSK in the first", head, tail, true, FRAGMENT_FLAG_LAST,
-         SessionEnd::PROTOCOL_ERROR},
-        {"in a fragment sequence that fails", head, tail, true, FRAGMENT_FLAGS_RESERVED,
-         SessionEnd::MALFORMED_FRAGMENTS},
-        {"in a fragment sequence that outgrows the cap", head, tail, true, FRAGMENT_FLAG_LAST,
-         SessionEnd::MESSAGE_TOO_LARGE, head.size()},
-    };
-    for (const Case& c : cases) {
-        SCOPED_TRACE(c.name);
-        SessionSettings settings = test_settings();
-        settings.max_reassembled_bytes = c.max_reassembled_bytes;
-        Harness h(GetParam(), settings);
-        ASSERT_NO_FATAL_FAILURE(h.activate());
-        if (c.fragmented) {
-            Bytes first{sendspin::server::MESSAGE_ID_JSON};
-            const Bytes head_bytes = bytes_of(c.head);
-            first.insert(first.end(), head_bytes.begin(), head_bytes.end());
-            h.send(h.fragment(FRAGMENT_FLAG_FIRST, first));
-            EXPECT_TRUE(holds_to_capacity(h.session.scratch_, psk));
-            EXPECT_TRUE(holds_to_capacity(h.session.reassembler_.buffer_, psk));
-            h.send(h.fragment(c.second_flags, bytes_of(c.tail)));
-        } else {
-            h.send(h.client.encrypt_json(c.head + c.tail));
-        }
-        EXPECT_EQ(h.session.end(), c.end);
-        EXPECT_EQ(h.session.take_pairing_messages().size(), c.end ? 0U : 1U);
-        EXPECT_FALSE(holds_to_capacity(h.session.scratch_, psk));
-        EXPECT_FALSE(holds_to_capacity(h.session.reassembler_.buffer_, psk));
-    }
-}
-
-// A client/pair-finalize whose tag fails leaves no PSK in the decrypted message's buffer: AES-GCM
-// decrypts in place before its tag check (ChaChaPoly checks first), and the buffer is wiped
-TEST_P(SessionTest, WipesAPairingMessageWhoseTagFails) {
-    const std::string psk = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
-    Harness h(GetParam());
-    ASSERT_NO_FATAL_FAILURE(h.activate());
-    Bytes message = h.client.encrypt_json(
-        R"({"type":"client/pair-finalize","payload":{"long_term_psk":")" + psk + R"("}})");
-    message.back() ^= 0x01;
-    h.send(message);
-    EXPECT_EQ(h.session.end(), SessionEnd::DECRYPT_FAILED);
-    EXPECT_FALSE(holds_to_capacity(h.session.scratch_, psk));
-}
-
-// A session that ends while a pairing message's first fragment is pending leaves its PSK in
-// neither buffer, whether the host closes it or the next message fails to decrypt. The scan finds
-// the PSK before the end: the Control.
-TEST_P(SessionTest, WipesAPendingPairingFragmentAtTheEnd) {
-    using sendspin::server::FRAGMENT_FLAG_FIRST;
-    const std::string psk = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
-    struct Case {
-        const char* name;
-        std::function<void(Harness&)> end_session;
-        SessionEnd end;
-    };
-    const std::vector<Case> cases{
-        {"closed by the host", [](Harness& h) { h.session.close_by_host(); },
-         SessionEnd::CLOSED_BY_HOST},
-        {"a message that fails to decrypt", [](Harness& h) { h.send(Bytes(32, 0)); },
-         SessionEnd::DECRYPT_FAILED},
-    };
-    for (const Case& c : cases) {
-        SCOPED_TRACE(c.name);
-        Harness h(GetParam());
-        ASSERT_NO_FATAL_FAILURE(h.activate());
-        Bytes first{sendspin::server::MESSAGE_ID_JSON};
-        const Bytes head =
-            bytes_of(R"({"type":"client/pair-finalize","payload":{"long_term_psk":")" + psk);
-        first.insert(first.end(), head.begin(), head.end());
-        h.send(h.fragment(FRAGMENT_FLAG_FIRST, first));
-        EXPECT_TRUE(holds_to_capacity(h.session.scratch_, psk));
-        EXPECT_TRUE(holds_to_capacity(h.session.reassembler_.buffer_, psk));
-        c.end_session(h);
-        EXPECT_EQ(h.session.end(), c.end);
-        EXPECT_FALSE(holds_to_capacity(h.session.scratch_, psk));
-        EXPECT_FALSE(holds_to_capacity(h.session.reassembler_.buffer_, psk));
-    }
-}
-
-// A pairing message's first fragment, its PSK in it, followed by a longer one, grows both the
-// decrypted message's buffer and the reassembly buffer; neither frees a block holding the PSK.
-// The scan's Control is SecureReserve.WipesTheBlockItLeaves.
-TEST_P(SessionTest, GrowsItsBuffersWithoutFreeingAPairingSecret) {
-    using sendspin::server::FRAGMENT_FLAG_FIRST;
-    if (!FreedBlockScan::available()) {
-        GTEST_SKIP() << "needs the sanitizer's free hook";
-    }
-    const std::string psk = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
-    Harness h(GetParam());
-    ASSERT_NO_FATAL_FAILURE(h.activate());
-    Bytes first{sendspin::server::MESSAGE_ID_JSON};
-    const Bytes head =
-        bytes_of(R"({"type":"client/pair-finalize","payload":{"long_term_psk":")" + psk);
-    first.insert(first.end(), head.begin(), head.end());
-    h.send(h.fragment(FRAGMENT_FLAG_FIRST, first));
-    ASSERT_TRUE(holds_to_capacity(h.session.scratch_, psk));
-    ASSERT_TRUE(holds_to_capacity(h.session.reassembler_.buffer_, psk));
-    const size_t scratch_capacity = h.session.scratch_.capacity();
-    const size_t buffer_capacity = h.session.reassembler_.buffer_.capacity();
-    const Bytes longer = h.fragment(0, Bytes(4 * scratch_capacity, 'a'));
-    {
-        const FreedBlockScan scan(psk);
-        h.send(longer);
-        EXPECT_EQ(scan.holding(), 0);
-    }
-    EXPECT_FALSE(h.session.end());
-    EXPECT_GT(h.session.scratch_.capacity(), scratch_capacity);
-    EXPECT_GT(h.session.reassembler_.buffer_.capacity(), buffer_capacity);
-}
-
-// A session destroyed while a pairing message's first fragment is pending, with no end before,
-// frees neither buffer holding the PSK. The scan's Control is SecureReserve.WipesTheBlockItLeaves.
-TEST_P(SessionTest, WipesAPendingPairingFragmentWhenDestroyed) {
-    using sendspin::server::FRAGMENT_FLAG_FIRST;
-    if (!FreedBlockScan::available()) {
-        GTEST_SKIP() << "needs the sanitizer's free hook";
-    }
-    const std::string psk = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
-    std::optional<Harness> h;
-    h.emplace(GetParam());
-    ASSERT_NO_FATAL_FAILURE(h->activate());
-    Bytes first{sendspin::server::MESSAGE_ID_JSON};
-    const Bytes head =
-        bytes_of(R"({"type":"client/pair-finalize","payload":{"long_term_psk":")" + psk);
-    first.insert(first.end(), head.begin(), head.end());
-    h->send(h->fragment(FRAGMENT_FLAG_FIRST, first));
-    ASSERT_TRUE(holds_to_capacity(h->session.scratch_, psk));
-    ASSERT_TRUE(holds_to_capacity(h->session.reassembler_.buffer_, psk));
-    ASSERT_FALSE(h->session.end());
-    const FreedBlockScan scan(psk);
-    h.reset();
-    EXPECT_EQ(scan.holding(), 0);
-}
-
-// A wipe reaches the reassembly buffer's storage past a shorter message, where a longer one
-// written since the last wipe left its bytes. Before the wipe the scan finds them: the Control.
-TEST(Reassembler, WipesTheStoragePastTheMessage) {
-    using sendspin::server::FRAGMENT_FLAG_FIRST;
-    using sendspin::server::FRAGMENT_FLAG_LAST;
-    const std::string secret = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
-    Reassembler reassembler(sendspin::server::DEFAULT_MAX_REASSEMBLED_BYTES,
-                            [](uint8_t) { return true; });
-    const auto whole = [](const std::string& text) {
-        Bytes plaintext{sendspin::server::MESSAGE_ID_FRAGMENT,
-                        FRAGMENT_FLAG_FIRST | FRAGMENT_FLAG_LAST,
-                        sendspin::server::MESSAGE_ID_JSON};
-        plaintext.insert(plaintext.end(), text.begin(), text.end());
-        return plaintext;
-    };
-    ASSERT_EQ(reassembler.accept(whole("{\"longer\":\"" + secret + "\"}")),
-              Reassembler::Outcome::MESSAGE);
-    ASSERT_EQ(reassembler.accept(whole("{}")), Reassembler::Outcome::MESSAGE);
-    EXPECT_TRUE(holds_to_capacity(reassembler.buffer_, secret));
-    reassembler.wipe();
-    EXPECT_FALSE(holds_to_capacity(reassembler.buffer_, secret));
 }
 
 // A session that ends between message 2 and the frozen activation's write, here on a client/goodbye
