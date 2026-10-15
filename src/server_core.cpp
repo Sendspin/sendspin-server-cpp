@@ -1531,17 +1531,17 @@ void ServerCore::on_closed(Client& client) {
     // The arguments are evaluated only when the level is logged
     if (client.admitted) {
         SS_LOGI(this->log_, "%s disconnected: %s", this->describe(client).c_str(),
-                end_description(driver.session(), driver.transport_close()).c_str());
+                end_description(driver.session().outcome(), driver.transport_close()).c_str());
     } else if (driver.session().end() == SessionEnd::REFUSED) {
         // admit_activation() logs a run of refusals once, as any peer can repeat them
     } else if (is_handshake_failure(driver.session().end())) {
         // A dial's failures are bounded by its backoff; any peer can repeat an accepted one
         SS_LOG_AT(this->log_, client.target != nullptr ? LogLevel::WARN : LogLevel::INFO,
                   "handshake with %s failed: %s", this->describe(client).c_str(),
-                  end_description(driver.session(), driver.transport_close()).c_str());
+                  end_description(driver.session().outcome(), driver.transport_close()).c_str());
     } else {
         SS_LOGI(this->log_, "%s left before activation: %s", this->describe(client).c_str(),
-                end_description(driver.session(), driver.transport_close()).c_str());
+                end_description(driver.session().outcome(), driver.transport_close()).c_str());
     }
     if (client.target != nullptr) {
         client.target->client = nullptr;
@@ -1579,7 +1579,7 @@ void ServerCore::on_closed(Client& client) {
         // Ended before the client took it: a failed handshake, or a refusal such as
         // `concurrent_attempt`; the host's own close (disconnect(), cancel_connect_url()) is no
         // error, nor the server's refusal past a cap, which admit_activation() logs
-        this->post_event([error = error_before_activation(client.url, driver.session())](
+        this->post_event([error = error_before_activation(client.url, driver.session().outcome())](
                              ServerListener& listener) { listener.on_error(error); });
     }
     if (client.group != nullptr) {

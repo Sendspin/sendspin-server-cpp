@@ -17,6 +17,7 @@
 /// with its rejections, a close payload's check, a message's assembly from its frames, the masking
 /// and the masking keys.
 
+#include "transport.h"
 #include "ws_frame.h"
 #include <gtest/gtest.h>
 

@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include "message_kind.h"
 #include "shared.h"
 #include "task_queue.h"
 
@@ -43,9 +44,6 @@
 namespace sendspin::server {
 
 class EventLoop;
-
-/// @brief The type of a WebSocket data message
-enum class MessageKind : uint8_t { TEXT, BINARY };
 
 /// @brief Why a connection closed, as reported to ConnectionHandler::on_closed()
 enum class CloseReason : uint8_t {

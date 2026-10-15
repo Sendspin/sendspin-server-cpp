@@ -22,7 +22,7 @@
 
 #include "sendspin/server/config.h"
 #include "sendspin/server/types.h"
-#include "session.h"
+#include "session_end.h"
 #include "transport.h"
 
 #include <cstdint>
@@ -52,7 +52,7 @@ bool is_handshake_failure(std::optional<SessionEnd> end);
 /// @brief The on_error() report of a connection that ended before activation:
 /// GOODBYE_BEFORE_ACTIVATION with the reason when the session ended with a client/goodbye,
 /// HANDSHAKE_FAILED otherwise
-ServerError error_before_activation(const std::string& url, const Session& session);
+ServerError error_before_activation(const std::string& url, const SessionOutcome& outcome);
 
 /// @brief Why a connected client went away: from its session's end, or when the transport closed
 /// with the session still open (end nullopt), from the transport's reason
@@ -62,7 +62,7 @@ DisconnectReason disconnect_reason(std::optional<SessionEnd> end,
 /// @brief Why a connection ended, for the log: the session's end, with the client/goodbye's or the
 /// server/error's reason, or when the transport closed with the session still open (end
 /// nullopt), the transport's reason
-std::string end_description(const Session& session, std::optional<CloseReason> transport);
+std::string end_description(const SessionOutcome& outcome, std::optional<CloseReason> transport);
 
 /// @brief Why a dial failed or a connection's transport closed, for the log
 std::string_view close_description(CloseReason reason);

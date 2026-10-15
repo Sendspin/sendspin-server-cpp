@@ -33,14 +33,12 @@ bool is_handshake_failure(std::optional<SessionEnd> end) {
     return end != SessionEnd::GOODBYE && end != SessionEnd::CLOSED_BY_HOST;
 }
 
-ServerError error_before_activation(const std::string& url, const Session& session) {
-    const std::optional<ClientInit>& init = session.client_init();
-    ServerError error{ErrorKind::HANDSHAKE_FAILED, url, init ? init->client_id : std::string{},
-                      std::nullopt, std::nullopt};
-    const std::optional<ClientGoodbye>& goodbye = session.goodbye();
-    if (goodbye && !is_handshake_failure(session.end())) {
+ServerError error_before_activation(const std::string& url, const SessionOutcome& outcome) {
+    ServerError error{ErrorKind::HANDSHAKE_FAILED, url, outcome.client_id, std::nullopt,
+                      std::nullopt};
+    if (outcome.goodbye && !is_handshake_failure(outcome.end)) {
         error.kind = ErrorKind::GOODBYE_BEFORE_ACTIVATION;
-        error.goodbye_reason = goodbye->reason;
+        error.goodbye_reason = outcome.goodbye->reason;
     }
     return error;
 }
@@ -75,14 +73,14 @@ std::string_view close_description(CloseReason reason) {
     return "the connection failed";
 }
 
-std::string end_description(const Session& session, std::optional<CloseReason> transport) {
-    const std::optional<SessionEnd> end = session.end();
+std::string end_description(const SessionOutcome& outcome, std::optional<CloseReason> transport) {
+    const std::optional<SessionEnd>& end = outcome.end;
     if (!end) {
         return std::string(transport ? close_description(*transport) : "closed");
     }
     switch (*end) {
         case SessionEnd::INIT_REJECTED: {
-            const std::optional<InitError> error = session.init_error();
+            const std::optional<InitError>& error = outcome.init_error;
             return "client/init rejected" +
                    (error ? " (" + std::string(to_wire(*error)) + ")" : std::string());
         }
@@ -113,7 +111,7 @@ std::string end_description(const Session& session, std::optional<CloseReason> t
         case SessionEnd::GOODBYE:
             break;
     }
-    const std::optional<ClientGoodbye>& goodbye = session.goodbye();
+    const std::optional<ClientGoodbye>& goodbye = outcome.goodbye;
     return "client/goodbye (" +
            (goodbye && goodbye->reason ? std::string(to_wire(*goodbye->reason))
                                        : std::string("unrecognized reason")) +

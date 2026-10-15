@@ -21,7 +21,6 @@
 #pragma once
 
 #include "artwork.h"
-#include "artwork_cache.h"
 #include "messages.h"
 #include "sched/constants.h"
 #include "send_queues.h"

@@ -19,62 +19,19 @@
 #pragma once
 
 #include "crypto/keys.h"
+#include "noise_types.h"
 
 #include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
-#include <string_view>
 #include <vector>
 
 struct NoiseHandshakeState_s;
 struct NoiseCipherState_s;
 
 namespace sendspin::server {
-
-/// @brief The cipher suites of spec connection.md "Cipher Suites"
-enum class CipherSuite : uint8_t {
-    CHACHAPOLY_SHA256,
-    AESGCM_SHA256,
-};
-
-/// @brief The suite named by a client/init `suite` value, or nullopt for an unknown name
-std::optional<CipherSuite> cipher_suite_from_wire(std::string_view name);
-
-/// @brief The suite's `client/init` name, such as "25519_ChaChaPoly_SHA256"
-std::string_view to_wire(CipherSuite suite);
-
-/// @brief The categories a msg-1 payload's `psk_category` declares (messaging.md
-/// "noise/handshake")
-enum class PskCategory : uint8_t {
-    LONG_TERM,
-    PAIRING,
-    SENTINEL,
-};
-
-/// @brief The `psk_category` code: "lt", "pr" or "sn"
-std::string_view to_wire(PskCategory category);
-
-/// @brief A PSK a handshake references and the category message 1 declares it under (spec
-/// connection.md "Pre-Shared Key"). Every copy wipes its PSK when destroyed.
-struct HandshakePsk {
-    PskCategory category{PskCategory::SENTINEL};
-    Psk psk{SENTINEL_PSK};
-
-    HandshakePsk() = default;
-    HandshakePsk(PskCategory category_in, const Psk& psk_in) : category(category_in), psk(psk_in) {}
-    ~HandshakePsk();
-    HandshakePsk(const HandshakePsk&) = default;
-    HandshakePsk& operator=(const HandshakePsk&) = default;
-    HandshakePsk(HandshakePsk&&) noexcept = default;
-    HandshakePsk& operator=(HandshakePsk&&) noexcept = default;
-};
-
-/// @brief Size of the handshake hash `h` for the SHA-256 suites
-constexpr size_t HANDSHAKE_HASH_SIZE = 32;
-
-using HandshakeHash = std::array<uint8_t, HANDSHAKE_HASH_SIZE>;
 
 namespace detail {
 struct HandshakeStateDeleter {

@@ -19,9 +19,8 @@
 
 #pragma once
 
-#include "host_view.h"
+#include "group_params.h"
 #include "messages.h"
-#include "noise.h"
 #include "sched/constants.h"
 #include "sched/leads.h"
 #include "sched/types.h"

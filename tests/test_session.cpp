@@ -919,7 +919,7 @@ TEST_P(SessionTest, ReportsAGoodbyeBeforeActivationWithItsReason) {
             h.send(h.client.encrypt_json(row.json));
         }
         const sendspin::server::ServerError error =
-            sendspin::server::error_before_activation("ws://kitchen/sendspin", h.session);
+            sendspin::server::error_before_activation("ws://kitchen/sendspin", h.session.outcome());
         EXPECT_EQ(error.kind, row.kind);
         EXPECT_EQ(error.goodbye_reason, row.reason);
         EXPECT_EQ(error.url, "ws://kitchen/sendspin");

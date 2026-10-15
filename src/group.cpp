@@ -19,6 +19,7 @@
 #include "messages.h"
 #include "playback_policy.h"
 #include "sched/lifecycle.h"
+#include "stream_source.h"
 
 #include <algorithm>
 #include <set>

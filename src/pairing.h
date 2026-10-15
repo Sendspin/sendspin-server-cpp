@@ -24,7 +24,7 @@
 #include "crypto/pairing_code.h"
 #include "crypto/psk_wrap.h"
 #include "messages.h"
-#include "noise.h"
+#include "noise_types.h"
 #include "sendspin/server/types.h"
 
 #include <array>

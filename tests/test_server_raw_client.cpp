@@ -22,6 +22,7 @@
 #include "raw_client.h"
 #include "session.h"
 #include "test_recorder.h"
+#include "transport.h"
 #include <ArduinoJson.h>
 #include <boost/asio/error.hpp>
 #include <boost/asio/io_context.hpp>

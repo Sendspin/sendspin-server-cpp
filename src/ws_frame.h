@@ -20,7 +20,7 @@
 
 #pragma once
 
-#include "transport.h"
+#include "message_kind.h"
 
 #include <array>
 #include <cstddef>

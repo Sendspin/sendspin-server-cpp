@@ -19,7 +19,7 @@
 #pragma once
 
 #include "crypto/keys.h"
-#include "noise.h"
+#include "noise_types.h"
 
 #include <optional>
 

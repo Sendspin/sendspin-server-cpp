@@ -23,6 +23,7 @@
 
 #include "audio_workers.h"
 #include "dispatcher.h"
+#include "group_params.h"
 #include "live_slew.h"
 #include "memory.h"
 #include "profile.h"
@@ -66,18 +67,6 @@ constexpr size_t MAX_ANCHOR_SHIFTS = 1024;
 
 /// @brief Whether a GroupInput takes this format (InputFormat)
 bool is_valid_input(const InputFormat& format);
-
-/// @brief The group parameters core writes into the view
-struct GroupParams {
-    /// `G_next`: the group lead the next anchor uses
-    int64_t group_lead_us{0};
-    /// `od_max`: the largest output delay over the eligible members
-    int64_t output_delay_max_us{0};
-    /// `W`: the write-ahead
-    int64_t write_ahead_us{0};
-
-    bool operator==(const GroupParams&) const = default;
-};
 
 /// @brief What a live input takes beyond its InputOptions
 struct LiveOptions {
