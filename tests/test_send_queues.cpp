@@ -18,6 +18,7 @@
 
 #include "fragmentation.h"
 #include "send_queues.h"
+#include "wire_messages.h"
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -36,6 +37,7 @@ using SendChoice = sendspin::server::sched::Choice;
 using sendspin::server::sched::RoleSet;
 using sendspin::server::sched::StreamRole;
 using Bytes = std::vector<uint8_t>;
+namespace wire = sendspin::server::test::wire;
 
 constexpr size_t FRAGMENT = 16384;
 
@@ -104,14 +106,18 @@ TEST(SendQueueMarkers, SeeTheRolesOfTheFirstActivationBehindThem) {
 // Taking a rekey pops it and hands back its frozen activation and stream roles, for the session to
 // write after the freeze
 TEST(SendQueueMarkers, TakeARekeyWithItsFrozenActivation) {
-    SendQueues queues{SendQueueCaps{}};
+    SendQueueCaps caps;
+    caps.control_bytes = 40;
+    SendQueues queues(caps);
     const OutboundPlaintext activation = json_of_size(40);
     ASSERT_TRUE(queues.push_rekey(activation, RoleSet::of(StreamRole::PLAYER)));
     ASSERT_EQ(queues.head_kind(), ControlKind::REKEY);
     EXPECT_EQ(queues.head_roles(), RoleSet::of(StreamRole::PLAYER));
+    EXPECT_FALSE(queues.push_control(json_of_size(1)));
     EXPECT_EQ(queues.take_rekey().bytes, activation.bytes);
     EXPECT_FALSE(queues.snapshot().control_pending);
-    EXPECT_EQ(queues.control_taken(), 1U);
+    // Taking it frees its bytes
+    EXPECT_TRUE(queues.push_control(json_of_size(1)));
 }
 
 // Overflowing a cap is refused, and the caller closes the connection
@@ -157,11 +163,10 @@ TEST(SendQueueCaps, CountAFragmentedMessageUntilItsLastFragment) {
     EXPECT_EQ(queues.next(), SendChoice::FRAGMENT);
     EXPECT_FALSE(queues.push_control(json_of_size(11)));
     while (queues.next() == SendChoice::FRAGMENT) {
-        // The message is taken only with its last fragment
-        EXPECT_EQ(queues.control_taken(), 0U);
+        // The message's bytes are freed only with its last fragment
+        EXPECT_FALSE(queues.push_control(json_of_size(11)));
         queues.take_control(FRAGMENT);
     }
-    EXPECT_EQ(queues.control_taken(), 1U);
     EXPECT_TRUE(queues.push_control(json_of_size(size)));
 }
 
@@ -174,7 +179,7 @@ TEST(SendQueues, HoldATimeReplyUntilTheFragmentedMessageEnds) {
     ASSERT_TRUE(queues.push_control({MessageKind::BINARY, {sendspin::server::MESSAGE_ID_JSON}}));
 
     const OutboundPlaintext first = queues.take_control(sendspin::server::MAX_TRANSPORT_PLAINTEXT);
-    EXPECT_EQ(first.bytes[0], sendspin::server::MESSAGE_ID_FRAGMENT);
+    EXPECT_EQ(first.bytes[0], wire::FRAGMENT_ID);
     ASSERT_TRUE(queues.push_time({7, 70}));
 
     std::vector<SendChoice> taken;
@@ -219,7 +224,7 @@ TEST(SendQueues, LeaveRoomForTheTransportTag) {
     size_t fragments = 0;
     while (queues.next() != SendChoice::NONE) {
         const OutboundPlaintext fragment = queues.take_control(FRAGMENT);
-        EXPECT_EQ(fragment.bytes[0], sendspin::server::MESSAGE_ID_FRAGMENT);
+        EXPECT_EQ(fragment.bytes[0], wire::FRAGMENT_ID);
         EXPECT_GE(room(fragment), sendspin::server::TRANSPORT_TAG_BYTES) << fragments;
         ++fragments;
     }

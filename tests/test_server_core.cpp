@@ -35,6 +35,7 @@
 #include "test_ports.h"
 #include "test_recorder.h"
 #include "transport.h"
+#include "wire_messages.h"
 #include <gtest/gtest.h>
 #include <noise/protocol.h>
 
@@ -55,6 +56,7 @@
 namespace {
 
 using sendspin::server::ServerError;
+namespace wire = sendspin::server::test::wire;
 
 class ErrorCounter : public sendspin::server::ServerListener {
 public:
@@ -514,8 +516,9 @@ TEST(ServerCorePipelines, MovesAPlayerOffAFailedFormatAndStillCompletesADrain) {
             if (!plaintext) {
                 return false;
             }
-            if (plaintext->empty() || plaintext->front() != 0) {
-                if (wanted == "chunk" && !plaintext->empty() && plaintext->front() == 4) {
+            if (plaintext->empty() || plaintext->front() != wire::JSON_ID) {
+                if (wanted == "chunk" && !plaintext->empty() &&
+                    plaintext->front() == wire::AUDIO_CHUNK_ID) {
                     return true;
                 }
                 continue;

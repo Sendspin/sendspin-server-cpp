@@ -31,6 +31,7 @@
 #include "raw_client.h"
 #include "test_ports.h"
 #include "test_recorder.h"
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 
@@ -74,6 +75,7 @@ using sendspin::server::test::Recorder;
 using sendspin::server::test::Signal;
 using sendspin::server::test::Sink;
 using Codec = sendspin::SendspinCodecFormat;
+namespace wire = sendspin::server::test::wire;
 
 constexpr uint32_t RATE = 48000;
 /// A 20 ms chunk's frames
@@ -97,10 +99,10 @@ public:
         }
         const std::lock_guard<std::mutex> lock(this->mutex);
         Client& client = this->clients[message.client_id];
-        constexpr size_t CHUNK_HEADER = 13;
-        if (message.plaintext[0] == 4 && message.plaintext.size() > CHUNK_HEADER) {
+        if (message.plaintext[0] == wire::AUDIO_CHUNK_ID &&
+            message.plaintext.size() > wire::AUDIO_CHUNK_HEADER) {
             const size_t frame_bytes = client.frame_bytes == 0 ? 1 : client.frame_bytes;
-            for (size_t at = CHUNK_HEADER; at + frame_bytes <= message.plaintext.size();
+            for (size_t at = wire::AUDIO_CHUNK_HEADER; at + frame_bytes <= message.plaintext.size();
                  at += frame_bytes) {
                 const uint8_t* frame = &message.plaintext[at];
                 client.samples.push_back(static_cast<int16_t>(frame[0] | (frame[1] << 8)));
@@ -112,7 +114,7 @@ public:
             }
             return;
         }
-        if (message.plaintext[0] != 0) {
+        if (message.plaintext[0] != wire::JSON_ID) {
             return;
         }
         JsonDocument doc;

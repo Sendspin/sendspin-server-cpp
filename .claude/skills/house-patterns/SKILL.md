@@ -18,7 +18,7 @@ Back every claim with a command. A "checked and clean" statement must rest on a 
 ## Reuse before invention
 
 - New parsing or building uses the helpers in `messages.cpp` (`read_u32()`, `read_positive_u32()`, `read_flags()`, `parse_format()`, `try_serialize()`) rather than per-field logic.
-- A new queue is a `Ring` (`ring.h`) or, for closures, a `TaskQueue` (`task_queue.h`), placed as `memory.h` names, not a standard container that allocates as it slides (`std::deque`, `std::list`).
+- A new queue is a `Ring` (`ring.h`), for variable-length bytes a `ByteRing` (`byte_ring.h`), or, for closures, a `TaskQueue` (`task_queue.h`), placed as `memory.h` names, not a standard container that allocates as it slides (`std::deque`, `std::list`).
 - A new decision about timing, admission, selection, leads or the stream lifecycle uses or extends `src/sched/`; a new policy decision belongs beside its siblings in `discovery_policy.h`, `playback_policy.h` or `controller.h`.
 - Before accepting a new helper, guard or utility, search the tree for one that already does the job. Duplicating an existing mechanism is a finding even when the duplicate is correct.
 - A new role or feature copies the structure of the sibling that already solves the same problem (the controller and metadata roles for state roles, `PlayerStream` and its markers for a stream). Drift from the sibling is a defect: conform, or fix all siblings.

@@ -167,14 +167,14 @@ public:
 class GroupInput;
 
 /// @brief What SendspinServer::open_input() returns
-struct OpenedInput {
+struct [[nodiscard]] OpenedInput {
     OpenInputResult result{OpenInputResult::NOT_RUNNING};
     /// Set with OpenInputResult::OK only
     std::shared_ptr<GroupInput> input;
 };
 
 /// @brief What SendspinServer::route_source() returns
-struct RoutedSource {
+struct [[nodiscard]] RoutedSource {
     RouteSourceResult result{RouteSourceResult::NOT_RUNNING};
     /// Set with RouteSourceResult::OK only: the group's input the source plays into
     std::shared_ptr<GroupInput> input;
@@ -268,7 +268,7 @@ public:
     /// written and not yet played spans 32 formats. That count includes the history kept behind
     /// the position playing, and does not shrink while paused; a host retries once more has
     /// played, or calls drain() and sets the format for the next run.
-    bool set_format(const InputFormat& format);
+    [[nodiscard]] bool set_format(const InputFormat& format);
 
     /// @brief When the sample at sample_pos plays, on SendspinServer::now_us()'s clock.
     /// Provisional, moving with the time now, for a position not yet anchored to the timeline: in
@@ -316,8 +316,8 @@ public:
     /// @param provider valid until the server is destroyed or started again
     /// @param listener nullptr for none, or one valid until the server is destroyed or started
     /// again
-    StartResult start(const ServerConfig& config, PersistenceProvider* provider,
-                      ServerListener* listener);
+    [[nodiscard]] StartResult start(const ServerConfig& config, PersistenceProvider* provider,
+                                    ServerListener* listener);
 
     /// @brief Closes every connection and stops the server's threads. Each connected client is
     /// reported with DisconnectReason::SERVER_STOPPED, after the events that came before the stop
@@ -348,7 +348,7 @@ public:
     /// (ConnectOptions), which a later call without the option leaves in place. Failures go to
     /// ServerListener::on_error().
     /// @return false while stopped or for a URL that does not parse
-    bool connect_url(std::string_view url, const ConnectOptions& options = {});
+    [[nodiscard]] bool connect_url(std::string_view url, const ConnectOptions& options = {});
 
     /// @brief Stops dialing a URL connect_url() asked for: a dial in progress or waiting, and a
     /// connection to it the client has not taken yet, are abandoned, and the server does not dial
@@ -370,7 +370,7 @@ public:
     /// does, also when a client/goodbye asked the server not to reconnect. Does nothing for a
     /// connected client.
     /// @return false while stopped, or for a client_id clients() does not list
-    bool connect(std::string_view client_id);
+    [[nodiscard]] bool connect(std::string_view client_id);
 
     /// @brief The groups as of the last change. While running there is always the server's group
     /// (default_group()).
@@ -383,7 +383,7 @@ public:
 
     /// @brief Opens an input to a group, one at a time per group. If the group went away by the
     /// time the server attaches the input, the input is closed (InputState::CLOSED).
-    OpenedInput open_input(GroupId group, const InputOptions& options);
+    [[nodiscard]] OpenedInput open_input(GroupId group, const InputOptions& options);
 
     /// @brief Routes client_id's source into group (spec roles/source/v1.md): opens a live input
     /// to the group (InputKind::LIVE, with options' write jitter), held as open_input()'s is,
@@ -406,8 +406,8 @@ public:
     /// of the source's stream, so its next audio starts a new run. A device that is a player too
     /// plays only what its group streams it, its own input included (spec roles/source/v1.md).
     /// @param client_id need not be connected
-    RoutedSource route_source(std::string_view client_id, GroupId group,
-                              const SourceRouteOptions& options = {});
+    [[nodiscard]] RoutedSource route_source(std::string_view client_id, GroupId group,
+                                            const SourceRouteOptions& options = {});
 
     /// @brief Approves the client for playback without pairing (spec pairing.md "Unpaired
     /// Access") and saves the approval in its client record. A connected client that enables
@@ -416,13 +416,13 @@ public:
     /// access").
     /// @param client_id need not be connected
     /// @return false while stopped, or for a client_id that is not one
-    bool approve(std::string_view client_id, ApprovalScope scope);
+    [[nodiscard]] bool approve(std::string_view client_id, ApprovalScope scope);
 
     /// @brief Revokes the client's approval and saves that in its client record, so
     /// ServerConfig::approve_all_clients no longer approves it. A connected client's streams
     /// end, it is activated with no activities or roles, and it leaves a group it shares.
     /// @return false while stopped, or for a client_id that is not one
-    bool revoke_approval(std::string_view client_id);
+    [[nodiscard]] bool revoke_approval(std::string_view client_id);
 
     /// @brief Pairs the client (spec pairing.md): ServerListener::on_pairing_code_needed() asks
     /// for what the operator enters, and on_pairing_result() reports the end. A connected client
@@ -435,20 +435,20 @@ public:
     /// with a method other than PairMethod::DYNAMIC_PAIRING_CODE or other than DIGITS or QR_CODE,
     /// for QR_CODE unless ServerConfig::operator_can_scan_qr, or for a connected client whose
     /// client/hello does not offer the method or a usable format (ClientInfo::pairing_offers)
-    bool begin_pairing(std::string_view client_id, const PairingOptions& options);
+    [[nodiscard]] bool begin_pairing(std::string_view client_id, const PairingOptions& options);
 
     /// @brief The client's pairing token, "SP:0...", from its device, leaflet or QR code (spec
     /// pairing.md "Pairing Token"): pairs it with PairMethod::PAIRING_PSK, beginning that
     /// pairing unless one waits for this token
     /// @return false while stopped, for a client clients() does not list, or a token that does not
     /// decode or whose client key is not the client_id's
-    bool submit_pairing_token(std::string_view client_id, std::string_view token);
+    [[nodiscard]] bool submit_pairing_token(std::string_view client_id, std::string_view token);
 
     /// @brief The code the operator entered for the client's code pairing, after
     /// ServerListener::on_pairing_code_needed(): digits (spaces and hyphens ignored) or the
     /// scanned "SP:1..." token. A static code may be entered before it is asked for.
     /// @return false while stopped, or for a client_id that is not one
-    bool submit_pairing_code(std::string_view client_id, std::string_view code);
+    [[nodiscard]] bool submit_pairing_code(std::string_view client_id, std::string_view code);
 
     /// @brief Ends the client's pairing as PairingResult::CANCELLED (spec pairing.md "Entering and
     /// leaving pairing"); nothing once its long-term PSK is being saved, or with no pairing
@@ -462,7 +462,7 @@ public:
     /// progress is cancelled first; while a pairing's long-term PSK is being saved, unpairing does
     /// nothing (logged): call it again once on_pairing_result() reports.
     /// @return false while stopped, or for a client_id that is not one
-    bool unpair(std::string_view client_id);
+    [[nodiscard]] bool unpair(std::string_view client_id);
 
     /// @brief Creates a stopped group named name and moves first_member into it, as move_client()
     /// does: the group then has its own input (open_input()), controller caps and metadata.
@@ -471,12 +471,13 @@ public:
     /// or one held with no roles (an unapproved client, say).
     /// @return the new group's id; nullopt while stopped, for a name longer than
     /// config_limits::MAX_NAME_BYTES or a first_member that is not a client_id
-    std::optional<GroupId> create_group(std::string_view name, std::string_view first_member);
+    [[nodiscard]] std::optional<GroupId> create_group(std::string_view name,
+                                                      std::string_view first_member);
 
     /// @brief Renames the group; its members get the name in a group/update
     /// @return false while stopped, for a group not in groups() or a name longer than
     /// config_limits::MAX_NAME_BYTES
-    bool rename_group(GroupId group, std::string_view name);
+    [[nodiscard]] bool rename_group(GroupId group, std::string_view name);
 
     /// @brief Moves the client into group, which it is told with a group/update: its streams in its
     /// old group end, and in a group that plays they start again as a late join, on that group's
@@ -486,7 +487,7 @@ public:
     /// rejoins this group instead. A group other than the server's goes once it has no member, no
     /// input and no client keeping its place.
     /// @return false while stopped, for a group not in groups() or a client_id that is not one
-    bool move_client(std::string_view client_id, GroupId group);
+    [[nodiscard]] bool move_client(std::string_view client_id, GroupId group);
 
     /// @brief Sets the format the client's player streams take in place of the `format` its
     /// client/state prefers (spec player/v1.md "client/hello player@v1 support object": a server
@@ -498,23 +499,24 @@ public:
     /// back the same way; otherwise it applies at the client's next stream.
     /// @return false while stopped, or for a client_id that is not one; true does not mean the
     /// client lists the format
-    bool set_player_format(std::string_view client_id, std::optional<StreamFormat> format);
+    [[nodiscard]] bool set_player_format(std::string_view client_id,
+                                         std::optional<StreamFormat> format);
 
     /// @brief Sets what the group's controllers are offered and shown; a group starts with no
     /// transport commands, repeat off and shuffle off. Call it again as the state changes, such
     /// as after carrying out a REPEAT_ONE.
     /// @return false while stopped or for a group not in groups()
-    bool set_controller_caps(GroupId group, const ControllerCaps& caps);
+    [[nodiscard]] bool set_controller_caps(GroupId group, const ControllerCaps& caps);
 
     /// @brief Sets the group's volume as a controller's `volume` command does: each player that
     /// supports volume gets one volume command, with relative levels kept (spec controller/v1.md
     /// "Setting group volume")
-    /// @return false while stopped, for a group not in groups() or a volume past 100
-    bool set_group_volume(GroupId group, uint32_t volume);
+    /// @return false while stopped, for a group not in groups() or a volume past MAX_VOLUME
+    [[nodiscard]] bool set_group_volume(GroupId group, uint32_t volume);
 
     /// @brief Mutes or unmutes each player in the group that supports mute
     /// @return false while stopped or for a group not in groups()
-    bool set_group_mute(GroupId group, bool muted);
+    [[nodiscard]] bool set_group_mute(GroupId group, bool muted);
 
     /// @brief Sets what the group plays, for its members' metadata role, taking effect at at_us
     /// on now_us()'s clock. A time to come schedules it: it replaces an update scheduled before
@@ -525,7 +527,7 @@ public:
     /// last. Set while paused, metadata goes out at speed 0, and the resume restores its speed.
     /// @return false while stopped, for a group not in groups(), a string longer than 65,535
     /// bytes or a playback_speed past MAX_PLAYBACK_SPEED
-    bool set_metadata(GroupId group, const Metadata& metadata, int64_t at_us);
+    [[nodiscard]] bool set_metadata(GroupId group, const Metadata& metadata, int64_t at_us);
 
     /// @brief Cancels the group's scheduled metadata update, if any (spec metadata/v1.md
     /// "Server rules for scheduled metadata")
@@ -540,8 +542,8 @@ public:
     /// @param image a JPEG or PNG file's bytes; empty for no image, which clears the channels
     /// @return false while stopped, for a group not in groups(), or an image that is not a JPEG or
     /// PNG within artwork_limits
-    bool set_artwork(GroupId group, ArtworkSource source, std::span<const uint8_t> image,
-                     int64_t at_us);
+    [[nodiscard]] bool set_artwork(GroupId group, ArtworkSource source,
+                                   std::span<const uint8_t> image, int64_t at_us);
 
     /// @brief Cancels the group's scheduled image for source, if any; for ALBUM, its scheduled
     /// colors too (spec roles/artwork/v1.md "Server rules for scheduled artwork")
@@ -554,7 +556,7 @@ public:
     /// object" requires (4.5:1 with its text color and its pair) is moved toward black or white
     /// until it has it; primary and accent are sent as given.
     /// @return false while stopped or for a group not in groups()
-    bool set_colors(GroupId group, const Colors& colors, int64_t at_us);
+    [[nodiscard]] bool set_colors(GroupId group, const Colors& colors, int64_t at_us);
 
     /// @brief Cancels the group's scheduled colors, if any (spec roles/color/v1.md "Server rules
     /// for scheduled colors")

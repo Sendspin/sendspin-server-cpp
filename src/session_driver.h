@@ -101,10 +101,6 @@ public:
         return this->transport_close_;
     }
 
-    bool is_closed() const {
-        return this->closed_;
-    }
-
     /// @brief Connection::remote_endpoint()
     const std::string& remote_endpoint() const {
         return this->connection_.remote_endpoint();

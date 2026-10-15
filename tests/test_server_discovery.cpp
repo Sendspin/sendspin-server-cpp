@@ -56,6 +56,7 @@ using sendspin::server::ServerConfig;
 using sendspin::server::StartResult;
 using sendspin::server::test::client_goodbye_json;
 using sendspin::server::test::client_hello_json;
+using sendspin::server::test::LocalServer;
 using sendspin::server::test::MemoryProvider;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
@@ -270,13 +271,12 @@ TEST(ServerDiscovery, ReportsDiscoveryUnavailableAndLogsItsReturn) {
         }
         logged.notify_all();
     };
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
+    LocalServer s;
+    ASSERT_EQ(s.start(config), StartResult::OK);
     discovery->unavailable();
-    EXPECT_EQ(recorder.wait_for_error("").kind, sendspin::server::ErrorKind::DISCOVERY_UNAVAILABLE);
-    EXPECT_NE(server.listen_port(), 0);
+    EXPECT_EQ(s.recorder.wait_for_error("").kind,
+              sendspin::server::ErrorKind::DISCOVERY_UNAVAILABLE);
+    EXPECT_NE(s.server.listen_port(), 0);
     discovery->available();
     std::unique_lock<std::mutex> lock(mutex);
     logged.wait(lock, [&] { return levels.size() >= 2; });
@@ -288,18 +288,16 @@ TEST(ServerDiscovery, ReportsDiscoveryUnavailableAndLogsItsReturn) {
 // own, and connect() reclaims it with a dial for playback
 TEST(ServerDiscovery, DialsAFoundClientIdleAndReclaimsItForPlaybackAfterAnotherServer) {
     auto discovery = std::make_shared<FakeDiscovery>();
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    ASSERT_EQ(server.start(browsing_config(discovery), &provider, &recorder), StartResult::OK);
+    LocalServer s;
+    ASSERT_EQ(s.start(browsing_config(discovery)), StartResult::OK);
     RawClient client;
     const std::string id = id_of(client);
     discovery->found(service_of(client, "Kitchen"));
-    recorder.wait_for("seen Kitchen");
+    s.recorder.wait_for("seen Kitchen");
     EXPECT_EQ(accept_and_activate(client, client_hello_json("Kitchen")),
               activation("[]", R"(["metadata@v1"])"));
-    recorder.wait_for("connected " + id);
-    ClientInfo info = only_client(server);
+    s.recorder.wait_for("connected " + id);
+    ClientInfo info = only_client(s.server);
     EXPECT_TRUE(info.connected);
     EXPECT_TRUE(info.discovered);
     EXPECT_FALSE(info.accepted);
@@ -307,22 +305,22 @@ TEST(ServerDiscovery, DialsAFoundClientIdleAndReclaimsItForPlaybackAfterAnotherS
 
     client.send_json(client_goodbye_json("another_server"));
     client.read_until_closed();
-    recorder.wait_for(disconnected(id, DisconnectReason::GOODBYE));
-    info = only_client(server);
+    s.recorder.wait_for(disconnected(id, DisconnectReason::GOODBYE));
+    info = only_client(s.server);
     EXPECT_EQ(info.client_id, id);
     EXPECT_FALSE(info.connected);
     EXPECT_FALSE(info.reconnecting);
 
-    EXPECT_FALSE(server.connect("not listed"));
-    ASSERT_TRUE(server.connect(id));
+    EXPECT_FALSE(s.server.connect("not listed"));
+    ASSERT_TRUE(s.server.connect(id));
     EXPECT_EQ(accept_and_activate(client, client_hello_json("Kitchen")),
               activation(R"(["playback"])", R"(["metadata@v1"])"));
-    recorder.wait_for_count("connected " + id, 2);
+    s.recorder.wait_for_count("connected " + id, 2);
     // connect() lifted the suppression: a drop is dialed again, idle
     client.drop();
     EXPECT_EQ(accept_and_activate(client, client_hello_json("Kitchen")),
               activation("[]", R"(["metadata@v1"])"));
-    recorder.wait_for_count("connected " + id, 3);
+    s.recorder.wait_for_count("connected " + id, 3);
 }
 
 // connection.md "Multiple servers (server-initiated)": a client that refuses the connection with
@@ -330,10 +328,8 @@ TEST(ServerDiscovery, DialsAFoundClientIdleAndReclaimsItForPlaybackAfterAnotherS
 // of no connection and the client is not listed; the server retries later
 TEST(ServerDiscovery, RetriesARefusedDialWithoutReportingItConnected) {
     auto discovery = std::make_shared<FakeDiscovery>();
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    ASSERT_EQ(server.start(browsing_config(discovery), &provider, &recorder), StartResult::OK);
+    LocalServer s;
+    ASSERT_EQ(s.start(browsing_config(discovery)), StartResult::OK);
     RawClient client;
     const std::string id = id_of(client);
     discovery->found(service_of(client, "Busy"));
@@ -341,17 +337,17 @@ TEST(ServerDiscovery, RetriesARefusedDialWithoutReportingItConnected) {
     EXPECT_EQ(accept_and_activate(client, hello, false), activation("[]", R"(["metadata@v1"])"));
     client.send_json(client_goodbye_json("concurrent_attempt"));
     client.read_until_closed();
-    const sendspin::server::ServerError refused = recorder.wait_for_error(client.url());
+    const sendspin::server::ServerError refused = s.recorder.wait_for_error(client.url());
     EXPECT_EQ(refused.kind, sendspin::server::ErrorKind::GOODBYE_BEFORE_ACTIVATION);
     EXPECT_EQ(refused.goodbye_reason, sendspin::server::GoodbyeReason::CONCURRENT_ATTEMPT);
     // Listed as found, not as the client the dial reached
-    EXPECT_EQ(only_client(server).client_id, "");
+    EXPECT_EQ(only_client(s.server).client_id, "");
 
     EXPECT_EQ(accept_and_activate(client, hello), activation("[]", R"(["metadata@v1"])"));
-    recorder.wait_for("connected " + id);
-    EXPECT_EQ(recorder.count("connected " + id), 1U);
-    EXPECT_EQ(only_client(server).client_id, id);
-    for (const Recorder::Entry& entry : recorder.entries()) {
+    s.recorder.wait_for("connected " + id);
+    EXPECT_EQ(s.recorder.count("connected " + id), 1U);
+    EXPECT_EQ(only_client(s.server).client_id, id);
+    for (const Recorder::Entry& entry : s.recorder.entries()) {
         EXPECT_NE(entry.what.rfind("disconnected " + id, 0), 0U) << entry.what;
     }
 }
@@ -360,10 +356,8 @@ TEST(ServerDiscovery, RetriesARefusedDialWithoutReportingItConnected) {
 // the client stops advertising and advertises again
 TEST(ServerDiscovery, ReconnectsAfterARestartOrADropAndOnceAClientAdvertisesAgain) {
     auto discovery = std::make_shared<FakeDiscovery>();
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    ASSERT_EQ(server.start(browsing_config(discovery), &provider, &recorder), StartResult::OK);
+    LocalServer s;
+    ASSERT_EQ(s.start(browsing_config(discovery)), StartResult::OK);
     RawClient client;
     const std::string id = id_of(client);
     const std::string idle = activation("[]", R"(["metadata@v1"])");
@@ -371,27 +365,27 @@ TEST(ServerDiscovery, ReconnectsAfterARestartOrADropAndOnceAClientAdvertisesAgai
     // Each connection ends only once the server counted the client connected, so the end cannot
     // overtake the client/state that took the connection
     EXPECT_EQ(accept_and_activate(client, client_hello_json("Den")), idle);
-    recorder.wait_for_count("connected " + id, 1);
+    s.recorder.wait_for_count("connected " + id, 1);
 
     client.send_json(client_goodbye_json("restart"));
     client.read_until_closed();
     EXPECT_EQ(accept_and_activate(client, client_hello_json("Den")), idle);
-    recorder.wait_for_count("connected " + id, 2);
+    s.recorder.wait_for_count("connected " + id, 2);
 
     client.drop();
     EXPECT_EQ(accept_and_activate(client, client_hello_json("Den")), idle);
-    recorder.wait_for_count("connected " + id, 3);
+    s.recorder.wait_for_count("connected " + id, 3);
 
     client.send_json(client_goodbye_json("user_request"));
     client.read_until_closed();
-    recorder.wait_for(disconnected(id, DisconnectReason::GOODBYE));
-    EXPECT_FALSE(only_client(server).reconnecting);
+    s.recorder.wait_for(disconnected(id, DisconnectReason::GOODBYE));
+    EXPECT_FALSE(only_client(s.server).reconnecting);
     // Seen again once found again, and dialed
     discovery->lost("Den");
     discovery->found(service_of(client, "Den"));
-    recorder.wait_for_count("seen Den", 2);
+    s.recorder.wait_for_count("seen Den", 2);
     EXPECT_EQ(accept_and_activate(client, client_hello_json("Den")), idle);
-    recorder.wait_for_count("connected " + id, 4);
+    s.recorder.wait_for_count("connected " + id, 4);
 }
 
 // A client held at no activities declares `playback` once its group plays, keeping its roles;
@@ -399,24 +393,22 @@ TEST(ServerDiscovery, ReconnectsAfterARestartOrADropAndOnceAClientAdvertisesAgai
 // activation declares it
 TEST(ServerDiscovery, DialsForPlaybackBackIntoAGroupThatPlays) {
     auto discovery = std::make_shared<FakeDiscovery>();
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    ASSERT_EQ(server.start(browsing_config(discovery), &provider, &recorder), StartResult::OK);
+    LocalServer s;
+    ASSERT_EQ(s.start(browsing_config(discovery)), StartResult::OK);
     RawClient client;
     const std::string hello = sendspin::server::test::player_hello_json(
         "Player", R"([{"codec":"pcm","sample_rate":48000,"channels":2,"bit_depth":16}])", 200000);
     discovery->found(service_of(client, "Player"));
     EXPECT_EQ(accept_and_activate(client, hello), activation("[]", R"(["player@v1"])"));
 
-    const sendspin::server::OpenedInput opened = server.open_input(
-        *server.default_group(), InputOptions{InputFormat{48000, 2, SampleFormat::S16}});
+    const sendspin::server::OpenedInput opened = s.server.open_input(
+        *s.server.default_group(), InputOptions{InputFormat{48000, 2, SampleFormat::S16}});
     ASSERT_TRUE(opened.input);
     {
         const sendspin::server::test::SilenceFeeder feeder(opened.input);
         EXPECT_EQ(client.receive_until("server/activate"),
                   R"({"type":"server/activate","payload":{"activities":["playback"]}})");
-        recorder.wait_for("connected " + id_of(client));
+        s.recorder.wait_for("connected " + id_of(client));
         client.drop();
         EXPECT_EQ(accept_and_activate(client, hello),
                   activation(R"(["playback"])", R"(["player@v1"])"));
@@ -435,10 +427,8 @@ TEST(ServerDiscovery, FreesTheDialPlaceOfALostClient) {
     ServerConfig config = browsing_config(discovery);
     // Only the test frees a place
     config.timing.handshake_step_timeout_us = sendspin::server::config_limits::MAX_TIMING_US;
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
+    LocalServer s;
+    ASSERT_EQ(s.start(config), StartResult::OK);
     SilentListener listener;
     const auto find = [&](const std::string& name) {
         DiscoveredClient service;
@@ -450,11 +440,11 @@ TEST(ServerDiscovery, FreesTheDialPlaceOfALostClient) {
         discovery->found(service);
     };
     for (size_t i = 0; i + 1 < MAX_DIALING; ++i) {
-        ASSERT_TRUE(server.connect_url(listener.url("/held" + std::to_string(i))));
+        ASSERT_TRUE(s.server.connect_url(listener.url("/held" + std::to_string(i))));
     }
     find("dialing");
     find("lost-waiting");
-    ASSERT_TRUE(server.connect_url(listener.url("/waiting")));
+    ASSERT_TRUE(s.server.connect_url(listener.url("/waiting")));
 
     // Every dial but the found client's completes its upgrade and waits in its handshake
     std::vector<std::unique_ptr<SilentListener::WebSocket>> held;
@@ -481,28 +471,26 @@ TEST(ServerDiscovery, FreesTheDialPlaceOfALostClient) {
 TEST(ServerDiscovery, DoesNotRedialACancelledUrlWhenItsConnectionDrops) {
     for (const bool cancel : {false, true}) {
         SCOPED_TRACE(cancel ? "cancelled while connected" : "Control: not cancelled");
-        MemoryProvider provider;
-        Recorder recorder;
-        SendspinServer server;
+        LocalServer s;
         ServerConfig config = browsing_config(std::make_shared<FakeDiscovery>());
         config.browse = false;
-        ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
+        ASSERT_EQ(s.start(config), StartResult::OK);
         RawClient client;
         const std::string id = id_of(client);
-        ASSERT_TRUE(server.connect_url(client.url()));
+        ASSERT_TRUE(s.server.connect_url(client.url()));
         accept_and_activate(client, client_hello_json("Hall"));
-        recorder.wait_for("connected " + id);
+        s.recorder.wait_for("connected " + id);
         if (cancel) {
-            ASSERT_TRUE(server.cancel_connect_url(client.url()));
-            EXPECT_TRUE(only_client(server).connected);
+            ASSERT_TRUE(s.server.cancel_connect_url(client.url()));
+            EXPECT_TRUE(only_client(s.server).connected);
         }
         client.drop();
-        recorder.wait_for(disconnected(id, DisconnectReason::CONNECTION_LOST));
+        s.recorder.wait_for(disconnected(id, DisconnectReason::CONNECTION_LOST));
         // The snapshot published with the close says whether the server dials it again
-        EXPECT_EQ(only_client(server).reconnecting, !cancel);
+        EXPECT_EQ(only_client(s.server).reconnecting, !cancel);
         if (!cancel) {
             accept_and_activate(client, client_hello_json("Hall"));
-            recorder.wait_for_count("connected " + id, 2);
+            s.recorder.wait_for_count("connected " + id, 2);
         }
     }
 }
@@ -511,28 +499,26 @@ TEST(ServerDiscovery, DoesNotRedialACancelledUrlWhenItsConnectionDrops) {
 // the suppression, as for a goodbye that stops reconnecting
 TEST(ServerDiscovery, SuppressesAFoundClientOnDisconnectUntilItAdvertisesAgain) {
     auto discovery = std::make_shared<FakeDiscovery>();
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    ASSERT_EQ(server.start(browsing_config(discovery), &provider, &recorder), StartResult::OK);
+    LocalServer s;
+    ASSERT_EQ(s.start(browsing_config(discovery)), StartResult::OK);
     RawClient client;
     const std::string id = id_of(client);
     const std::string idle = activation("[]", R"(["metadata@v1"])");
     discovery->found(service_of(client, "Attic"));
     EXPECT_EQ(accept_and_activate(client, client_hello_json("Attic")), idle);
-    recorder.wait_for("connected " + id);
+    s.recorder.wait_for("connected " + id);
 
-    ASSERT_TRUE(server.disconnect(id));
+    ASSERT_TRUE(s.server.disconnect(id));
     client.read_until_closed();
-    recorder.wait_for(disconnected(id, DisconnectReason::DISCONNECTED_BY_HOST));
-    EXPECT_FALSE(only_client(server).reconnecting);
-    EXPECT_FALSE(only_client(server).connected);
+    s.recorder.wait_for(disconnected(id, DisconnectReason::DISCONNECTED_BY_HOST));
+    EXPECT_FALSE(only_client(s.server).reconnecting);
+    EXPECT_FALSE(only_client(s.server).connected);
 
     discovery->lost("Attic");
     discovery->found(service_of(client, "Attic"));
-    recorder.wait_for_count("seen Attic", 2);
+    s.recorder.wait_for_count("seen Attic", 2);
     EXPECT_EQ(accept_and_activate(client, client_hello_json("Attic")), idle);
-    recorder.wait_for_count("connected " + id, 2);
+    s.recorder.wait_for_count("connected " + id, 2);
 }
 
 }  // namespace

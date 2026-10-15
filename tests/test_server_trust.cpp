@@ -36,6 +36,7 @@
 #include "test_recorder.h"
 #include "transport.h"
 #include "trust_fixtures.h"
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 #include <noise/protocol.h>
@@ -82,6 +83,7 @@ using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
 using sendspin::server::test::stored_record;
 namespace persistence_keys = sendspin::server::persistence_keys;
+namespace wire = sendspin::server::test::wire;
 
 Bytes record_blob(const ClientRecord& record) {
     sendspin::server::ClientRecordBlob blob{};
@@ -233,6 +235,10 @@ struct KnownServer {
         return config;
     }
 
+    StartResult start(const ServerConfig& config) {
+        return this->server.start(config, &this->provider, &this->recorder);
+    }
+
     Identity identity;
     MemoryProvider provider;
     Recorder recorder;
@@ -260,8 +266,7 @@ TEST(ServerTrust, PlaysAPairedClientUnderItsLongTermPsk) {
     record.long_term_psk = long_term;
     known.provider.blobs[persistence_keys::client_record_key(0)] = record_blob(record);
 
-    ASSERT_EQ(known.server.start(known.config(), &known.provider, &known.recorder),
-              StartResult::OK);
+    ASSERT_EQ(known.start(known.config()), StartResult::OK);
     ASSERT_TRUE(known.server.connect_url(peer.url()));
     peer.run_until([&] { return known.recorder.contains("connected " + id); });
     const std::vector<std::string> activations = known.capture.activations();
@@ -302,8 +307,7 @@ TEST(ServerTrust, HoldsAClientThatLostItsRecordAndReportsTheMismatch) {
     const Bytes blob = record_blob(record);
     known.provider.blobs[persistence_keys::client_record_key(0)] = blob;
 
-    ASSERT_EQ(known.server.start(known.config(), &known.provider, &known.recorder),
-              StartResult::OK);
+    ASSERT_EQ(known.start(known.config()), StartResult::OK);
     ASSERT_TRUE(known.server.connect_url(peer.url()));
     // A client held with no roles is connected before its activation is written
     peer.run_until([&] {
@@ -348,8 +352,7 @@ TEST(ServerTrust, HoldsAClientThatLostItsRecordAndReportsTheMismatch) {
 TEST(ServerTrust, ReportsTheIdentifiersOfANewerClient) {
     ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
     KnownServer known;
-    ASSERT_EQ(known.server.start(known.config(), &known.provider, &known.recorder),
-              StartResult::OK);
+    ASSERT_EQ(known.start(known.config()), StartResult::OK);
     RawClient client;
     ASSERT_TRUE(known.server.connect_url(client.url()));
     const std::string id = client.noise.identity().peer_id();
@@ -527,17 +530,15 @@ Reading read_one(RawClient& client) {
     if (!plaintext || plaintext->empty()) {
         return reading;
     }
-    if (plaintext->front() == sendspin::server::MESSAGE_ID_JSON) {
+    if (plaintext->front() == wire::JSON_ID) {
         reading.json.assign(plaintext->begin() + 1, plaintext->end());
         return reading;
     }
-    if (plaintext->front() == 4 && plaintext->size() > 13) {
-        int64_t ts = 0;
-        for (size_t i = 1; i < 9; ++i) {
-            ts = (ts << 8) | (*plaintext)[i];
-        }
-        reading.ts = ts;
-        const auto frames = static_cast<int64_t>((plaintext->size() - 13) / 4);
+    if (plaintext->front() == wire::AUDIO_CHUNK_ID &&
+        plaintext->size() > wire::AUDIO_CHUNK_HEADER) {
+        reading.ts = wire::timestamp_at(*plaintext);
+        const auto frames =
+            static_cast<int64_t>((plaintext->size() - wire::AUDIO_CHUNK_HEADER) / 4);
         reading.duration_us = frames * 1000000 / RATE;
     }
     return reading;

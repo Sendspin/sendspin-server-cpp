@@ -132,11 +132,6 @@ public:
     /// @param max_fragment_plaintext as write_fragment()'s max_plaintext
     OutboundPlaintext take_control(size_t max_fragment_plaintext);
 
-    /// @brief Control messages taken whole, or to their last fragment, so far
-    uint64_t control_taken() const {
-        return this->control_taken_;
-    }
-
     /// @brief Markers queued, which suppress the drain watch
     uint32_t markers_queued() const {
         return this->markers_;
@@ -168,7 +163,6 @@ private:
     Ring<ControlItem> control_;
     std::optional<Fragmenting> fragmenting_;
     size_t control_bytes_{0};
-    uint64_t control_taken_{0};
     uint32_t markers_{0};
 };
 

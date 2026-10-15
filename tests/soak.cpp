@@ -69,6 +69,7 @@ using sendspin::server::InputFormat;
 using sendspin::server::InputKind;
 using sendspin::server::InputOptions;
 using sendspin::server::InputState;
+using sendspin::server::MAX_VOLUME;
 using sendspin::server::OpenedInput;
 using sendspin::server::SampleFormat;
 using sendspin::server::SendspinServer;
@@ -664,7 +665,7 @@ private:
             if (!this->stopping_) {
                 ++this->closes_;
                 // The server dials a dropped client again; an operator's dial hurries it
-                this->server_.connect_url(this->url_);
+                EXPECT_TRUE(this->server_.connect_url(this->url_));
             }
         }
     }
@@ -1596,10 +1597,11 @@ private:
             // and colors carry no audio
             const uint64_t pick = this->random_() % 4;
             if (pick == 0) {
-                this->server_.set_group_volume(group, static_cast<uint32_t>(this->random_() % 101));
+                EXPECT_TRUE(this->server_.set_group_volume(
+                    group, static_cast<uint32_t>(this->random_() % (MAX_VOLUME + 1))));
                 this->note({"volume", now, now, "-", ""});
             } else if (pick == 1) {
-                this->server_.set_group_mute(group, this->random_() % 2 == 0);
+                EXPECT_TRUE(this->server_.set_group_mute(group, this->random_() % 2 == 0));
                 this->note({"mute", now, now, "-", ""});
             } else if (pick == 2) {
                 // An image now or up to 30 s ahead, so some are announced ahead and some replaced

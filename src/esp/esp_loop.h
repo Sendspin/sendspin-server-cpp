@@ -26,6 +26,7 @@
 #include "inbound_ring.h"
 #include "memory.h"
 #include "profile.h"
+#include "ring.h"
 #include "shared.h"
 #include "task_queue.h"
 #include "transport.h"
@@ -142,10 +143,8 @@ private:
     uint64_t order_{0};
     /// Guarded by mutex_: the handlers posted, each with its order
     TaskQueue posted_{POSTED_BYTES, MemoryLocation::PREFER_EXTERNAL};
-    /// Guarded by mutex_: a circular queue of DRAIN_SLOTS
-    std::vector<Drain> drains_;
-    size_t drain_head_{0};
-    size_t drain_count_{0};
+    /// Guarded by mutex_: the drains queued, at most DRAIN_SLOTS
+    Ring<Drain> drains_{DRAIN_SLOTS, DRAIN_SLOTS, MemoryLocation::PREFER_EXTERNAL};
     Wakeup::Impl* wake_head_{nullptr};
     Wakeup::Impl* wake_tail_{nullptr};
     /// Guarded by mutex_
