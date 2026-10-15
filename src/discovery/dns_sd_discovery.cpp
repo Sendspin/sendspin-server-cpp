@@ -16,7 +16,9 @@
 /// @brief platform_discovery() on macOS: the system's dns_sd API over one shared connection to
 /// mDNSResponder, served by a thread of its own, which connects, and connects again after a delay
 /// whenever it cannot reach mDNSResponder. Every DNSServiceRef is used on that thread only, and
-/// stop() releases what is left after it ends.
+/// stop() releases what is left after it ends. A failed poll() is reported as unavailable and
+/// waited out like an unreachable mDNSResponder; a failed wake pipe ends the thread, reported as
+/// unavailable.
 
 #include "discovery_policy.h"
 #include "sendspin/server/discovery.h"
@@ -24,13 +26,14 @@
 #include <dns_sd.h>
 #include <net/if.h>
 #include <netinet/in.h>
-#include <sys/select.h>
-#include <sys/time.h>
+#include <poll.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -48,7 +51,9 @@ namespace {
 constexpr const char* SERVER_SERVICE = "_sendspin-server._tcp";
 constexpr const char* CLIENT_SERVICE = "_sendspin._tcp";
 /// The wait before connecting to mDNSResponder again
-constexpr int RECONNECT_DELAY_S = 5;
+constexpr int RECONNECT_DELAY_MS = 5000;
+/// How often a wait after a failed poll() checks for stop()
+constexpr int STOP_CHECK_MS = 100;
 
 /// The TXT value of key, if present
 std::optional<std::string> txt_value(uint16_t length, const unsigned char* txt, const char* key) {
@@ -97,6 +102,7 @@ public:
     bool start(const DiscoveryRequest& request, DiscoverySink& sink) override {
         this->sink_ = &sink;
         this->request_ = request;
+        this->stopping_ = false;
         if (pipe(this->wake_.data()) != 0) {
             this->release();
             return false;
@@ -112,6 +118,7 @@ public:
 private:
     void shut_down() {
         if (this->thread_.joinable()) {
+            this->stopping_ = true;
             const char byte = 0;
             // The thread ends on any byte, or on the pipe's end
             while (write(this->wake_[1], &byte, 1) < 0 && errno == EINTR) {}
@@ -172,7 +179,8 @@ private:
             this->connection_ = nullptr;
             return false;
         }
-        if ((this->request_.advertise && !this->advertise(*this->request_.advertise)) ||
+        if (DNSServiceRefSockFD(this->connection_) < 0 ||
+            (this->request_.advertise && !this->advertise(*this->request_.advertise)) ||
             (this->request_.browse && !this->browse())) {
             this->disconnect();
             return false;
@@ -201,36 +209,57 @@ private:
                 reported_unavailable = true;
                 this->sink_->on_unavailable();
             }
-            fd_set read{};
-            FD_ZERO(&read);
-            FD_SET(this->wake_[0], &read);
-            int max_fd = this->wake_[0];
-            timeval delay{RECONNECT_DELAY_S, 0};
+            std::array<pollfd, 2> fds{};
+            fds[0] = {this->wake_[0], POLLIN, 0};
+            nfds_t count = 1;
             if (this->connection_ != nullptr) {
                 if (std::exchange(reported_unavailable, false)) {
                     this->sink_->on_available();
                 }
-                const int fd = DNSServiceRefSockFD(this->connection_);
-                FD_SET(fd, &read);
-                max_fd = std::max(max_fd, fd);
+                fds[1] = {DNSServiceRefSockFD(this->connection_), POLLIN, 0};
+                count = 2;
             }
-            const int ready = select(max_fd + 1, &read, nullptr, nullptr,
-                                     this->connection_ != nullptr ? nullptr : &delay);
+            const int ready =
+                poll(fds.data(), count, this->connection_ != nullptr ? -1 : RECONNECT_DELAY_MS);
             if (ready < 0 && errno == EINTR) {
                 continue;
             }
-            if (ready < 0 || FD_ISSET(this->wake_[0], &read)) {
+            if (ready < 0 || (fds[0].revents & (POLLERR | POLLNVAL)) != 0) {
+                this->disconnect();
+                if (!std::exchange(reported_unavailable, true)) {
+                    this->sink_->on_unavailable();
+                }
+                // stop() cannot wake a thread whose wake pipe failed
+                if (ready >= 0 || !this->wait_out_failure()) {
+                    return;
+                }
+                continue;
+            }
+            // stop() asked the thread to end
+            if (fds[0].revents != 0) {
                 return;
             }
-            // mDNSResponder went away (kDNSServiceErr_ServiceNotRunning): connect again
-            if (this->connection_ != nullptr &&
-                FD_ISSET(DNSServiceRefSockFD(this->connection_), &read) &&
-                DNSServiceProcessResult(this->connection_) != kDNSServiceErr_NoError) {
+            // The socket is invalid or mDNSResponder went away (kDNSServiceErr_ServiceNotRunning):
+            // connect again
+            if (count == 2 && fds[1].revents != 0 &&
+                ((fds[1].revents & POLLNVAL) != 0 ||
+                 DNSServiceProcessResult(this->connection_) != kDNSServiceErr_NoError)) {
                 this->disconnect();
                 reported_unavailable = true;
                 this->sink_->on_unavailable();
             }
         }
+    }
+
+    /// Waits RECONNECT_DELAY_MS without poll(); false when stop() asks the thread to end meanwhile
+    bool wait_out_failure() const {
+        for (int waited = 0; waited < RECONNECT_DELAY_MS; waited += STOP_CHECK_MS) {
+            if (this->stopping_) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(STOP_CHECK_MS));
+        }
+        return !this->stopping_;
     }
 
     /// Frees every operation: deallocating the shared connection releases the operations on it
@@ -404,6 +433,8 @@ private:
     DiscoveryRequest request_;
     DNSServiceRef connection_{nullptr};
     std::array<int, 2> wake_{-1, -1};
+    /// Set by stop() before it writes to the wake pipe
+    std::atomic<bool> stopping_{false};
     std::map<std::string, std::unique_ptr<Instance>> instances_;
     std::thread thread_;
 };

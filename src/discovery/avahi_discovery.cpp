@@ -49,6 +49,8 @@ constexpr const char* SERVER_SERVICE = "_sendspin-server._tcp";
 constexpr const char* CLIENT_SERVICE = "_sendspin._tcp";
 /// The wait before resolving an instance again after its resolver failed
 constexpr unsigned RESOLVE_RETRY_MS = 5000;
+/// The wait before advertising again after the advertisement failed
+constexpr unsigned PUBLISH_RETRY_MS = 5000;
 
 /// Avahi defines no enumerator for the empty flag sets
 constexpr AvahiLookupFlags NO_LOOKUP_FLAGS{};
@@ -186,12 +188,7 @@ private:
     void begin(AvahiClient* client) {
         this->client_ = client;
         if (this->request_.advertise) {
-            if (this->group_ == nullptr) {
-                this->group_ = avahi_entry_group_new(client, &AvahiDiscovery::on_group_state, this);
-            }
-            if (this->group_ != nullptr && avahi_entry_group_is_empty(this->group_) != 0) {
-                this->publish();
-            }
+            this->advertise();
         }
         if (this->request_.browse && this->browser_ == nullptr) {
             this->browser_ = avahi_service_browser_new(client, AVAHI_IF_UNSPEC, AVAHI_PROTO_UNSPEC,
@@ -215,14 +212,29 @@ private:
             avahi_service_browser_free(this->browser_);
             this->browser_ = nullptr;
         }
+        this->cancel_publish_retry();
         if (this->group_ != nullptr) {
             avahi_entry_group_free(this->group_);
             this->group_ = nullptr;
         }
     }
 
+    /// Publishes the advertisement unless its entry group holds it; a group that cannot be made is
+    /// tried again later
+    void advertise() {
+        if (this->group_ == nullptr) {
+            this->group_ =
+                avahi_entry_group_new(this->client_, &AvahiDiscovery::on_group_state, this);
+        }
+        if (this->group_ == nullptr) {
+            this->publish_later();
+        } else if (avahi_entry_group_is_empty(this->group_) != 0) {
+            this->publish();
+        }
+    }
+
     /// Adds the advertised service to the entry group and commits it, under the next alternative
-    /// name while the name is in use
+    /// name while the name is in use; one that cannot be added or committed is tried again later
     void publish() {
         if (!this->request_.advertise) {
             return;
@@ -240,12 +252,45 @@ private:
                 this->rename();
                 continue;
             }
-            if (added == 0) {
-                avahi_entry_group_commit(this->group_);
+            if (added != 0 || avahi_entry_group_commit(this->group_) < 0) {
+                this->publish_later();
             }
             break;
         }
         avahi_string_list_free(txt);
+    }
+
+    /// Empties the entry group and advertises again after PUBLISH_RETRY_MS, or when the client
+    /// runs again
+    void publish_later() {
+        if (this->group_ != nullptr) {
+            avahi_entry_group_reset(this->group_);
+        }
+        if (this->publish_retry_ != nullptr) {
+            return;
+        }
+        const AvahiPoll* poll = avahi_threaded_poll_get(this->poll_);
+        timeval at{};
+        avahi_elapse_time(&at, PUBLISH_RETRY_MS, 0);
+        this->publish_retry_ =
+            poll->timeout_new(poll, &at, &AvahiDiscovery::on_publish_retry, this);
+    }
+
+    static void on_publish_retry(AvahiTimeout* /*timeout*/, void* context) {
+        auto* self = static_cast<AvahiDiscovery*>(context);
+        self->cancel_publish_retry();
+        // A client that is not running advertises in begin() once it runs again
+        if (avahi_client_get_state(self->client_) == AVAHI_CLIENT_S_RUNNING) {
+            self->advertise();
+        }
+    }
+
+    void cancel_publish_retry() {
+        if (this->publish_retry_ != nullptr) {
+            const AvahiPoll* poll = avahi_threaded_poll_get(this->poll_);
+            poll->timeout_free(this->publish_retry_);
+            this->publish_retry_ = nullptr;
+        }
     }
 
     /// The next alternative instance name, with the entry group emptied for it
@@ -259,12 +304,13 @@ private:
     static void on_group_state(AvahiEntryGroup* /*group*/, AvahiEntryGroupState state,
                                void* context) {
         auto* self = static_cast<AvahiDiscovery*>(context);
-        if (state != AVAHI_ENTRY_GROUP_COLLISION) {
-            return;
+        if (state == AVAHI_ENTRY_GROUP_COLLISION) {
+            // Another service holds the name: advertise under the next alternative
+            self->rename();
+            self->publish();
+        } else if (state == AVAHI_ENTRY_GROUP_FAILURE) {
+            self->publish_later();
         }
-        // Another service holds the name: advertise under the next alternative
-        self->rename();
-        self->publish();
     }
 
     static void on_browsed(AvahiServiceBrowser* /*browser*/, AvahiIfIndex interface,
@@ -437,6 +483,7 @@ private:
             avahi_service_browser_free(this->browser_);
             this->browser_ = nullptr;
         }
+        this->cancel_publish_retry();
         if (this->group_ != nullptr) {
             avahi_entry_group_free(this->group_);
             this->group_ = nullptr;
@@ -457,6 +504,8 @@ private:
     /// Set once avahi_client_new() returns; its callbacks before then get the client as argument
     AvahiClient* client_{nullptr};
     AvahiEntryGroup* group_{nullptr};
+    /// Pending while the advertisement waits to be published again after a failure
+    AvahiTimeout* publish_retry_{nullptr};
     AvahiServiceBrowser* browser_{nullptr};
     std::string instance_name_;
     std::map<std::string, Instance> instances_;
