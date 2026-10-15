@@ -87,6 +87,8 @@ constexpr uint32_t HTTPD_STOPPED_POLL_MS = 10;
 /// frame and stops holds all of their reads for this long.
 constexpr int HTTPD_RECV_WAIT_S = 2;
 
+class SessionLink;
+
 /// What httpd's callbacks reach, as its global user context: held by the Listener, and through
 /// keep by itself from listen()'s success until httpd stops (by the stopper task while it runs),
 /// or for good when httpd fails to stop
@@ -106,6 +108,10 @@ struct ListenerState {
     std::atomic<bool> stopped{false};
     std::atomic<int> sessions{0};
     SharedPtr<ListenerState> keep;
+    /// Guards links only, held to copy or set a slot
+    std::mutex links_mutex;
+    /// Every session httpd has open, so a stop can end them from its own task
+    std::array<SharedPtr<SessionLink>, HTTPD_SESSIONS> links;
 };
 
 void stop_when_idle(ListenerState& state);
@@ -190,7 +196,7 @@ public:
 
     /// httpd closes the session: after this, the descriptor may be another session's
     void on_session_closed() {
-        // A paused session closes only as httpd stops; its pause ends with it
+        // A pause still held as httpd closes the session ends with it
         if (void* paused = this->hold_.take_pause()) {
             httpd_req_async_handler_complete(static_cast<httpd_req_t*>(paused));
         }
@@ -209,6 +215,11 @@ public:
     /// waiting for an inbound slot stops waiting
     void end_session() {
         this->drop_inbound();
+        this->shutdown_socket(SHUT_RDWR);
+    }
+
+    /// Shuts the socket, so a read of it in progress on httpd's task returns at once
+    void shut_socket() {
         this->shutdown_socket(SHUT_RDWR);
     }
 
@@ -278,29 +289,57 @@ SharedPtr<SessionLink> link_of(httpd_handle_t server, int fd) {
     return slot != nullptr ? *slot : nullptr;
 }
 
-/// httpd's task, queued ahead of httpd_stop(): httpd closes its control socket before the sessions
-/// still open, and ending a pause writes to it, so every session ends here first, its held message
-/// dropped and its pause ended
-void end_sessions(void* arg) {
-    auto* server = static_cast<httpd_handle_t>(arg);
-    std::array<int, HTTPD_SESSIONS> fds{};
-    size_t count = fds.size();
-    if (httpd_get_client_list(server, &count, fds.data()) != ESP_OK) {
-        return;
+/// httpd's task: records an open session; false once the listener is closed, or when every slot
+/// is taken, which httpd's own cap on its sessions rules out. Read under the lock, closed keeps a
+/// session from being recorded after a stop's copy, since every stop sets it first.
+bool track_link(ListenerState& state, const SharedPtr<SessionLink>& link) {
+    const std::lock_guard<std::mutex> lock(state.links_mutex);
+    if (state.closed.load(std::memory_order_acquire)) {
+        return false;
     }
-    for (size_t i = 0; i < count; ++i) {
-        if (const SharedPtr<SessionLink> link = link_of(server, fds[i])) {
-            link->end_session();
+    for (SharedPtr<SessionLink>& slot : state.links) {
+        if (!slot) {
+            slot = link;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// httpd's task: forgets a session httpd closes
+void untrack_link(ListenerState& state, const SessionLink* link) {
+    const std::lock_guard<std::mutex> lock(state.links_mutex);
+    for (SharedPtr<SessionLink>& slot : state.links) {
+        if (slot.get() == link) {
+            slot = nullptr;
+            return;
         }
     }
 }
 
-/// Stops httpd, ending its sessions first; false when httpd_stop() failed and httpd runs on
-bool stop_httpd(httpd_handle_t server) {
-    // Unqueued, a session still paused has its pause ended as httpd closes it, which writes to
-    // httpd's control socket after httpd closed it
-    httpd_queue_work(server, &end_sessions, server);
-    return httpd_stop(server) == ESP_OK;
+/// Stops httpd, ending its sessions first on the calling task, never httpd's: ending a paused
+/// session writes to httpd's control socket, which may wait for a slot only httpd's task frees,
+/// and a read in progress there holds httpd's task until its socket is shut. False when
+/// httpd_stop() failed and httpd runs on. Called with closed set.
+bool stop_httpd(ListenerState& state) {
+    std::array<SharedPtr<SessionLink>, HTTPD_SESSIONS> open;
+    {
+        const std::lock_guard<std::mutex> lock(state.links_mutex);
+        open = state.links;
+    }
+    // Every socket first, so no read holds httpd's task while the pauses end
+    for (const SharedPtr<SessionLink>& link : open) {
+        if (link) {
+            link->shut_socket();
+        }
+    }
+    // Then the held messages, each pause ending with its message
+    for (const SharedPtr<SessionLink>& link : open) {
+        if (link) {
+            link->drop_inbound();
+        }
+    }
+    return httpd_stop(state.server) == ESP_OK;
 }
 
 }  // namespace
@@ -375,7 +414,7 @@ public:
             // closed is set, so a session that opened meanwhile never takes it as it closes.
             state->stopping.store(true, std::memory_order_release);
             state->closed.store(true, std::memory_order_release);
-            if (!stop_httpd(state->server)) {
+            if (!stop_httpd(*state)) {
                 // httpd runs on, holding its state
                 state->keep = state;
             }
@@ -400,7 +439,7 @@ public:
         ListenerState& state = *this->state_;
         while (!state.stopped.load(std::memory_order_acquire)) {
             if (!state.stopping.exchange(true, std::memory_order_acq_rel)) {
-                if (stop_httpd(state.server)) {
+                if (stop_httpd(state)) {
                     state.stopped.store(true, std::memory_order_release);
                     state.keep.reset();
                 }
@@ -515,6 +554,9 @@ private:
         const int on = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
         auto link = make_shared_external<SessionLink>(std::move(loop), *state, fd);
+        if (!track_link(*state, link)) {
+            return ESP_FAIL;
+        }
         state->sessions.fetch_add(1, std::memory_order_acq_rel);
         httpd_sess_set_ctx(server, fd, new SharedPtr<SessionLink>(link),
                            [](void* ctx) { delete static_cast<SharedPtr<SessionLink>*>(ctx); });
@@ -527,6 +569,9 @@ private:
         const SharedPtr<SessionLink> link = link_of(server, fd);
         if (link) {
             link->on_session_closed();
+            if (state != nullptr) {
+                untrack_link(*state, link.get());
+            }
         }
         // httpd closes the descriptor only without a close_fn; shutting reads first keeps lwIP
         // from delivering to a socket being torn down
@@ -603,7 +648,7 @@ void stop_when_idle(ListenerState& state) {
         {
             const SharedPtr<LoopCore> stopped_loop = (*stopping)->loop.lock();
             ListenerState& stopped = **stopping;
-            if (stop_httpd(stopped.server)) {
+            if (stop_httpd(stopped)) {
                 stopped.stopped.store(true, std::memory_order_release);
             } else {
                 // httpd runs on, holding its state; the listener's destruction tries again
