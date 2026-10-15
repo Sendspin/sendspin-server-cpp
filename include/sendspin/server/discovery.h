@@ -83,8 +83,9 @@ public:
 };
 
 /// @brief Advertises and browses for one run of the server. start() is called from
-/// SendspinServer::start(), and stop() once after a successful start(), from the server's core
-/// thread as it stops; a provider may be started again after stop() for a later run.
+/// SendspinServer::start(), and stop() once after a successful start(): from the server's core
+/// thread as it stops, or from SendspinServer::start() when the server cannot start its core
+/// thread; a provider may be started again after stop() for a later run.
 class DiscoveryProvider {
 public:
     virtual ~DiscoveryProvider() = default;

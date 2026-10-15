@@ -678,10 +678,18 @@ private:
                 running->sink.on_unavailable();
             }
         }
-        running->core_thread = start_thread(ThreadRole::CORE, [run = running.get()] {
-            run->loop.run();
-            run->core_owner.reset();
-        });
+        try {
+            running->core_thread = start_thread(ThreadRole::CORE, [run = running.get()] {
+                run->loop.run();
+                run->core_owner.reset();
+            });
+        } catch (...) {
+            // The provider's sink goes with the run
+            if (running->discovery) {
+                running->discovery->stop();
+            }
+            throw;
+        }
         const std::lock_guard<std::mutex> lock(this->mutex_);
         this->running_ = std::move(running);
         return StartResult::OK;

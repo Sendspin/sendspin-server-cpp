@@ -16,9 +16,10 @@
 /// @brief The source role end to end (spec roles/source/v1.md): sources activated only with
 /// their approval, a routed source's audio streamed into a group and played by its players, PCM
 /// and FLAC bit for bit and Opus decoded, a stall's backlog dropped and a long gap starting a new
-/// run, and the protocol errors that close a source's connection. The sources are in-process
-/// sendspin-cpp clients and the raw test client (for FLAC, which the sendspin-cpp source does not
-/// send, timestamps of the test's choosing and misbehavior); the players are sendspin-cpp clients.
+/// run, the protocol errors that close a source's connection, and a stop that reports the source's
+/// stream stopped before its client. The sources are in-process sendspin-cpp clients and the raw
+/// test client (for FLAC, which the sendspin-cpp source does not send, timestamps of the test's
+/// choosing and misbehavior); the players are sendspin-cpp clients.
 
 #include "clock.h"
 #include "crypto/keys.h"
@@ -597,6 +598,57 @@ TEST(ServerSources, ReportTheOpenStreamWhereverItIsRouted) {
     ASSERT_EQ(again.result, RouteSourceResult::OK);
     s.run_until([&] { return s.recorder.count(started(s.group())) == 2; });
     raw.close();
+}
+
+// SendspinServer::stop(): a routed source's open stream is reported stopped before its client is
+// reported stopped, as when its connection closes, and nothing is reported after the client; for a
+// routed source that never opened a stream, only its client is reported. The second start(), with
+// no listener, joins the first run's dispatch thread, so every report of the stop is recorded by
+// then. Takes about 2 s: the raw client never answers the server's close, so each stop waits out
+// its grace.
+TEST(ServerSources, ReportASourceStoppedBeforeItsClientWhenTheServerStops) {
+    const Signal signal(16);
+    struct Row {
+        const char* name;
+        bool opened;
+    };
+    const Row rows[] = {
+        {"an open stream", true},
+        {"no stream", false},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        Rig s(signal);
+        RawClient raw;
+        const std::string id = raw.noise.identity().peer_id();
+        const sendspin::server::GroupId group = s.group();
+        const sendspin::server::RoutedSource routed = s.server.route_source(id, group);
+        ASSERT_EQ(routed.result, RouteSourceResult::OK);
+        ASSERT_NO_FATAL_FAILURE(connect_raw_source(s, raw));
+        EXPECT_NE(raw.receive_until("server/command").find("start"), std::string::npos);
+        if (row.opened) {
+            raw.send_json(
+                R"({"type":"client-stream/start","payload":{"source":{"codec":"pcm","channels":2,)"
+                R"("sample_rate":48000,"bit_depth":16}}})");
+            s.recorder.wait_for(
+                Recorder::source_started(id, group, StreamFormat{StreamCodec::PCM, RATE, 2, 16}));
+        }
+
+        s.server.stop();
+        ASSERT_EQ(s.server.start(sendspin::server::test::local_config(), &s.provider, nullptr),
+                  StartResult::OK);
+        const std::vector<Recorder::Entry> entries = s.recorder.entries();
+        ASSERT_GE(entries.size(), 2U);
+        const std::string source_stopped =
+            "source stopped " + id + " " + std::to_string(group.value);
+        EXPECT_EQ(s.recorder.count(source_stopped), row.opened ? 1U : 0U);
+        if (row.opened) {
+            EXPECT_EQ(entries[entries.size() - 2].what, source_stopped);
+        }
+        const auto stopped = static_cast<int>(sendspin::server::DisconnectReason::SERVER_STOPPED);
+        EXPECT_EQ(entries.back().what, "disconnected " + id + " " + std::to_string(stopped));
+        raw.close();
+    }
 }
 
 // roles/source/v1.md "Unpaired access": an approval for playback activates the client without its
