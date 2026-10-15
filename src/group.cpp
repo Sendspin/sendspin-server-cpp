@@ -734,33 +734,31 @@ void Group::on_anchor_shift(const AnchorShift& shift) {
     // A live epoch's list stays short
     const int64_t now = now_us();
     sched::fold_shifts(*this->anchor_, sched::last_begun_cell(*this->anchor_, now));
-    ++this->stalls_.rebases;
-    this->stalls_.shifted_us += shift.delta_us;
+    this->stalls_.add_rebase(shift.delta_us);
     this->report_stalls(now);
 }
 
 void Group::report_stalls(int64_t now) {
-    Stalls& stalls = this->stalls_;
-    if (stalls.rebases == 0 && stalls.late_frames == 0) {
+    const sched::StallTake taken = this->stalls_.take(now);
+    if (taken.due_us) {
+        // Reported once due, should no stall follow to report them
+        this->stall_timer_.start(*taken.due_us,
+                                 this->guarded([this] { this->report_stalls(now_us()); }));
         return;
     }
-    if (stalls.reported_us != 0 && now - stalls.reported_us < Stalls::STALL_REPORT_US) {
-        // Reported once due, should no stall follow to report them
-        this->stall_timer_.start(stalls.reported_us + Stalls::STALL_REPORT_US,
-                                 this->guarded([this] { this->report_stalls(now_us()); }));
+    if (!taken.report) {
         return;
     }
     this->stall_timer_.cancel();
     if (this->hooks_.info) {
+        const sched::StallReport& report = *taken.report;
         this->hooks_.info(log_format(
             "group %s: %u rebases (%lld ms in all) and %u frames ready after their play time "
             "since the last report",
-            printable(this->name_).c_str(), static_cast<unsigned>(stalls.rebases),
-            static_cast<long long>(stalls.shifted_us / sched::US_PER_MS),
-            static_cast<unsigned>(stalls.late_frames)));
+            printable(this->name_).c_str(), static_cast<unsigned>(report.rebases),
+            static_cast<long long>(report.shifted_us / sched::US_PER_MS),
+            static_cast<unsigned>(report.late_frames)));
     }
-    stalls = Stalls{};
-    stalls.reported_us = now;
 }
 
 void Group::on_drain_started(const DrainStarted& drain) {
@@ -792,7 +790,7 @@ void Group::on_frame(FrameReady& ready) {
         it->second.skip_to(ready.frame.epoch, ready.frame.index, now);
     } else if (ready.frame.epoch == this->epoch_ && ready.frame.ts_us <= now) {
         // Pruned as it arrives: no player gets it
-        ++this->stalls_.late_frames;
+        this->stalls_.add_late_frame();
         this->report_stalls(now);
     }
     it->second.append(std::move(ready.frame), now);

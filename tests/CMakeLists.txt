@@ -58,6 +58,7 @@ add_executable(sendspin_server_cpp_tests
     test_sched_lowering.cpp
     test_sched_property.cpp
     test_sched_selection.cpp
+    test_sched_stalls.cpp
     test_sched_timeline.cpp
     test_send_queues.cpp
     test_server.cpp
@@ -187,8 +188,9 @@ set_source_files_properties(test_group_audio.cpp PROPERTIES COMPILE_OPTIONS -fno
 # has begun, which no observable state shows. Its stall tests set the state an epoch's start sets
 # on a Group with no input (playing_, epoch_, anchor_, rings_, pipelines_.analyses), call its
 # on_frame(), on_anchor_shift() and report_stalls() as the group-to-core FIFO and its timer do, and
-# set Group::stalls_.reported_us to a chosen last report, so a held-back report is due within the
-# test rather than after 10 s. It calls Group::on_wake() as the group's wakeup does, since a
+# replace Group::stalls_ with a count whose last report was made at a chosen time, so a held-back
+# report is due within the test rather than after 10 s, and take from it to read the counts, which
+# only the log line shows otherwise. It calls Group::on_wake() as the group's wakeup does, since a
 # write's signal can fold into a pipeline job's that is not posted yet, and reads HostView::slew_
 # and next_slew_ under HostView::mutex_, as only their storage shows that core freed the slew a
 # write left it.

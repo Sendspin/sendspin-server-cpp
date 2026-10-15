@@ -24,6 +24,7 @@
 #include "group.h"
 #include "group_audio.h"
 #include "host_view.h"
+#include "sched/stalls.h"
 #include "test_recorder.h"
 #include "transport.h"
 #include <gtest/gtest.h>
@@ -34,6 +35,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -582,17 +584,19 @@ struct StallGroup {
     }
 };
 
-// A group counts the rebases its pipelines post in its epoch, with their sum, and each player frame
-// that reaches its ring at or past its play time, once per instance; not a frame still ahead of its
-// time, one of another epoch, or an analysis's cell (which skips its ring instead). One report
-// carries them all and starts the count again.
+// A group counts the rebases its pipelines post in its epoch, with their shifts, and each player
+// frame that reaches its ring at or past its play time, once per instance; not a frame still ahead
+// of its time, one of another epoch, or an analysis's cell (which skips its ring instead). The
+// counts are read from Group::stalls_, as the log line is the only other place they show.
 TEST(GroupStalls, CountsRebasesAndPlayerFramesPastTheirPlayTime) {
     using sendspin::server::AnchorShift;
+    using sendspin::server::sched::STALL_REPORT_US;
     StallGroup s;
     sendspin::server::Group& group = *s.group;
     const int64_t now = sendspin::server::now_us();
-    // A report just made holds the counts back
-    group.stalls_.reported_us = now;
+    // A first stall is reported at once, which holds back the counts that follow
+    s.frame(StallGroup::PLAYER, StallGroup::EPOCH, now - 1);
+    ASSERT_EQ(s.taken().size(), 1U);
 
     s.frame(StallGroup::PLAYER, StallGroup::EPOCH, now - 1);
     s.frame(StallGroup::PLAYER, StallGroup::EPOCH, now - 1000);
@@ -604,54 +608,47 @@ TEST(GroupStalls, CountsRebasesAndPlayerFramesPastTheirPlayTime) {
     group.on_anchor_shift(AnchorShift{sendspin::server::sched::EpochId{2}, 30, 900'000});
     EXPECT_TRUE(s.taken().empty());
 
-    group.report_stalls(now + sendspin::server::Group::Stalls::STALL_REPORT_US);
-    const std::vector<std::string> lines = s.taken();
-    ASSERT_EQ(lines.size(), 1U);
-    EXPECT_NE(lines[0].find("group Kitchen: 2 rebases (500 ms in all) and 2 frames ready after "
-                            "their play time"),
-              std::string::npos)
-        << lines[0];
-    EXPECT_EQ(group.stalls_.rebases, 0U);
-    EXPECT_EQ(group.stalls_.late_frames, 0U);
+    const std::optional<sendspin::server::sched::StallReport> report =
+        group.stalls_.take(sendspin::server::now_us() + STALL_REPORT_US).report;
+    ASSERT_TRUE(report);
+    EXPECT_EQ(report->rebases, 2U);
+    EXPECT_EQ(report->shifted_us, 500'000);
+    EXPECT_EQ(report->late_frames, 2U);
 }
 
-// A stall with no report in the last STALL_REPORT_US is reported at once; within it, it is reported
-// once the period ends, by the group's timer when no stall follows, and a report with nothing
-// counted logs nothing
+// A stall with no report made (here a rebase) is logged at once; within STALL_REPORT_US of one it
+// is logged once the period ends, by the group's timer when no stall follows, and a report with
+// nothing counted logs nothing
 TEST(GroupStalls, ReportsAtMostEveryPeriodAndHoldsNothingBack) {
+    using sendspin::server::sched::STALL_REPORT_US;
     StallGroup s;
     sendspin::server::Group& group = *s.group;
     std::thread core([&] { s.loop.run(); });
     const int64_t now = sendspin::server::now_us();
     std::promise<void> counted;
     s.loop.post([&] {
-        s.frame(StallGroup::PLAYER, StallGroup::EPOCH, now - 1);
-        // White-box: the last report, so the next is due 100 ms from now
-        group.stalls_.reported_us =
-            sendspin::server::now_us() + 100'000 - sendspin::server::Group::Stalls::STALL_REPORT_US;
+        group.on_anchor_shift(sendspin::server::AnchorShift{StallGroup::EPOCH, 10, 300'000});
+        // White-box: the last report replaced by one made so that the next is due 100 ms from now
+        group.stalls_ = sendspin::server::sched::StallCount{};
+        group.stalls_.add_late_frame();
+        (void)group.stalls_.take(sendspin::server::now_us() + 100'000 - STALL_REPORT_US);
         s.frame(StallGroup::PLAYER, StallGroup::EPOCH, now - 1);
         counted.set_value();
     });
     counted.get_future().get();
-    std::vector<std::string> lines = s.taken();
-    ASSERT_EQ(lines.size(), 1U);
-    EXPECT_NE(lines[0].find("0 rebases (0 ms in all) and 1 frames ready"), std::string::npos)
-        << lines[0];
+    EXPECT_EQ(s.taken().size(), 1U);
 
     // The held-back frame, by the timer; a regression hangs into the suite watchdog
-    lines.clear();
+    std::vector<std::string> lines;
     while (lines.empty()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         lines = s.taken();
     }
-    ASSERT_EQ(lines.size(), 1U);
-    EXPECT_NE(lines[0].find("0 rebases (0 ms in all) and 1 frames ready"), std::string::npos)
-        << lines[0];
+    EXPECT_EQ(lines.size(), 1U);
 
     std::promise<void> reported;
     s.loop.post([&] {
-        group.report_stalls(sendspin::server::now_us() +
-                            (2 * sendspin::server::Group::Stalls::STALL_REPORT_US));
+        group.report_stalls(sendspin::server::now_us() + (2 * STALL_REPORT_US));
         reported.set_value();
     });
     reported.get_future().get();

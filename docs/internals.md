@@ -131,6 +131,7 @@ Send: after every event the driver runs its pump. With a message to send and no 
 | `lowering.h` | Bringing a live input's raised latency back down within an epoch |
 | `run_view.h` | The host view's run, stop latch and staged drain |
 | `selection.h` | The pump's `select_next()`, `item_ready()`, `next_wake()` and the drain watch |
+| `stalls.h` | `StallCount`, a group's rebases and late player frames since its last report, and when the next is due |
 
 ## ESP-IDF
 
