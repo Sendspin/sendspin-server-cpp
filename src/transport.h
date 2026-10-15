@@ -360,7 +360,8 @@ public:
     /// @param loop held weakly: a signal that finds it destroyed does nothing
     /// @param on_wake run on the loop's thread
     Wakeup(EventLoop& loop, std::function<void()> on_wake);
-    /// @brief A pending run is discarded, and so is every later signal. On the loop's thread.
+    /// @brief A pending run is discarded, and so is every later signal. On the loop's thread,
+    /// from the Wakeup's own run too.
     ~Wakeup();
     Wakeup(const Wakeup&) = delete;
     Wakeup& operator=(const Wakeup&) = delete;

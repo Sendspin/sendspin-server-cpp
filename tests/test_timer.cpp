@@ -24,6 +24,7 @@
 
 #include <chrono>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -122,6 +123,32 @@ TEST_F(TimerTest, DroppingAWakeupDiscardsItsPendingRun) {
     this->io.restart();
     this->io.poll();
     EXPECT_TRUE(this->calls.empty());
+}
+
+// A run keeps its closure for the next signal's run, and a run that drops its own Wakeup
+// finishes with its captures intact; its closure is released then, though a handle still holds
+// the Wakeup's state
+TEST_F(TimerTest, ARunThatDropsItsWakeupFinishes) {
+    std::unique_ptr<Wakeup> wakeup;
+    // Heap storage in the closure, so ASan reports a closure freed under its run
+    const std::string tag(64, 'w');
+    auto capture = std::make_shared<int>(0);
+    const std::weak_ptr<int> captured = capture;
+    wakeup =
+        std::make_unique<Wakeup>(this->loop, [this, &wakeup, tag, capture = std::move(capture)] {
+            if (this->calls.size() == 1) {
+                wakeup.reset();
+            }
+            this->calls.push_back(tag.back());
+        });
+    const Wakeup::Handle handle = wakeup->handle();
+    wakeup->signal();
+    this->io.poll();
+    this->io.restart();
+    wakeup->signal();
+    this->io.poll();
+    EXPECT_EQ(this->calls, (std::vector<char>{'w', 'w'}));
+    EXPECT_TRUE(captured.expired());
 }
 
 // A signal from a handle after the loop is gone does nothing
