@@ -909,8 +909,25 @@ std::string ServerCore::record_owner(const std::string& client_id) const {
     return "a client not connected";
 }
 
-void ServerCore::save_record(const std::string& client_id, std::function<void(bool)> done) {
+void ServerCore::save_record(const std::string& client_id) {
     const ClientRecord* record = this->records_.find(client_id);
+    const auto unsaved = this->unsaved_records_.find(client_id);
+    if (record == nullptr || unsaved == this->unsaved_records_.end()) {
+        this->save_record(client_id, record, nullptr);
+        return;
+    }
+    // pairing.md "server/pair-finalize": only its own save persists a long-term PSK, so a save
+    // behind it writes the record as put_back() would leave it, and a change whose save lands is
+    // saved again
+    unsaved->second.saved_meanwhile = true;
+    // A record the change created and put_back() removes is not written
+    if (const std::optional<ClientRecord> kept = without_change(record, unsaved->second)) {
+        this->save_record(client_id, &*kept, nullptr);
+    }
+}
+
+void ServerCore::save_record(const std::string& client_id, const ClientRecord* record,
+                             std::function<void(bool)> done) {
     const std::optional<size_t> slot = this->records_.slot_of(client_id);
     auto blob = std::make_shared<RecordBlob>();
     const bool encoded = record != nullptr && encode_client_record(*record, blob->bytes);
@@ -1083,8 +1100,19 @@ void ServerCore::store_long_term_psk(const std::string& client_id, const Psk& ps
     this->unsaved_records_.emplace(client_id,
                                    UnsavedRecord{std::move(before), existing != nullptr, false});
     this->records_.set(record);
-    this->save_record(client_id, [this, id = client_id, done = std::move(done)](bool saved) {
+    this->save_change(client_id, std::move(done));
+}
+
+void ServerCore::save_change(const std::string& client_id,
+                             std::function<void(bool, const UnsavedRecord&)> done) {
+    auto on_saved = [this, id = client_id, done = std::move(done)](bool saved) mutable {
         const auto found = this->unsaved_records_.find(id);
+        // A save of the record was made meanwhile, so the record in memory is saved again
+        if (saved && found->second.saved_meanwhile) {
+            found->second.saved_meanwhile = false;
+            this->save_change(id, std::move(done));
+            return;
+        }
         const UnsavedRecord unsaved = std::move(found->second);
         this->unsaved_records_.erase(found);
         if (saved) {
@@ -1109,24 +1137,31 @@ void ServerCore::store_long_term_psk(const std::string& client_id, const Psk& ps
         for (Client* client : connected) {
             this->reactivate(*client);
         }
-    });
+    };
+    this->save_record(client_id, this->records_.find(client_id), std::move(on_saved));
+}
+
+std::optional<ClientRecord> ServerCore::without_change(const ClientRecord* current,
+                                                       const UnsavedRecord& unsaved) {
+    if (!unsaved.existed && !unsaved.approval_set) {
+        return std::nullopt;
+    }
+    // A name saved meanwhile stays
+    ClientRecord restored = current != nullptr ? *current : unsaved.before;
+    restored.long_term_psk = unsaved.before.long_term_psk;
+    if (!unsaved.approval_set) {
+        restored.approval = unsaved.before.approval;
+    }
+    return restored;
 }
 
 void ServerCore::put_back(const std::string& client_id, const UnsavedRecord& unsaved) {
-    const ClientRecord* current = this->records_.find(client_id);
-    if (!unsaved.existed && !unsaved.approval_set) {
-        if (const std::optional<size_t> slot = this->records_.remove(client_id)) {
-            this->erase_record(client_id, *slot);
-        }
-    } else {
-        // A name saved meanwhile stays
-        ClientRecord restored = current != nullptr ? *current : unsaved.before;
-        restored.long_term_psk = unsaved.before.long_term_psk;
-        if (!unsaved.approval_set) {
-            restored.approval = unsaved.before.approval;
-        }
-        this->records_.set(restored);
+    if (const std::optional<ClientRecord> restored =
+            without_change(this->records_.find(client_id), unsaved)) {
+        this->records_.set(*restored);
         this->save_record(client_id);
+    } else if (const std::optional<size_t> slot = this->records_.remove(client_id)) {
+        this->erase_record(client_id, *slot);
     }
     const bool paired = this->long_term_psk(client_id) != nullptr;
     this->for_each_connection(client_id, [this, &client_id, paired](Client& client) {
