@@ -20,7 +20,7 @@
 #pragma once
 
 #include "audio_workers.h"
-#include "memory.h"
+#include "byte_ring.h"
 #include "messages.h"
 
 #include <cstddef>
@@ -110,7 +110,7 @@ public:
 
     /// @brief The largest item's bytes the feed holds
     size_t capacity() const {
-        return this->capacity_;
+        return this->items_.capacity();
     }
 
     /// @brief Keeps a fault for core. Decoder only; the decoder then signals core.
@@ -120,31 +120,10 @@ public:
     std::vector<SourceFault> take_faults();
 
 private:
-    struct Record {
-        SourceItem item;
-        size_t offset{0};
-        size_t size{0};
-    };
-
-    /// Where size bytes would go, or capacity_ when they do not fit. Under the mutex.
-    size_t place(size_t size) const;
-
-    const size_t capacity_;
-    /// Allocated uninitialized (no byte is read before a push writes it), in PSRAM where there is
-    /// one
-    PlacedArray<uint8_t> bytes_;
     std::weak_ptr<AudioWorkers::Task> task_;
 
     mutable std::mutex mutex_;
-    /// Fixed size, used as a circular FIFO from head_
-    std::vector<Record> records_;
-    size_t head_{0};
-    size_t count_{0};
-    /// The oldest item's offset and the next free byte; wrapped_ when the items run past the
-    /// end of the storage and on from its start
-    size_t byte_head_{0};
-    size_t byte_tail_{0};
-    bool wrapped_{false};
+    ByteRing<SourceItem> items_;
     std::vector<SourceFault> faults_;
 };
 

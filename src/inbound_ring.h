@@ -19,7 +19,7 @@
 
 #pragma once
 
-#include "memory.h"
+#include "byte_ring.h"
 #include "shared.h"
 #include "transport.h"
 
@@ -103,10 +103,8 @@ public:
     void clear();
 
 private:
-    struct Record {
+    struct Message {
         SharedPtr<InboundEndpoint> to;
-        size_t offset{0};
-        size_t size{0};
         int64_t rx_us{0};
         uint64_t place{0};
         MessageKind kind{MessageKind::TEXT};
@@ -119,26 +117,14 @@ private:
         CloseReason reason;
     };
 
-    /// Where a message of size bytes would go, or capacity_ when it does not fit. Under the mutex.
-    size_t place(size_t size) const;
     void deliver_taken();
 
-    const size_t capacity_;
     const std::function<void(uint64_t place)> wake_;
     const std::function<void()> on_room_;
-    /// In PSRAM where there is one: copied in and out once per message
-    PlacedArray<uint8_t> bytes_;
 
     std::mutex mutex_;
-    /// Fixed size, used as a circular FIFO from head_
-    std::vector<Record> records_;
-    size_t head_{0};
-    size_t count_{0};
-    /// The oldest message's offset and the next free byte; wrapped_ when the messages run past the
-    /// end of the storage and on from its start
-    size_t byte_head_{0};
-    size_t byte_tail_{0};
-    bool wrapped_{false};
+    /// The messages, copied in and out once each
+    ByteRing<Message> messages_;
     /// A push was refused: pushes are refused until refused_bytes_ fit
     bool refused_{false};
     size_t refused_bytes_{0};

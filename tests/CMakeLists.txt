@@ -16,6 +16,7 @@ add_executable(sendspin_server_cpp_tests
     test_audio_workers.cpp
     test_backoff.cpp
     test_beast.cpp
+    test_byte_ring.cpp
     test_client_records.cpp
     test_clock.cpp
     test_colors.cpp
