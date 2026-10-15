@@ -162,8 +162,9 @@ set_source_files_properties(test_group_audio.cpp PROPERTIES COMPILE_OPTIONS -fno
 # White-box: test_session.cpp queues a control message behind the initial server/activate through
 # Session::queue_json(), since the server queues no other control message there. It reads
 # Session::scratch_, the buffer_ of Session::reassembler_ and of a Reassembler of its own to their
-# capacity to show a pairing message's PSK, or a longer message's bytes, wiped from them, which
-# nothing the session sends or reports shows.
+# capacity to show a pairing message's PSK, or a longer message's bytes, wiped from them, and
+# reads the capacity of the first two to show a longer message grew them, which nothing the session
+# sends or reports shows.
 # test_server_core.cpp reads ServerCore::targets_ (a target's phase: ServerCore::RetryArmed, a
 # PendingDial) to show a dial waiting out its backoff, and a lost instance's target gone with its
 # wait, and a dial that waited not started once no longer due,

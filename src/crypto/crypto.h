@@ -55,6 +55,20 @@ inline void secure_zero_storage(std::vector<uint8_t>& storage, size_t bytes) {
     storage.resize(size);
 }
 
+/// @brief Reserves room for `capacity` bytes in a byte vector, as reserve() does, but wipes the
+/// block it leaves first with secure_zero_storage(), as far as its size or `written`, whichever is
+/// further; the block freed holds none of the contents
+inline void secure_reserve(std::vector<uint8_t>& storage, size_t capacity, size_t written) {
+    if (capacity <= storage.capacity()) {
+        return;
+    }
+    std::vector<uint8_t> grown;
+    grown.reserve(capacity);
+    grown.assign(storage.begin(), storage.end());
+    secure_zero_storage(storage, std::max(written, storage.size()));
+    storage.swap(grown);
+}
+
 constexpr size_t SHA256_DIGEST_SIZE = 32;
 
 /// @brief Streaming SHA-256

@@ -94,6 +94,13 @@ Reassembler::Outcome Reassembler::accept(std::span<const uint8_t> plaintext) {
         if (this->buffer_.size() - 1 + data.size() > this->max_message_bytes_) {
             return this->fail(Outcome::TOO_LARGE);
         }
+        const size_t needed = this->buffer_.size() + data.size();
+        if (needed > this->buffer_.capacity()) {
+            // At least doubled, as insert() would, within the cap
+            const size_t doubled =
+                std::min(2 * this->buffer_.capacity(), this->max_message_bytes_ + 1);
+            secure_reserve(this->buffer_, std::max(needed, doubled), this->written_);
+        }
         this->buffer_.insert(this->buffer_.end(), data.begin(), data.end());
         this->written_ = std::max(this->written_, this->buffer_.size());
     }
