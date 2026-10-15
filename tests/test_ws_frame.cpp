@@ -14,8 +14,8 @@
 
 /// @file test_ws_frame.cpp
 /// @brief WebSocket framing for the ESP-IDF transport, on the host: a received header's parse
-/// with its rejections, a close payload's check, a message's assembly from its frames, the masking
-/// and the masking keys.
+/// with its rejections, the opcode, FIN bit and length a frame httpd parsed may have, a close
+/// payload's check, a message's assembly from its frames, the masking and the masking keys.
 
 #include "transport.h"
 #include "ws_frame.h"
@@ -36,6 +36,7 @@ using sendspin::server::CHACHA20_BLOCK_BYTES;
 using sendspin::server::CHACHA20_KEY_BYTES;
 using sendspin::server::MessageKind;
 using sendspin::server::ws_close_payload_fault;
+using sendspin::server::ws_frame_allowed;
 using sendspin::server::ws_frame_header;
 using sendspin::server::WS_FRAME_HEADER_MAX;
 using sendspin::server::ws_mask_copy;
@@ -213,6 +214,42 @@ TEST(WsFrame, ChecksAClosePayload) {
     for (const Row& row : rows) {
         SCOPED_TRACE(row.name);
         EXPECT_EQ(ws_close_payload_fault(row.payload), row.fault);
+    }
+}
+
+// RFC 6455 sections 5.2 and 5.5: the frames an accepted connection takes from what httpd parsed,
+// which checks neither the opcode nor a control frame's FIN bit and length
+TEST(WsFrame, AllowsAFrameByOpcodeFinAndLength) {
+    struct Row {
+        std::string name;
+        uint8_t opcode;
+        bool fin;
+        uint64_t payload_bytes;
+        bool allowed;
+    };
+    const Row rows[] = {
+        {"Control: final empty text", ws_opcode::TEXT, true, 0, true},
+        {"Control: text past a control frame's length, not final", ws_opcode::TEXT, false, 65535,
+         true},
+        {"Control: binary past a control frame's length", ws_opcode::BINARY, true, 126, true},
+        {"Control: continuation, not final", ws_opcode::CONTINUATION, false, 126, true},
+        {"Control: empty close", ws_opcode::CLOSE, true, 0, true},
+        {"Control: ping of 125 bytes", ws_opcode::PING, true, 125, true},
+        {"Control: pong of 125 bytes", ws_opcode::PONG, true, 125, true},
+        {"ping of 126 bytes", ws_opcode::PING, true, 126, false},
+        {"pong of 126 bytes", ws_opcode::PONG, true, 126, false},
+        {"close of 126 bytes", ws_opcode::CLOSE, true, 126, false},
+        {"ping not final", ws_opcode::PING, false, 0, false},
+        {"pong not final", ws_opcode::PONG, false, 0, false},
+        {"close not final", ws_opcode::CLOSE, false, 2, false},
+        {"reserved data opcode 0x3", 0x3, true, 0, false},
+        {"reserved data opcode 0x7", 0x7, true, 0, false},
+        {"reserved control opcode 0xB", 0xB, true, 0, false},
+        {"reserved control opcode 0xF", 0xF, true, 0, false},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        EXPECT_EQ(ws_frame_allowed(row.opcode, row.fin, row.payload_bytes), row.allowed);
     }
 }
 

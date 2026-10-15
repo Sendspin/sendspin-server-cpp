@@ -55,6 +55,10 @@ enum class CloseReason : uint8_t {
     FAILED,  ///< Anything else
 };
 
+/// @brief The close reason for a socket call that failed with errno error: the peer's reset,
+/// abort or close of the TCP connection is PEER_CLOSED, any other error FAILED
+CloseReason close_reason_for_errno(int error);
+
 /// @brief WebSocket close codes the server sends (RFC 6455 section 7.4.1)
 namespace close_code {
 constexpr uint16_t NORMAL = 1000;
@@ -360,7 +364,8 @@ public:
     /// @param loop held weakly: a signal that finds it destroyed does nothing
     /// @param on_wake run on the loop's thread
     Wakeup(EventLoop& loop, std::function<void()> on_wake);
-    /// @brief A pending run is discarded, and so is every later signal. On the loop's thread.
+    /// @brief A pending run is discarded, and so is every later signal. On the loop's thread,
+    /// from the Wakeup's own run too.
     ~Wakeup();
     Wakeup(const Wakeup&) = delete;
     Wakeup& operator=(const Wakeup&) = delete;

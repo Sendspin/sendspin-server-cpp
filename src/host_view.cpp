@@ -628,14 +628,9 @@ void HostView::free_retired_slew() {
     }
 }
 
-JobView HostView::job_view() const {
-    // Reserved before the lock, so the copy under it allocates nothing
-    JobView view;
-    view.segments.reserve(MAX_STAGED_SEGMENTS);
-    view.anchor.segments.reserve(MAX_STAGED_SEGMENTS);
-    view.anchor.shifts.reserve(MAX_ANCHOR_SHIFTS);
-    this->read_job_view(view);
-    return view;
+sched::RunState HostView::run_state() const {
+    const std::lock_guard<std::mutex> lock(this->mutex_);
+    return this->run_.run;
 }
 
 void HostView::read_job_view(JobView& view) const {
@@ -975,7 +970,6 @@ void HostView::run_after(AfterUnlock& after) const {
 }
 
 void HostView::deliver_outbox() {
-    std::vector<OutboxEntry> entries;
     {
         const std::lock_guard<std::mutex> lock(this->mutex_);
         this->outbox_posted_ = false;
@@ -983,15 +977,16 @@ void HostView::deliver_outbox() {
             // release_drained() posts again
             return;
         }
-        entries.swap(this->outbox_);
+        this->delivering_.swap(this->outbox_);
     }
-    for (const OutboxEntry& entry : entries) {
+    for (const OutboxEntry& entry : this->delivering_) {
         if (entry.writable) {
             this->listener_->on_writable(this->group_, this->id_);
         } else {
             this->listener_->on_drained(this->group_, this->id_, entry.drain, entry.outcome);
         }
     }
+    this->delivering_.clear();
 }
 
 // ==============================================================================

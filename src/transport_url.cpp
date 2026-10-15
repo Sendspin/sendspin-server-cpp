@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// parse_ws_url(), shared by every transport implementation
+// parse_ws_url() and close_reason_for_errno(), shared by every transport implementation
 
 #include "transport.h"
 #include "url_text.h"
@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -163,6 +164,19 @@ std::optional<DialTarget> parse_ws_url(std::string_view url) {
         target.port = static_cast<uint16_t>(value);
     }
     return target;
+}
+
+CloseReason close_reason_for_errno(int error) {
+    switch (error) {
+        case ECONNRESET:
+        case ECONNABORTED:
+        case EPIPE:
+        // lwIP's error for a send or read after the peer's close (ERR_CLSD)
+        case ENOTCONN:
+            return CloseReason::PEER_CLOSED;
+        default:
+            return CloseReason::FAILED;
+    }
 }
 
 }  // namespace sendspin::server

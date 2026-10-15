@@ -224,9 +224,10 @@ public:
     /// @brief Frees the slew a write retired for set_format()'s
     void free_retired_slew();
 
-    JobView job_view() const;
+    /// @brief The run's state
+    sched::RunState run_state() const;
 
-    /// @brief job_view() into view, reusing its storage
+    /// @brief Copies what the group's pipelines read into view, reusing its storage
     void read_job_view(JobView& view) const;
 
     /// @brief The host released its GroupInput, or core closed the input. Reads no lock, so a
@@ -405,6 +406,9 @@ private:
     std::shared_ptr<AudioWorkers::Task> audio_;
     /// Listener calls decided under the mutex, in order, and not yet delivered
     std::vector<OutboxEntry> outbox_;
+    /// The entries deliver_outbox() calls the listener for, swapped with the outbox so each keeps
+    /// its capacity; only the dispatch thread touches it
+    std::vector<OutboxEntry> delivering_;
     /// A delivery task is posted and will take the outbox
     bool outbox_posted_{false};
     /// complete_drain() holds the outbox until release_drained()

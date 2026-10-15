@@ -56,6 +56,16 @@ constexpr size_t READ_BUFFER_BYTES = WS_UPGRADE_RESPONSE_MAX;
 constexpr int64_t US_PER_MS = 1000;
 constexpr int64_t NO_DEADLINE = std::numeric_limits<int64_t>::max();
 
+/// The error pending on socket fd (SO_ERROR), 0 when it cannot be read
+int socket_error(int fd) {
+    int error = 0;
+    socklen_t length = sizeof(error);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) != 0) {
+        return 0;
+    }
+    return error;
+}
+
 /// A dialed connection: the reader task (ThreadRole::LINK_READER) resolves the target, connects,
 /// upgrades and then reads every frame; the writer task (WsLink) starts it, writes, and in shut()
 /// stops it and waits for its end before closing the descriptor, so no task's call or select()
@@ -362,7 +372,7 @@ private:
             this->rx_us_ = now_us();
             if (got > 0) {
                 done += static_cast<size_t>(got);
-            } else if (got == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+            } else if (!this->read_pending(got)) {
                 return false;
             }
         }
@@ -380,6 +390,7 @@ private:
             this->buffer_begin_ = 0;
         }
         if (this->buffer_end_ == this->buffer_.size()) {
+            this->read_end_ = CloseReason::FAILED;
             return -1;
         }
         while (true) {
@@ -394,7 +405,7 @@ private:
                 this->buffer_end_ += static_cast<size_t>(got);
                 return static_cast<int>(got);
             }
-            if (got == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+            if (!this->read_pending(got)) {
                 return -1;
             }
         }
@@ -422,7 +433,12 @@ private:
             timeout.tv_usec = static_cast<suseconds_t>((slice_ms % 1000) * US_PER_MS);
             const int polled = for_write ? select(fd + 1, nullptr, &ready, &errors, &timeout)
                                          : select(fd + 1, &ready, nullptr, &errors, &timeout);
-            if (polled < 0 || (polled > 0 && FD_ISSET(fd, &errors) && !FD_ISSET(fd, &ready))) {
+            if (polled < 0) {
+                this->read_end_ = close_reason_for_errno(errno);
+                return -1;
+            }
+            if (polled > 0 && FD_ISSET(fd, &errors) && !FD_ISSET(fd, &ready)) {
+                this->read_end_ = close_reason_for_errno(socket_error(fd));
                 return -1;
             }
             if (polled > 0) {
@@ -432,10 +448,20 @@ private:
         return -1;
     }
 
+    /// After a recv() that returned got <= 0: true when it found nothing yet, else false with
+    /// why in read_end_ (the peer's close of TCP at 0, else errno's reason)
+    bool read_pending(ssize_t got) {
+        if (got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return true;
+        }
+        this->read_end_ = got == 0 ? CloseReason::PEER_CLOSED : close_reason_for_errno(errno);
+        return false;
+    }
+
     /// The connection ended under a read: the peer's close of TCP, an error, or the writer's stop
     void report_read_end() {
         if (!this->stopping()) {
-            this->report_closed(CloseReason::PEER_CLOSED);
+            this->report_closed(this->read_end_);
         }
     }
 
@@ -454,6 +480,8 @@ private:
     size_t buffer_end_{0};
     /// Reader task only: now_us() at the last read that returned
     int64_t rx_us_{0};
+    /// Reader task only: why the last read that failed did
+    CloseReason read_end_{CloseReason::FAILED};
 };
 
 }  // namespace

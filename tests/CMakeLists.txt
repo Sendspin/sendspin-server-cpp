@@ -143,7 +143,9 @@ set_source_files_properties(test_pairing_crypto.cpp PROPERTIES COMPILE_OPTIONS -
 # checked without waiting out the window in real time (under HostView::mutex_ where a writer
 # thread runs), and runs a slewed write's steps (HostView::begin_slewed(), write_slewed()) apart,
 # so a call between them is checked without a race. It reads HostView::slew_ and next_slew_, as
-# only their storage shows which slew a write left for core to free.
+# only their storage shows which slew a write left for core to free. It calls
+# HostView::deliver_outbox() and reads the outbox's capacity, as only its storage shows that a
+# delivery left it reusable.
 set_source_files_properties(test_host_view.cpp PROPERTIES COMPILE_OPTIONS -fno-access-control)
 # White-box: test_live_slew.cpp reads LiveSlew::asrc_ to show an ASRC that refused is kept, not
 # freed in the write it refused in; the slew no longer runs it, so nothing else shows it.
