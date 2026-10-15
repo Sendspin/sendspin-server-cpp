@@ -14,6 +14,7 @@
 
 #include "ws_link.h"
 
+#include "byte_order.h"
 #include "clock.h"
 #include "esp_random.h"
 #include "lwip/inet.h"
@@ -238,8 +239,8 @@ bool WsLink::answer_close(const uint8_t* payload, size_t len) {
 }
 
 void WsLink::fail_protocol(uint16_t code) {
-    const std::array<uint8_t, STATUS_CODE_BYTES> body{static_cast<uint8_t>(code >> 8U),
-                                                      static_cast<uint8_t>(code)};
+    std::array<uint8_t, STATUS_CODE_BYTES> body{};
+    put_be(body.data(), code);
     this->close_within_slice(body.data(), body.size());
     this->report_closed(CloseReason::PROTOCOL_VIOLATION);
 }
@@ -404,8 +405,8 @@ bool WsLink::send_pong() {
 }
 
 bool WsLink::send_close(uint16_t code) {
-    const std::array<uint8_t, STATUS_CODE_BYTES> body{static_cast<uint8_t>(code >> 8U),
-                                                      static_cast<uint8_t>(code)};
+    std::array<uint8_t, STATUS_CODE_BYTES> body{};
+    put_be(body.data(), code);
     return this->send_frame(ws_opcode::CLOSE, body.data(), body.size());
 }
 
