@@ -13,9 +13,10 @@
 // limitations under the License.
 
 /// @file test_server_limits.cpp
-/// @brief The caps on connections in their handshake (connection_limits): accepted connections past
-/// the cap are closed, and dials past it wait for one in progress to end; and the internal RAM a
-/// new connection needs
+/// @brief The caps on connections (connection_limits): accepted connections in their handshake
+/// past the cap are closed, dials past it wait for one in progress to end, and accepted clients
+/// past the activated caps are refused; the internal RAM a new connection needs; and the cap on a
+/// client/hello name
 
 #include "raw_client.h"
 #include "server_core.h"
@@ -37,12 +38,17 @@ namespace {
 
 namespace asio = boost::asio;
 using asio::ip::tcp;
+using sendspin::server::ApprovalScope;
 using sendspin::server::ErrorKind;
 using sendspin::server::SendspinServer;
 using sendspin::server::ServerConfig;
 using sendspin::server::StartResult;
+using sendspin::server::config_limits::MAX_NAME_BYTES;
+using sendspin::server::connection_limits::MAX_ACCEPTED_CLIENTS;
 using sendspin::server::connection_limits::MAX_ACCEPTED_HANDSHAKES;
+using sendspin::server::connection_limits::MAX_ACCEPTED_UNAPPROVED;
 using sendspin::server::connection_limits::MAX_DIALING;
+using sendspin::server::test::client_hello_json;
 using sendspin::server::test::complete_upgrade;
 using sendspin::server::test::MemoryProvider;
 using sendspin::server::test::RawClient;
@@ -164,6 +170,134 @@ TEST(ServerLimits, StartsAWaitingDialOnceADialedClientIsActivated) {
     EXPECT_NE(client.receive_until("server/activate"), "");
     std::unique_ptr<SilentListener::Socket> next = listener.accept();
     EXPECT_EQ(upgrade_request(*next).target(), "/waiting");
+}
+
+/// Connects client to server, completes the handshake and sends hello
+void say_hello(const SendspinServer& server, RawClient& client,
+               const std::string& hello = client_hello_json()) {
+    ASSERT_EQ(client.dial(server.listen_port()), 101U);
+    ASSERT_NO_FATAL_FAILURE(client.complete_handshake());
+    client.send_json(hello);
+}
+
+// An accepted client past the cap is closed once its handshake completes, with no activation; a
+// dialed client is neither counted nor refused; and once an accepted client leaves, the next one is
+// activated. It is slow for the real handshakes that fill the cap.
+TEST(ServerLimits, RefusesAnAcceptedClientPastTheCap) {
+    ServerConfig config = sendspin::server::test::local_config();
+    config.approve_all_clients = true;
+    MemoryProvider provider;
+    Recorder recorder;
+    SendspinServer server;
+    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
+    std::vector<std::unique_ptr<RawClient>> accepted;
+    for (size_t i = 0; i < MAX_ACCEPTED_CLIENTS; ++i) {
+        accepted.push_back(std::make_unique<RawClient>());
+        ASSERT_NO_FATAL_FAILURE(say_hello(server, *accepted.back()));
+        // Control: every client up to the cap
+        ASSERT_NE(accepted.back()->receive_until("server/activate"), "") << "client " << i;
+        accepted.back()->send_json(sendspin::server::test::client_state_json(true));
+    }
+
+    RawClient refused;
+    ASSERT_NO_FATAL_FAILURE(say_hello(server, refused));
+    refused.expect_silent_close();
+
+    RawClient dialed;
+    ASSERT_TRUE(server.connect_url(dialed.url()));
+    ASSERT_NO_FATAL_FAILURE(dialed.activate());
+
+    const std::string left = accepted.front()->noise.identity().peer_id();
+    accepted.front()->close();
+    recorder.wait_for_match(
+        [&](const std::string& what) { return what.starts_with("disconnected " + left + " "); });
+    // The refusal is no error, which the dispatch thread would have reported before this disconnect
+    EXPECT_EQ(recorder.count_errors(ErrorKind::HANDSHAKE_FAILED), 0U);
+    RawClient taken;
+    ASSERT_NO_FATAL_FAILURE(say_hello(server, taken));
+    EXPECT_NE(taken.receive_until("server/activate"), "");
+}
+
+// Past its cap an accepted client that may not play is refused as one past
+// connection_limits::MAX_ACCEPTED_CLIENTS is, while one that may play is activated; once one of
+// the clients counted is approved, the next one is activated
+TEST(ServerLimits, RefusesAnUnapprovedClientPastItsCap) {
+    MemoryProvider provider;
+    Recorder recorder;
+    SendspinServer server;
+    ASSERT_EQ(server.start(sendspin::server::test::local_config(), &provider, &recorder),
+              StartResult::OK);
+    std::vector<std::unique_ptr<RawClient>> unapproved;
+    for (size_t i = 0; i < MAX_ACCEPTED_UNAPPROVED; ++i) {
+        unapproved.push_back(std::make_unique<RawClient>());
+        ASSERT_NO_FATAL_FAILURE(say_hello(server, *unapproved.back()));
+        // Control: every client up to the cap
+        ASSERT_NE(unapproved.back()->receive_until("server/activate"), "") << "client " << i;
+    }
+
+    RawClient refused;
+    ASSERT_NO_FATAL_FAILURE(say_hello(server, refused));
+    refused.expect_silent_close();
+
+    // Control: a client that may play
+    RawClient approved;
+    ASSERT_TRUE(server.approve(approved.noise.identity().peer_id(), ApprovalScope::PLAYBACK));
+    ASSERT_NO_FATAL_FAILURE(say_hello(server, approved));
+    EXPECT_NE(approved.receive_until("server/activate"), "");
+
+    // Activated for playback once approved, so it no longer counts
+    ASSERT_TRUE(
+        server.approve(unapproved.front()->noise.identity().peer_id(), ApprovalScope::PLAYBACK));
+    ASSERT_NE(unapproved.front()->receive_until("server/activate"), "");
+    RawClient next;
+    ASSERT_NO_FATAL_FAILURE(say_hello(server, next));
+    EXPECT_NE(next.receive_until("server/activate"), "");
+}
+
+// A client/hello name past config_limits::MAX_NAME_BYTES, the cap on the host's names, is cut
+// between UTF-8 characters in the client's listing and its group's name
+TEST(ServerLimits, CutsAHelloNamePastTheNameCap) {
+    struct Row {
+        const char* name;
+        std::string hello_name;
+        std::string listed;
+    };
+    const std::string at_cap(MAX_NAME_BYTES, 'a');
+    const std::string before_cap(MAX_NAME_BYTES - 1, 'a');
+    const Row rows[] = {
+        {"Control: a name at the cap", at_cap, at_cap},
+        {"a name past it, cut before the character the cap splits", before_cap + "\xC3\xA9" + "b",
+         before_cap},
+    };
+    MemoryProvider provider;
+    Recorder recorder;
+    SendspinServer server;
+    ASSERT_EQ(server.start(sendspin::server::test::local_config(), &provider, &recorder),
+              StartResult::OK);
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        RawClient client;
+        ASSERT_NO_FATAL_FAILURE(say_hello(server, client, client_hello_json(row.hello_name)));
+        ASSERT_NE(client.receive_until("server/activate"), "");
+        const std::string id = client.noise.identity().peer_id();
+        recorder.wait_for("connected " + id);
+        bool listed = false;
+        for (const sendspin::server::ClientInfo& info : server.clients()) {
+            if (info.client_id == id) {
+                listed = true;
+                EXPECT_EQ(info.name, row.listed);
+            }
+        }
+        EXPECT_TRUE(listed);
+        bool grouped = false;
+        for (const sendspin::server::GroupInfo& group : server.groups()) {
+            if (group.client_ids == std::vector<std::string>{id}) {
+                grouped = true;
+                EXPECT_EQ(group.name, row.listed);
+            }
+        }
+        EXPECT_TRUE(grouped);
+    }
 }
 
 // connection_limits::heap_admits(): the reserve stays free beyond a share for the new connection
