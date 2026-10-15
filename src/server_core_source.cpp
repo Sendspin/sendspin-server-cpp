@@ -29,17 +29,7 @@ namespace {
 /// A source's format as the host sees it, as its client-stream/start announced it
 StreamFormat source_format(const AudioFormat& format) {
     StreamFormat stream;
-    switch (format.codec) {
-        case Codec::PCM:
-            stream.codec = StreamCodec::PCM;
-            break;
-        case Codec::FLAC:
-            stream.codec = StreamCodec::FLAC;
-            break;
-        case Codec::OPUS:
-            stream.codec = StreamCodec::OPUS;
-            break;
-    }
+    stream.codec = stream_codec(format.codec);
     constexpr uint32_t BYTE_MAX = 255;
     stream.sample_rate = format.sample_rate;
     stream.channels = static_cast<uint8_t>(std::min(format.channels, BYTE_MAX));

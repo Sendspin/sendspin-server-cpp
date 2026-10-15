@@ -45,6 +45,8 @@ using EpochId = Id<struct EpochTag>;
 /// those of its replacement
 using InstanceId = Id<struct InstanceTag>;
 
+/// @brief A player or source stream's codec, the one enum the wire layer (messages.h) and the send
+/// path share
 enum class Codec : uint8_t { PCM, FLAC, OPUS };
 
 /// @brief A player audio format (spec player/v1.md "client/hello player@v1 support object")

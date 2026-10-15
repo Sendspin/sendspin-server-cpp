@@ -27,6 +27,7 @@
 #include "crypto/pairing_code.h"
 #include "crypto/psk_wrap.h"
 #include "noise_types.h"
+#include "sched/types.h"
 #include "sendspin/server/types.h"
 #include "visualizer.h"
 
@@ -97,7 +98,7 @@ bool is_message_2_payload(std::span<const uint8_t> payload);
 // server/hello
 // ==============================================================================
 
-enum class Codec : uint8_t { OPUS, FLAC, PCM };
+using Codec = sched::Codec;
 
 std::string_view to_wire(Codec codec);
 
