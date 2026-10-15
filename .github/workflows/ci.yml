@@ -147,7 +147,13 @@ jobs:
           key: ccache-test-linux-${{ github.sha }}
 
       - name: Run tests
-        run: ctest --test-dir build-asan --output-on-failure
+        # The realtime tests on their own, the rest in parallel (tests/CMakeLists.txt); both
+        # sets run when one fails
+        run: |
+          status=0
+          ctest --test-dir build-asan --output-on-failure -LE realtime -j 4 || status=1
+          ctest --test-dir build-asan --output-on-failure -L realtime || status=1
+          exit $status
 
   # The host suite under the embedded profile (src/profile.h), the limits the ESP-IDF build uses
   test-embedded:
@@ -190,7 +196,13 @@ jobs:
           key: ccache-test-embedded-${{ github.sha }}
 
       - name: Run tests
-        run: ctest --test-dir build-embedded --output-on-failure
+        # The realtime tests on their own, the rest in parallel (tests/CMakeLists.txt); both
+        # sets run when one fails
+        run: |
+          status=0
+          ctest --test-dir build-embedded --output-on-failure -LE realtime -j 4 || status=1
+          ctest --test-dir build-embedded --output-on-failure -L realtime || status=1
+          exit $status
 
   test-tsan:
     name: Unit tests (Linux x86-64, TSan)
@@ -237,10 +249,15 @@ jobs:
         run: sudo sysctl vm.mmap_rnd_bits=28
 
       - name: Run tests
-        # A report fails the test that made it
+        # A report fails the test that made it; the realtime tests on their own, the rest in
+        # parallel (tests/CMakeLists.txt); both sets run when one fails
         env:
           TSAN_OPTIONS: halt_on_error=1
-        run: ctest --test-dir build-tsan --output-on-failure
+        run: |
+          status=0
+          ctest --test-dir build-tsan --output-on-failure -LE realtime -j 4 || status=1
+          ctest --test-dir build-tsan --output-on-failure -L realtime || status=1
+          exit $status
 
   test-macos:
     name: Unit tests (macOS arm64, ASan)
@@ -278,7 +295,13 @@ jobs:
           key: ccache-test-macos-${{ github.sha }}
 
       - name: Run tests
-        run: ctest --test-dir build-asan --output-on-failure
+        # The realtime tests on their own, the rest in parallel (tests/CMakeLists.txt); both
+        # sets run when one fails
+        run: |
+          status=0
+          ctest --test-dir build-asan --output-on-failure -LE realtime -j 3 || status=1
+          ctest --test-dir build-asan --output-on-failure -L realtime || status=1
+          exit $status
 
   # The ESP-IDF component, compiled and linked into tests/esp_idf/'s application with warnings as
   # errors; the S3 build has internal RAM only, the P4 build PSRAM and the memory statistics

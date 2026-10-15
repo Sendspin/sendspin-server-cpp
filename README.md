@@ -55,6 +55,13 @@ ctest --test-dir build-asan --output-on-failure
 
 The tests also fetch GoogleTest and [sendspin-cpp](https://github.com/Sendspin/sendspin-cpp), the client library they run against. ThreadSanitizer is a separate build: `-DSENDSPIN_SERVER_ENABLE_TSAN=ON` in place of `-DSENDSPIN_SERVER_ENABLE_SANITIZERS=ON`, run with `TSAN_OPTIONS=halt_on_error=1`.
 
+The tests whose assertions depend on players keeping up with real time carry the CTest label `realtime` and can miss their deadlines on a loaded machine. To run the rest in parallel and those on their own:
+
+```bash
+ctest --test-dir build-asan --output-on-failure -LE realtime -j 8
+ctest --test-dir build-asan --output-on-failure -L realtime
+```
+
 The soak test (`tests/soak.cpp`, target `sendspin_server_cpp_soak`) runs a server with real players through a seeded random script and checks what each received. It is skipped unless `SENDSPIN_SERVER_SOAK_SECONDS` is set; `SENDSPIN_SERVER_SOAK_SEED` picks the script:
 
 ```bash

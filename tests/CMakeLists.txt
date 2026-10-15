@@ -213,8 +213,17 @@ endif()
 
 include(GoogleTest)
 # Backstop above the 55 s watchdog in main.cpp, which fires first and prints the hung test's
-# stack.
-gtest_discover_tests(sendspin_server_cpp_tests PROPERTIES TIMEOUT 60)
+# stack. The suites whose assertions depend on players keeping up with real time carry the label
+# realtime: they can miss their deadlines on a loaded machine, so CI runs them on their own and
+# the rest in parallel (`ctest -L realtime`, `ctest -LE realtime -j`).
+set(_sendspin_server_realtime_suites
+    "ServerPlayback*:ServerPlayers*:*/ServerPlayers*:ServerVisualizer*:ServerSources*")
+gtest_discover_tests(sendspin_server_cpp_tests
+                     TEST_FILTER "${_sendspin_server_realtime_suites}"
+                     PROPERTIES TIMEOUT 60 LABELS realtime)
+gtest_discover_tests(sendspin_server_cpp_tests
+                     TEST_FILTER "-${_sendspin_server_realtime_suites}"
+                     PROPERTIES TIMEOUT 60)
 
 # The soak (tests/soak.cpp): its own executable and entry point, whose watchdog follows the
 # requested length. It skips itself unless SENDSPIN_SERVER_SOAK_SECONDS is set, so a plain ctest

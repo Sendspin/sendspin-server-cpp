@@ -568,13 +568,15 @@ TEST(ServerConnection, RetriesAUrlUntilItsClientListens) {
         }
     };
     ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-    const uint16_t port = sendspin::server::test::free_port();
+    sendspin::server::test::UnlistenedPort unlistened;
+    const uint16_t port = unlistened.port();
     const std::string url = sendspin::server::test::peer_url(port);
     sendspin::server::ConnectOptions options;
     options.retry_until_connected = true;
     ASSERT_TRUE(server.connect_url(url, options));
     recorder.wait_for("error " + std::to_string(static_cast<int>(ErrorKind::DIAL_FAILED)) + " " +
                       url);
+    unlistened.release();
     PeerClient peer(port);
     const std::string id = peer.client().client_id();
     peer.run_until([&] { return recorder.contains("connected " + id); });
@@ -617,9 +619,8 @@ TEST(ServerConnection, ReportsADialThatCannotConnect) {
     ASSERT_EQ(server.start(test_config(), &provider, &recorder), StartResult::OK);
     EXPECT_FALSE(server.connect_url("http://127.0.0.1:1/sendspin"));
     EXPECT_FALSE(server.connect_url("ws://"));
-    // Nothing listens on a port that was free a moment ago
-    const std::string url =
-        "ws://127.0.0.1:" + std::to_string(sendspin::server::test::free_port()) + "/sendspin";
+    const sendspin::server::test::UnlistenedPort unlistened;
+    const std::string url = "ws://127.0.0.1:" + std::to_string(unlistened.port()) + "/sendspin";
     ASSERT_TRUE(server.connect_url(url));
     recorder.wait_for("error " + std::to_string(static_cast<int>(ErrorKind::DIAL_FAILED)) + " " +
                       url);

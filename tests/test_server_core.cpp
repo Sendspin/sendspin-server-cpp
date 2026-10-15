@@ -104,9 +104,8 @@ TEST(ServerCoreBackoff, ADialAfterAFailureWaitsOutTheBackoff) {
                                       snapshot, groups, inputs, group_ids);
     std::thread core_thread([&] { loop.run(); });
 
-    // Nothing listens on a port that was free a moment ago
-    const std::string url =
-        "ws://127.0.0.1:" + std::to_string(sendspin::server::test::free_port()) + "/sendspin";
+    const sendspin::server::test::UnlistenedPort unlistened;
+    const std::string url = "ws://127.0.0.1:" + std::to_string(unlistened.port()) + "/sendspin";
     const sendspin::server::DialTarget target = *sendspin::server::parse_ws_url(url);
     const auto connect_and_inspect = [&] {
         std::promise<TargetState> inspected;
@@ -205,9 +204,8 @@ TEST(ServerCoreBackoff, RetriesAUrlUntilConnectedUntilCancelled) {
                                           snapshot, groups, inputs, group_ids);
         std::thread core_thread([&] { loop.run(); });
 
-        // Nothing listens on a port that was free a moment ago
-        const std::string url =
-            "ws://127.0.0.1:" + std::to_string(sendspin::server::test::free_port()) + "/sendspin";
+        const sendspin::server::test::UnlistenedPort unlistened;
+        const std::string url = "ws://127.0.0.1:" + std::to_string(unlistened.port()) + "/sendspin";
         loop.post([&] { core.connect_url(url, *sendspin::server::parse_ws_url(url), row.retry); });
         listener.wait_for(1);
         const auto inspect = [&] {
@@ -258,11 +256,11 @@ TEST(ServerCoreDiscovery, ALostInstanceCancelsItsDialWait) {
                                       snapshot, groups, inputs, group_ids);
     std::thread core_thread([&] { loop.run(); });
 
-    // Nothing listens on a port that was free a moment ago
+    const sendspin::server::test::UnlistenedPort unlistened;
     sendspin::server::DiscoveredClient found;
     found.instance = "Gone";
     found.addresses = {"127.0.0.1"};
-    found.port = sendspin::server::test::free_port();
+    found.port = unlistened.port();
     found.path = "/sendspin";
     loop.post([&] { core.on_client_found(found); });
     listener.wait_for(1);
@@ -308,8 +306,8 @@ TEST(ServerCoreDiscovery, ADialThatWaitedChecksAgainBeforeItStarts) {
                                       snapshot, groups, inputs, group_ids);
     std::thread core_thread([&] { loop.run(); });
 
-    const std::string url =
-        "ws://127.0.0.1:" + std::to_string(sendspin::server::test::free_port()) + "/sendspin";
+    const sendspin::server::test::UnlistenedPort unlistened;
+    const std::string url = "ws://127.0.0.1:" + std::to_string(unlistened.port()) + "/sendspin";
     const sendspin::server::DialTarget target = *sendspin::server::parse_ws_url(url);
     loop.post([&] { core.connect_url(url, target); });
     listener.wait_for(1);
