@@ -142,8 +142,6 @@ WriteResult HostView::write(const void* pcm, size_t frames) {
     AfterUnlock after;
     WriteResult result;
     SlewedWrite slewed;
-    // A slew the format replaced, freed once the mutex is released
-    LiveSlew retired;
     {
         const std::lock_guard<std::mutex> lock(this->mutex_);
         if (this->closed_ || this->released_) {
@@ -165,7 +163,7 @@ WriteResult HostView::write(const void* pcm, size_t frames) {
             this->signal(after);
             result = {0, InputState::FULL};
         } else if (live_playing) {
-            this->adopt_slew(retired);
+            this->adopt_slew();
             if (this->slew_.ready()) {
                 // NOLINTNEXTLINE(bugprone-unchecked-optional-access): set while playing
                 const int64_t head_us = *decision.head_us;
@@ -621,6 +619,15 @@ void HostView::publish_shift_index(sched::EpochId epoch, std::optional<int64_t> 
     this->notify_if_sooner(ready_before, now);
 }
 
+void HostView::free_retired_slew() {
+    // Freed once the mutex is released
+    LiveSlew retired;
+    const std::lock_guard<std::mutex> lock(this->mutex_);
+    if (!this->slew_pending_) {
+        std::swap(this->next_slew_, retired);
+    }
+}
+
 JobView HostView::job_view() const {
     // Reserved before the lock, so the copy under it allocates nothing
     JobView view;
@@ -766,13 +773,12 @@ int64_t HostView::lead_next() const {
     return std::max(this->params_.group_lead_us, this->min_lead_us_);
 }
 
-void HostView::adopt_slew(LiveSlew& retired) {
+void HostView::adopt_slew() {
     if (this->slew_seen_ == this->slew_generation_) {
         return;
     }
     if (this->slew_pending_) {
         std::swap(this->slew_, this->next_slew_);
-        std::swap(this->next_slew_, retired);
         this->slew_pending_ = false;
     }
     this->slew_.restart();

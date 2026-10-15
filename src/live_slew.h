@@ -64,7 +64,7 @@ public:
 
     /// @brief The ASRC waits for start() before it slews
     bool awaits_start() const {
-        return this->asrc_ != nullptr && !this->engaged_;
+        return this->asrc_ != nullptr && !this->engaged_ && !this->refused_;
     }
 
     /// @brief Room for LIVE_SLEW_BLOCK_FRAMES frames of history in the format, for start()
@@ -95,7 +95,8 @@ public:
     int64_t take_slewed_us();
 
 private:
-    /// The ASRC refused: the slew drops frames from now on
+    /// The ASRC refused: the slew drops frames from now on. The ASRC is kept, so the write it
+    /// refused in frees nothing; it goes with the slew.
     void fall_back();
 
     InputFormat format_;
@@ -103,6 +104,8 @@ private:
     std::unique_ptr<SourceAsrc> asrc_;
     SampleSlip slip_;
     bool engaged_{false};
+    /// The ASRC refused (fall_back()), until the next prepare()
+    bool refused_{false};
     /// Staging in PSRAM where there is one: the format's bytes (history, then output), and with
     /// the ASRC its float input and output
     PlacedArray<uint8_t> bytes_;

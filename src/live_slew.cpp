@@ -30,6 +30,7 @@ void LiveSlew::prepare(const InputFormat& format, bool asrc, ResamplerQuality qu
     this->format_ = format;
     this->frame_bytes_ = sample_bytes(format.sample_format) * format.channels;
     this->asrc_.reset();
+    this->refused_ = false;
     this->restart();
     if (asrc) {
         this->asrc_ = SourceAsrc::create(format.sample_rate, format.channels, quality,
@@ -156,7 +157,7 @@ int64_t LiveSlew::take_slewed_us() {
 }
 
 void LiveSlew::fall_back() {
-    this->asrc_.reset();
+    this->refused_ = true;
     this->engaged_ = false;
 }
 

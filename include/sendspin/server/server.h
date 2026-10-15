@@ -206,9 +206,9 @@ public:
     InputId id() const;
     GroupId group() const;
 
-    /// @brief Copies up to frames frames of PCM in the input's format. Never blocks or allocates;
-    /// real-time safe. Takes as many as the input admits, up to about the group's lead plus its
-    /// write-ahead past the time now playing; state says why it took fewer. A new input admits
+    /// @brief Copies up to frames frames of PCM in the input's format. Never blocks, allocates or
+    /// frees; real-time safe. Takes as many as the input admits, up to about the group's lead plus
+    /// its write-ahead past the time now playing; state says why it took fewer. A new input admits
     /// nothing (InputState::FULL) until the server has attached it to its group. A live input's
     /// writer drops what write() refuses and never resends what a stall held back.
     ///
