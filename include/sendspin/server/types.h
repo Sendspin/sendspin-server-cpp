@@ -267,10 +267,10 @@ enum class ErrorKind : uint8_t {
     PERSISTENCE_FAILED,
     /// A source's input stream could not be taken (SendspinServer::route_source()): its format is
     /// one the server does not decode, its FLAC header one the decoder cannot read, the group's
-    /// input refused it, its buffers could not be allocated, or a chunk was larger than the server
-    /// holds. client_id names the source, format its stream's format. The server asks the source to
-    /// stop, and does not ask it to stream again until it is routed again, reports itself available
-    /// again after an unavailable report, gets its role again, or connects again.
+    /// input refused it, or its buffers could not be allocated. client_id names the source, format
+    /// its stream's format. The server asks the source to stop, and does not ask it to stream again
+    /// until it is routed again, reports itself available again after an unavailable report, gets
+    /// its role again, or connects again.
     SOURCE_FAILED,
 };
 

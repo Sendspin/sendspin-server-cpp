@@ -67,11 +67,13 @@ ClientRecord record_with(const std::string& id, std::optional<ApprovalScope> app
 }
 
 // The offsets of persistence_keys.h's layout
-constexpr size_t APPROVAL = 32;
-constexpr size_t PSK_FLAG = 33;
-constexpr size_t PSK = 34;
-constexpr size_t NAME_LENGTH = 66;
-constexpr size_t NAME = 67;
+constexpr size_t VERSION = 0;
+constexpr size_t KEY = 1;
+constexpr size_t APPROVAL = 33;
+constexpr size_t PSK_FLAG = 34;
+constexpr size_t PSK = 35;
+constexpr size_t NAME_LENGTH = 67;
+constexpr size_t NAME = 68;
 constexpr size_t IDENTIFIER_COUNT = NAME + persistence_keys::RECORD_NAME_BYTES;
 constexpr size_t IDENTIFIERS = IDENTIFIER_COUNT + 1;
 
@@ -93,6 +95,7 @@ TEST(ClientRecordCodec, RoundTripsEveryField) {
         SCOPED_TRACE(record.name);
         const std::vector<uint8_t> blob = blob_of(record);
         ASSERT_EQ(blob.size(), persistence_keys::CLIENT_RECORD_SIZE);
+        EXPECT_EQ(blob[VERSION], persistence_keys::CLIENT_RECORD_VERSION);
         EXPECT_EQ(blob[APPROVAL],
                   record.approval ? (*record.approval == ApprovalScope::PLAYBACK ? 1 : 2) : 0);
         EXPECT_EQ(blob[PSK_FLAG], record.long_term_psk ? 1 : 0);
@@ -135,8 +138,8 @@ TEST(ClientRecordCodec, RefusesWhatDoesNotFit) {
     }
 }
 
-// persistence_keys.h: a blob with any value outside the layout holds no record, a record of the
-// earlier 33-byte layout included
+// persistence_keys.h: a blob of another size or version, or with any value outside the layout,
+// holds no record
 TEST(ClientRecordCodec, RejectsBlobsOutsideTheLayout) {
     const std::string id = new_client_id();
     const std::vector<uint8_t> valid =
@@ -151,12 +154,14 @@ TEST(ClientRecordCodec, RejectsBlobsOutsideTheLayout) {
     };
     std::vector<uint8_t> zero_psk = valid;
     std::fill(zero_psk.begin() + PSK, zero_psk.begin() + PSK + 32, 0);
-    const std::vector<uint8_t> earlier_layout(valid.begin(), valid.begin() + APPROVAL + 1);
+    const std::vector<uint8_t> short_blob(valid.begin() + KEY, valid.begin() + APPROVAL + 1);
     struct Row {
         const char* name;
         std::vector<uint8_t> blob;
     };
     const Row rows[] = {
+        {"version 0", edit(valid, VERSION, 0)},
+        {"a later version", edit(valid, VERSION, persistence_keys::CLIENT_RECORD_VERSION + 1)},
         {"another approval byte", edit(valid, APPROVAL, 3)},
         {"another PSK flag", edit(valid, PSK_FLAG, 2)},
         {"a PSK flagged absent that is not zeros", edit(valid, PSK_FLAG, 0)},
@@ -171,7 +176,7 @@ TEST(ClientRecordCodec, RejectsBlobsOutsideTheLayout) {
         {"one byte short", std::vector<uint8_t>(valid.begin(), valid.end() - 1)},
         {"one byte long", edit(std::vector<uint8_t>(valid.size() + 1), 0, 0)},
         {"a free slot's zeros", std::vector<uint8_t>(persistence_keys::CLIENT_RECORD_SIZE, 0)},
-        {"the earlier layout", earlier_layout},
+        {"a 33-byte blob", short_blob},
     };
     for (const Row& row : rows) {
         SCOPED_TRACE(row.name);

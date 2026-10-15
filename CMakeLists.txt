@@ -138,6 +138,7 @@ target_compile_definitions(sendspin_server_cpp_stb PUBLIC
 list(TRANSFORM SENDSPIN_SERVER_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/)
 list(TRANSFORM SENDSPIN_SERVER_HOST_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/)
 add_library(sendspin_server_cpp STATIC ${SENDSPIN_SERVER_SOURCES} ${SENDSPIN_SERVER_HOST_SOURCES})
+add_library(sendspin_server_cpp::sendspin_server_cpp ALIAS sendspin_server_cpp)
 sendspin_server_cpp_configure_target(sendspin_server_cpp)
 # GCC reports ArduinoJson's CollectionIterator::nextId_ as maybe uninitialized where its object
 # lookups inline; it is set on every path
@@ -148,14 +149,16 @@ target_include_directories(sendspin_server_cpp
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-# src/profile.h: the tests that include the library's private headers see the same
-# profile
+# src/profile.h's switches, which no public header reads; tests/CMakeLists.txt gives them to the
+# tests, which include the library's private headers and must see the same profile
+set(_sendspin_server_profile_definitions)
 if(SENDSPIN_SERVER_EMBEDDED_PROFILE)
-    target_compile_definitions(sendspin_server_cpp PUBLIC SENDSPIN_SERVER_EMBEDDED_PROFILE=1)
+    list(APPEND _sendspin_server_profile_definitions SENDSPIN_SERVER_EMBEDDED_PROFILE=1)
 endif()
 if(SENDSPIN_SERVER_MEMORY_STATS)
-    target_compile_definitions(sendspin_server_cpp PUBLIC SENDSPIN_SERVER_MEMORY_STATS=1)
+    list(APPEND _sendspin_server_profile_definitions SENDSPIN_SERVER_MEMORY_STATS=1)
 endif()
+target_compile_definitions(sendspin_server_cpp PRIVATE ${_sendspin_server_profile_definitions})
 
 # platform_discovery(): one backend per platform, each with a thread of its own
 if(SENDSPIN_SERVER_ENABLE_DISCOVERY AND APPLE)
