@@ -316,13 +316,14 @@ void WsLink::writer_main() {
                 this->send_ping();
             }
             if ((requests & REQUEST_WRITE) != 0) {
-                const bool sent = this->send_batch(this->write_batch_);
+                std::optional<CloseReason> failure;
+                const bool sent = this->send_batch(this->write_batch_, failure);
                 this->write_batch_.clear();
                 if (sent) {
                     this->raise(InboundEndpoint::Event::WRITE_DONE);
-                } else {
+                } else if (failure) {
                     // The close is the write's outcome
-                    this->report_closed(CloseReason::PEER_CLOSED);
+                    this->report_closed(*failure);
                 }
             }
             if ((requests & REQUEST_ROOM) != 0) {
@@ -348,20 +349,22 @@ bool WsLink::serve_control() {
 
 void WsLink::wait_for_room() {
     while (this->serve_control() && !this->closed()) {
-        const int polled = this->poll_room(WS_ROOM_POLL_MS);
+        CloseReason failure = CloseReason::FAILED;
+        const int polled = this->poll_room(WS_ROOM_POLL_MS, failure);
         if (polled > 0) {
             this->raise(InboundEndpoint::Event::WRITABLE);
             return;
         }
         if (polled < 0) {
-            this->report_closed(CloseReason::PEER_CLOSED);
+            this->report_closed(failure);
             return;
         }
     }
 }
 
-int WsLink::poll_room(int timeout_ms) {
+int WsLink::poll_room(int timeout_ms, CloseReason& failure) {
     if (this->fd_closed_.load(std::memory_order_acquire)) {
+        failure = CloseReason::PEER_CLOSED;
         return -1;
     }
     // Outside the socket mutex: lwIP holds a socket for the whole of a select() on it
@@ -374,19 +377,33 @@ int WsLink::poll_room(int timeout_ms) {
     timeval timeout{};
     timeout.tv_sec = timeout_ms / 1000;
     timeout.tv_usec = (timeout_ms % 1000) * 1000;
-    return select(this->fd_ + 1, nullptr, &writable, nullptr, &timeout);
+    const int polled = select(this->fd_ + 1, nullptr, &writable, nullptr, &timeout);
+    if (polled < 0) {
+        failure = close_reason_for_errno(errno);
+    }
+    return polled;
 }
 
-bool WsLink::send_batch(const WsBatch& batch) {
+bool WsLink::send_batch(const WsBatch& batch, std::optional<CloseReason>& failure) {
     const std::lock_guard<std::timed_mutex> lock(this->frame_mutex_);
-    if (this->close_sent_ || this->frame_broken_) {
+    // The task that sent a close reports it, maybe only after this: the first report wins, so a
+    // refusal that close caused reports nothing
+    if (this->close_sent_) {
+        return false;
+    }
+    if (this->frame_broken_) {
+        failure = this->send_failure_;
         return false;
     }
     const std::span<const uint8_t> bytes = batch.bytes();
     std::array<iovec, 1> parts{};
     parts[0].iov_base = const_cast<uint8_t*>(bytes.data());
     parts[0].iov_len = bytes.size();
-    return this->send_parts(parts.data(), parts.size(), now_us() + this->settings_.write_stall_us);
+    if (!this->send_parts(parts.data(), parts.size(), now_us() + this->settings_.write_stall_us)) {
+        failure = this->send_failure_;
+        return false;
+    }
+    return true;
 }
 
 bool WsLink::send_ping() {
@@ -464,10 +481,11 @@ bool WsLink::send_parts(iovec* parts, size_t count, int64_t deadline_us) {
     }
     size_t left = total;
     // Frames some of whose bytes went are broken by any failure from here
-    const auto fail = [this, &left, total] {
+    const auto fail = [this, &left, total](CloseReason reason) {
         if (left < total) {
             this->frame_broken_ = true;
         }
+        this->send_failure_ = reason;
         return false;
     };
     while (left > 0) {
@@ -475,12 +493,12 @@ bool WsLink::send_parts(iovec* parts, size_t count, int64_t deadline_us) {
         {
             const std::lock_guard<std::mutex> lock(this->socket_mutex_);
             if (this->fd_closed_) {
-                return fail();
+                return fail(CloseReason::PEER_CLOSED);
             }
             sent = sendmsg(this->fd_, &message, MSG_DONTWAIT);
         }
         if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            return fail();
+            return fail(close_reason_for_errno(errno));
         }
         if (sent > 0) {
             left -= static_cast<size_t>(sent);
@@ -488,13 +506,18 @@ bool WsLink::send_parts(iovec* parts, size_t count, int64_t deadline_us) {
             continue;
         }
         const int64_t left_us = deadline_us - now_us();
-        if (left_us <= 0 || this->close_requested()) {
-            return fail();
+        if (left_us <= 0) {
+            return fail(CloseReason::WRITE_STALLED);
+        }
+        // Core's close ends the connection whatever this reports
+        if (this->close_requested()) {
+            return fail(CloseReason::FAILED);
         }
         const auto wait_ms = static_cast<int>(
             std::min<int64_t>((left_us / US_PER_MS) + 1, static_cast<int64_t>(WS_SEND_SLICE_MS)));
-        if (this->poll_room(wait_ms) < 0) {
-            return fail();
+        CloseReason failure = CloseReason::FAILED;
+        if (this->poll_room(wait_ms, failure) < 0) {
+            return fail(failure);
         }
     }
     return true;

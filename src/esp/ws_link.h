@@ -239,10 +239,13 @@ private:
     bool serve_control();
     void wait_for_room();
 
-    /// > 0 when the socket has room, 0 when timeout_ms passed, < 0 on an error
-    int poll_room(int timeout_ms);
+    /// > 0 when the socket has room, 0 when timeout_ms passed, < 0 on an error, with why in
+    /// failure
+    int poll_room(int timeout_ms, CloseReason& failure);
     /// The batch's frames in one send, as it holds them
-    bool send_batch(const WsBatch& batch);
+    /// @return true once sent; else false, with why the send failed in failure, or failure unset
+    /// when a close was sent, which the task that sent it reports
+    bool send_batch(const WsBatch& batch, std::optional<CloseReason>& failure);
     bool send_ping();
     /// Answers the last ping stored (store_ping())
     bool send_pong();
@@ -255,7 +258,8 @@ private:
     bool write_frame(uint8_t opcode, const uint8_t* data, size_t len, int64_t deadline_us);
     /// Under frame_mutex_: sends whole frames until they are all sent, deadline_us passes or a
     /// close is asked for. The socket mutex is held only while lwIP copies what fits. A frame left
-    /// part written breaks the stream: every later frame, a close included, is refused.
+    /// part written breaks the stream: every later frame, a close included, is refused. A failure
+    /// sets send_failure_.
     bool send_parts(iovec* parts, size_t count, int64_t deadline_us);
 
     const SharedPtr<LoopCore> loop_;
@@ -291,6 +295,8 @@ private:
     bool close_sent_{false};
     /// Guarded by frame_mutex_: a frame was left part written
     bool frame_broken_{false};
+    /// Guarded by frame_mutex_: why the last send_parts() failed
+    CloseReason send_failure_{CloseReason::FAILED};
     /// Guarded by socket_mutex_, which no one holds long: the last ping's payload
     std::array<uint8_t, WS_CONTROL_PAYLOAD_MAX> pong_{};
     size_t pong_bytes_{0};

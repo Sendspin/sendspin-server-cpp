@@ -316,6 +316,14 @@ bool WsAssembly::end(bool fin) {
     return true;
 }
 
+bool ws_frame_allowed(uint8_t opcode, bool fin, uint64_t payload_bytes) {
+    if (!known_opcode(opcode)) {
+        return false;
+    }
+    const bool control = (opcode & CONTROL_BIT) != 0;
+    return !control || (fin && payload_bytes <= WS_CONTROL_PAYLOAD_MAX);
+}
+
 WsHeaderParse ws_parse_frame_header(std::span<const uint8_t> bytes, bool peer_masks) {
     WsHeaderParse parse;
     if (bytes.size() < 2) {
@@ -329,12 +337,10 @@ WsHeaderParse ws_parse_frame_header(std::span<const uint8_t> bytes, bool peer_ma
     header.fin = (bytes[0] & FIN) != 0;
     header.opcode = bytes[0] & OPCODE_MASK;
     const bool masked = (bytes[1] & MASKED) != 0;
-    if ((bytes[0] & RSV_MASK) != 0 || !known_opcode(header.opcode) || masked != peer_masks) {
-        return invalid();
-    }
+    // A 7-bit length past LEN_7_MAX announces a longer one, so it is too long for a control frame
     const uint8_t len7 = bytes[1] & LEN_MASK;
-    const bool control = (header.opcode & CONTROL_BIT) != 0;
-    if (control && (!header.fin || len7 > LEN_7_MAX)) {
+    if ((bytes[0] & RSV_MASK) != 0 || masked != peer_masks ||
+        !ws_frame_allowed(header.opcode, header.fin, len7)) {
         return invalid();
     }
     size_t at = 2;
