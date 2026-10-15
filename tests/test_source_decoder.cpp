@@ -13,9 +13,9 @@
 // limitations under the License.
 
 /// @file test_source_decoder.cpp
-/// @brief A routed source's feed and decoder: the formats it takes, PCM and FLAC decoded bit for
-/// bit and Opus decoded, each block with its capture time, and the chunks that break the stream's
-/// framing or are longer than 150 ms reported as protocol errors (roles/source/v1.md
+/// @brief A routed source's decoder: the formats it takes, PCM and FLAC decoded bit for bit and
+/// Opus decoded, each block with its capture time, and the chunks that break the stream's framing
+/// or are longer than 150 ms reported as protocol errors (roles/source/v1.md
 /// "client-stream/start", "Source Audio Chunks (Binary)")
 
 #include "crypto/base64url.h"
@@ -49,49 +49,6 @@ using sendspin::server::SourceFeed;
 using sendspin::server::SourceItem;
 using sendspin::server::test::job_view_of;
 using Bytes = std::vector<uint8_t>;
-
-// ==============================================================================
-// The feed
-// ==============================================================================
-
-// A bounded FIFO: items come out in order with their bytes, across the storage's wrap, and a push
-// past the items or the bytes it holds is refused
-TEST(SourceFeed, HoldsItemsInOrderWithinItsBounds) {
-    SourceFeed feed(10, 3);
-    const auto push = [&](uint64_t stream, size_t size) {
-        SourceItem item;
-        item.kind = SourceItem::Kind::CHUNK;
-        item.stream = stream;
-        return feed.push(item, Bytes(size, static_cast<uint8_t>(stream)));
-    };
-    EXPECT_TRUE(push(1, 4));
-    EXPECT_TRUE(push(2, 4));
-    EXPECT_FALSE(push(3, 4)) << "past the bytes";
-    EXPECT_TRUE(push(3, 2));
-    EXPECT_FALSE(push(4, 1)) << "past the items";
-    for (uint64_t expected = 1; expected <= 2; ++expected) {
-        SourceItem item;
-        std::span<const uint8_t> bytes;
-        ASSERT_TRUE(feed.front(item, bytes));
-        EXPECT_EQ(item.stream, expected);
-        EXPECT_TRUE(
-            std::all_of(bytes.begin(), bytes.end(), [&](uint8_t b) { return b == expected; }));
-        feed.pop();
-    }
-    // Wraps to the start of the storage, behind the item left
-    EXPECT_TRUE(push(5, 6));
-    SourceItem item;
-    std::span<const uint8_t> bytes;
-    ASSERT_TRUE(feed.front(item, bytes));
-    EXPECT_EQ(item.stream, 3U);
-    feed.pop();
-    ASSERT_TRUE(feed.front(item, bytes));
-    EXPECT_EQ(item.stream, 5U);
-    EXPECT_EQ(bytes.size(), 6U);
-    feed.pop();
-    EXPECT_TRUE(feed.empty());
-    EXPECT_TRUE(push(6, 10)) << "an empty feed holds its whole storage";
-}
 
 // ==============================================================================
 // Formats

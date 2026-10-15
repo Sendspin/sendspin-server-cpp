@@ -31,6 +31,7 @@ add_executable(sendspin_server_cpp_tests
     test_frame_encoder.cpp
     test_group_audio.cpp
     test_group_audio_internals.cpp
+    test_group_internals.cpp
     test_host_view.cpp
     test_host_view_internals.cpp
     test_inbound_hold.cpp
@@ -64,9 +65,11 @@ add_executable(sendspin_server_cpp_tests
     test_sched_lifecycle.cpp
     test_sched_lowering.cpp
     test_sched_property.cpp
+    test_sched_run_view.cpp
     test_sched_selection.cpp
     test_sched_stalls.cpp
     test_sched_timeline.cpp
+    test_scheduled_updates.cpp
     test_send_queues.cpp
     test_server.cpp
     test_server_accept.cpp
@@ -74,6 +77,7 @@ add_executable(sendspin_server_cpp_tests
     test_server_core.cpp
     test_server_core_internals.cpp
     test_server_discovery.cpp
+    test_server_groups.cpp
     test_server_limits.cpp
     test_server_log.cpp
     test_server_pairing.cpp
@@ -92,6 +96,7 @@ add_executable(sendspin_server_cpp_tests
     test_session_internals.cpp
     test_source_clock.cpp
     test_source_decoder.cpp
+    test_source_feed.cpp
     test_source_sink.cpp
     test_source_stream.cpp
     test_soak_wire_checker.cpp
@@ -100,6 +105,7 @@ add_executable(sendspin_server_cpp_tests
     test_timing_log.cpp
     test_timing_stats.cpp
     test_transport.cpp
+    test_transport_url.cpp
     test_trust_policy.cpp
     test_url_text.cpp
     test_visualizer.cpp
@@ -143,21 +149,7 @@ target_compile_definitions(sendspin_server_cpp_tests PRIVATE
 # White-box: each file below compiles with -fno-access-control, beside the private members it
 # reaches and why; a class's other tests are in a file that compiles without it.
 # test_audio_workers_internals.cpp reads AudioWorkers::pool_ (Pool::mutex and stopping) to let a
-# job finish only once a stop has begun, which no observable state shows. It wraps a group's
-# pipeline job (Group::audio_) with group_job.h, to hold it running while core erases the group or
-# to learn when its next run is over, and reads Group::playing_ and input_ on core to show a
-# release ended the run and detached the input. Its stall tests set the state an epoch's start
-# sets on a Group with no input (playing_, epoch_, anchor_, rings_, pipelines_.analyses), call its
-# on_frame(), on_anchor_shift() and report_stalls() as the group-to-core FIFO and its timer do,
-# and replace Group::stalls_ with a count whose last report was made at a chosen time, so a
-# held-back report is due within the test rather than after 10 s, and take from it to read the
-# counts, which only the log line shows otherwise. It calls Group::on_wake() as the group's wakeup
-# does, since a write's signal can fold into a pipeline job's that is not posted yet, and reads
-# HostView::slew_ and next_slew_ under HostView::mutex_, as only their storage shows that core
-# freed the slew a write left it.
-# group_job.h, which only the files given the flag include, waits for a task between runs under
-# its pool's mutex (AudioWorkers::Task::pool_, running_ and queued_) to replace its job
-# (Task::job_), and reads a group's pipelines from the job (Group::PipelineJob::audio).
+# job finish only once a stop has begun, which no observable state shows.
 set_source_files_properties(test_audio_workers_internals.cpp PROPERTIES COMPILE_OPTIONS
                             -fno-access-control)
 # test_dispatcher_internals.cpp reads Dispatcher::token_ once the thread has ended: a later thread
@@ -172,6 +164,22 @@ set_source_files_properties(test_dispatcher_internals.cpp PROPERTIES COMPILE_OPT
 # position, which pause() takes from the time. It reads HostView::rebase_latency_us_, the `L_p`
 # the pipelines publish for admission, which only shows in admission's bounds.
 set_source_files_properties(test_group_audio_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
+# test_group_internals.cpp wraps a group's pipeline job (Group::audio_) with group_job.h, to hold
+# it running while core erases the group or to learn when its next run is over, and reads
+# Group::playing_ and input_ on core to show a release ended the run and detached the input. Its
+# stall tests set the state an epoch's start sets on a Group with no input (playing_, epoch_,
+# anchor_, rings_, pipelines_.analyses), call its on_frame(), on_anchor_shift() and
+# report_stalls() as the group-to-core FIFO and its timer do, and replace Group::stalls_ with a
+# count whose last report was made at a chosen time, so a held-back report is due within the test
+# rather than after 10 s, and take from it to read the counts, which only the log line shows
+# otherwise. It calls Group::on_wake() as the group's wakeup does, since a write's signal can fold
+# into a pipeline job's that is not posted yet, and reads HostView::slew_ and next_slew_ under
+# HostView::mutex_, as only their storage shows that core freed the slew a write left it.
+# group_job.h, which only the files given the flag include, waits for a task between runs under
+# its pool's mutex (AudioWorkers::Task::pool_, running_ and queued_) to replace its job
+# (Task::job_), and reads a group's pipelines from the job (Group::PipelineJob::audio).
+set_source_files_properties(test_group_internals.cpp PROPERTIES COMPILE_OPTIONS
                             -fno-access-control)
 # test_host_view_internals.cpp leaves the outbox (HostView::outbox_, outbox_posted_) as a host call
 # does between deciding a callback and posting it, so that close() racing that host call can be

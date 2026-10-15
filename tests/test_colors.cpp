@@ -15,10 +15,9 @@
 /// @file test_colors.cpp
 /// @brief The color role's pure parts (spec roles/color/v1.md): WCAG contrast, the guarantees
 /// with_contrast() and palette_colors() keep as a seeded property test with a contrast computed
-/// here, the median cut, and the schedule of color states.
+/// here, and the median cut.
 
 #include "colors.h"
-#include "scheduled_updates.h"
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -30,7 +29,6 @@
 namespace {
 
 using sendspin::server::Colors;
-using sendspin::server::ColorState;
 using sendspin::server::RgbColor;
 
 /// WCAG 2 contrast, computed here from the definition rather than by colors.cpp
@@ -181,31 +179,6 @@ TEST(ColorPalette, PutsTheDominantColorFirst) {
     EXPECT_EQ(sendspin::server::quantize_palette(opaque, 5, 1)[0], (RgbColor{4, 252, 4}));
     EXPECT_TRUE(
         sendspin::server::quantize_palette(pixels({{{255, 255, 255, 255}, 10}}), 5, 1).empty());
-}
-
-// spec roles/color/v1.md "Scheduled color updates", through the schedule metadata shares
-TEST(ColorSchedule, SendsCurrentAndScheduledStates) {
-    constexpr int64_t S = 1000000;
-    sendspin::server::ScheduledUpdates<ColorState> colors;
-    Colors red;
-    red.primary = RgbColor{255, 0, 0};
-    EXPECT_EQ(colors.current(5).timestamp_us, 5);
-    EXPECT_EQ(colors.current(5).colors, Colors{});
-    std::vector<ColorState> sends = colors.set({S, red}, 2 * S);
-    ASSERT_EQ(sends.size(), 1U);
-    EXPECT_EQ(sends[0], (ColorState{S, red}));
-    Colors blue;
-    blue.primary = RgbColor{0, 0, 255};
-    EXPECT_TRUE(colors.set({30 * S, blue}, 3 * S).empty());
-    EXPECT_EQ(colors.next_due_us(), 10 * S);
-    sends = colors.advance(10 * S);
-    ASSERT_EQ(sends.size(), 1U);
-    EXPECT_EQ(sends[0].colors, blue);
-    EXPECT_EQ(colors.sent_pending(), (ColorState{30 * S, blue}));
-    // Cancelled once sent: the current state again
-    sends = colors.cancel(11 * S);
-    ASSERT_EQ(sends.size(), 1U);
-    EXPECT_EQ(sends[0], (ColorState{S, red}));
 }
 
 }  // namespace
