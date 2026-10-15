@@ -140,8 +140,8 @@ void ServerCore::cancel_connect_url(const std::string& url) {
         return;
     }
     // A dialed connection the client has not taken yet is part of the dial: abandoned with it
-    Client* client = it->second.client;
-    const bool abandon = client != nullptr && !client->admitted && !client->closed;
+    Client* client = it->second.client();
+    const bool abandon = client != nullptr && !client->admitted() && !client->closed;
     this->stop_dialing(it->second);
     if (abandon) {
         client->driver->session().close_by_host();
@@ -266,7 +266,7 @@ void ServerCore::on_discovery_available() {
 }
 
 void ServerCore::schedule_dial(Target& target) {
-    if (target.client != nullptr || target.dial || target.waiting) {
+    if (!target.idle() && !std::holds_alternative<RetryArmed>(target.phase)) {
         return;
     }
     const int64_t at_us = next_dial_at_us(target);
@@ -274,7 +274,7 @@ void ServerCore::schedule_dial(Target& target) {
         this->arm_retry(target, at_us);
         return;
     }
-    if (target.retry_pending) {
+    if (std::holds_alternative<RetryArmed>(target.phase)) {
         target.retry->cancel();
     }
     this->start_dial(target);
@@ -296,9 +296,9 @@ void ServerCore::arm_retry(Target& target, int64_t at_us) {
     if (!target.retry) {
         target.retry = std::make_unique<Timer>(this->loop_);
     }
-    target.retry_pending = true;
+    target.phase = RetryArmed{};
     target.retry->start(at_us, [this, entry = &target] {
-        entry->retry_pending = false;
+        entry->phase = std::monostate{};
         // What held at the request may not hold after the wait
         if (entry->operator_dial || dials_on_its_own(this->dial_state(*entry))) {
             this->start_dial(*entry);
@@ -321,12 +321,13 @@ void ServerCore::stop_dialing(Target& target) {
     if (target.discovery) {
         target.discovery->suppressed = true;
     }
-    if (target.retry_pending) {
+    if (std::holds_alternative<RetryArmed>(target.phase)) {
         target.retry->cancel();
-        target.retry_pending = false;
     }
-    target.waiting.reset();
-    target.dial.reset();
+    // A connection open through it stays open
+    if (target.client() == nullptr) {
+        target.phase = std::monostate{};
+    }
 }
 
 DialState ServerCore::dial_state(const Target& target) const {
@@ -336,7 +337,7 @@ DialState ServerCore::dial_state(const Target& target) const {
     state.suppressed = state.discovered && target.discovery->suppressed;
     state.reconnecting = target.reconnecting;
     state.retrying = target.retrying;
-    state.busy = target.client != nullptr || target.dial || target.retry_pending || target.waiting;
+    state.busy = !target.idle();
     state.connected_elsewhere = target.known && this->connected(target.known->client_id);
     return state;
 }
@@ -348,16 +349,15 @@ void ServerCore::dial_if_due(Target& target) {
 }
 
 void ServerCore::start_dial(Target& target) {
-    target.retry_pending = false;
     if (this->dialing() >= connection_limits::MAX_DIALING) {
-        if (!target.waiting) {
-            target.waiting = this->next_waiting_++;
+        if (!std::holds_alternative<AwaitingSlot>(target.phase)) {
+            target.phase = AwaitingSlot{this->next_waiting_++};
             SS_LOGI(this->log_, "dial to %s waits: %zu dials are in progress",
                     url_for_log(target.url).c_str(), connection_limits::MAX_DIALING);
         }
         return;
     }
-    target.waiting.reset();
+    target.phase = std::monostate{};
     // A new connection: the host's earlier stop was for the one before
     target.host_stopped = false;
     if (!this->room_for_connection()) {
@@ -370,24 +370,28 @@ void ServerCore::start_dial(Target& target) {
     }
     SS_LOGI(this->log_, "dialing %s%s", url_for_log(target.url).c_str(),
             target.operator_dial ? " for playback" : "");
-    target.dial.emplace(dial(this->loop_, target.dial_target, this->settings_.transport,
-                             [this, target = &target](DialResult result) {
-                                 this->on_dialed(*target, std::move(result));
-                             }));
+    target.phase.emplace<PendingDial>(dial(this->loop_, target.dial_target,
+                                           this->settings_.transport,
+                                           [this, target = &target](DialResult result) {
+                                               this->on_dialed(*target, std::move(result));
+                                           }));
 }
 
 void ServerCore::start_waiting_dials() {
     while (!this->stopping_ && this->dialing() < connection_limits::MAX_DIALING) {
         Target* next = nullptr;
+        uint64_t next_order = 0;
         for (auto& [key, target] : this->targets_) {
-            if (target.waiting && (next == nullptr || target.waiting < next->waiting)) {
+            const AwaitingSlot* awaiting = std::get_if<AwaitingSlot>(&target.phase);
+            if (awaiting != nullptr && (next == nullptr || awaiting->order < next_order)) {
                 next = &target;
+                next_order = awaiting->order;
             }
         }
         if (next == nullptr) {
             return;
         }
-        next->waiting.reset();
+        next->phase = std::monostate{};
         // What held when the dial became due may not hold after the wait
         if (next->operator_dial || dials_on_its_own(this->dial_state(*next))) {
             this->start_dial(*next);
@@ -396,9 +400,9 @@ void ServerCore::start_waiting_dials() {
 }
 
 size_t ServerCore::dialing() const {
-    const auto dials =
-        std::count_if(this->targets_.begin(), this->targets_.end(),
-                      [](const auto& entry) { return entry.second.dial.has_value(); });
+    const auto dials = std::count_if(
+        this->targets_.begin(), this->targets_.end(),
+        [](const auto& entry) { return std::holds_alternative<PendingDial>(entry.second.phase); });
     return static_cast<size_t>(dials) + this->in_handshake(true);
 }
 
@@ -418,16 +422,16 @@ size_t ServerCore::in_handshake(bool dialed) const {
     return static_cast<size_t>(
         std::count_if(this->clients_.begin(), this->clients_.end(), [dialed](const auto& entry) {
             const Client& client = *entry.second;
-            return !client.closed && !client.active && (client.target != nullptr) == dialed;
+            return !client.closed && !client.active() && (client.target != nullptr) == dialed;
         }));
 }
 
 void ServerCore::on_dialed(Target& target, DialResult result) {
-    target.dial.reset();
+    target.phase = std::monostate{};
     if (Connection* connection = std::get_if<Connection>(&result)) {
         Client& client = this->add_client(std::move(*connection), &target, target.url);
         client.pairing_dial = std::exchange(target.pairing_dial, false);
-        target.client = &client;
+        target.phase = &client;
         client.driver->start();
         return;
     }
@@ -480,7 +484,7 @@ bool ServerCore::admit_activation(bool playable) {
     size_t accepted = 0;
     size_t unapproved = 0;
     for (const auto& [id, other] : this->clients_) {
-        if (other->active && other->target == nullptr) {
+        if (other->active() && other->target == nullptr) {
             ++accepted;
             unapproved += other->playable ? 0 : 1;
         }
@@ -552,7 +556,7 @@ void ServerCore::on_ready(Client& client) {
         client.driver->pump();
         return;
     }
-    client.active = true;
+    client.phase = Client::Phase::ACTIVE;
     if (client.target != nullptr) {
         client.target->retrying = false;
     }
@@ -663,7 +667,9 @@ void ServerCore::on_ready(Client& client) {
 }
 
 void ServerCore::admit(Client& client) {
-    client.admitted = true;
+    if (!client.admitted()) {
+        client.phase = Client::Phase::ADMITTED;
+    }
     // The target dials this client from now on (connected_elsewhere(), connect())
     if (client.target != nullptr) {
         client.target->known = client.info;
@@ -672,7 +678,7 @@ void ServerCore::admit(Client& client) {
     if (this->reported(client.info.client_id)) {
         return;
     }
-    client.reported = true;
+    client.phase = Client::Phase::REPORTED;
     SS_LOGI(this->log_, "%s connected", this->describe(client).c_str());
     // Published first, so that a listener sees the client in clients()
     this->publish_snapshot();
@@ -682,7 +688,7 @@ void ServerCore::admit(Client& client) {
 
 bool ServerCore::reported(const std::string& client_id) const {
     return std::any_of(this->clients_.begin(), this->clients_.end(), [&](const auto& entry) {
-        return entry.second->reported && entry.second->info.client_id == client_id;
+        return entry.second->reported() && entry.second->info.client_id == client_id;
     });
 }
 
@@ -698,7 +704,7 @@ void ServerCore::on_rekeyed(Client& client) {
 }
 
 void ServerCore::on_client_state(Client& client) {
-    if (!client.admitted) {
+    if (!client.admitted()) {
         this->admit(client);
     }
     if (client.group == nullptr) {
@@ -1210,7 +1216,7 @@ void ServerCore::refresh_playback(Client& client, bool group_playing) {
 
 void ServerCore::on_playback_changed(Group& group) {
     for (const auto& [id, client] : this->clients_) {
-        if (client->active && client->group == &group) {
+        if (client->active() && client->group == &group) {
             this->refresh_playback(*client, group.playing());
         }
     }
@@ -1497,11 +1503,12 @@ void ServerCore::attach_input(const std::shared_ptr<HostView>& view) {
 void ServerCore::on_closed(Client& client) {
     this->log_memory("closed");
     const SessionDriver& driver = *client.driver;
-    const bool was_active = client.active;
-    const bool was_reported = client.reported;
+    const bool was_active = client.active();
+    const bool was_admitted = client.admitted();
+    const bool was_reported = client.reported();
     client.closed = true;
     // The arguments are evaluated only when the level is logged
-    if (client.admitted) {
+    if (client.admitted()) {
         SS_LOGI(this->log_, "%s disconnected: %s", this->describe(client).c_str(),
                 end_description(driver.session().outcome(), driver.transport_close()).c_str());
     } else if (driver.session().end() == SessionEnd::REFUSED) {
@@ -1516,7 +1523,7 @@ void ServerCore::on_closed(Client& client) {
                 end_description(driver.session().outcome(), driver.transport_close()).c_str());
     }
     if (client.target != nullptr) {
-        client.target->client = nullptr;
+        client.target->phase = std::monostate{};
         this->after_close(*client.target, client);
     }
     this->on_pairing_connection_closed(client);
@@ -1525,8 +1532,7 @@ void ServerCore::on_closed(Client& client) {
         this->unbind(*route->second);
         this->refresh_source(client.info.client_id, &client);
     }
-    client.active = false;
-    client.reported = false;
+    client.phase = Client::Phase::CLOSED;
     if (was_reported) {
         this->publish_snapshot();
         ClientDisconnect disconnect;
@@ -1540,13 +1546,13 @@ void ServerCore::on_closed(Client& client) {
         });
         // Another connection of the client that took it is reported in its place
         for (const auto& [id, other] : this->clients_) {
-            if (other->admitted && other->active && !other->driver->session().end() &&
+            if (other->admitted() && !other->driver->session().end() &&
                 other->info.client_id == client.info.client_id) {
                 this->admit(*other);
                 break;
             }
         }
-    } else if (!client.admitted && driver.session().end() != SessionEnd::CLOSED_BY_HOST &&
+    } else if (!was_admitted && driver.session().end() != SessionEnd::CLOSED_BY_HOST &&
                driver.session().end() != SessionEnd::REFUSED) {
         // Ended before the client took it: a failed handshake, or a refusal such as
         // `concurrent_attempt`; the host's own close (disconnect(), cancel_connect_url()) is no
@@ -1593,18 +1599,18 @@ void ServerCore::on_closed(Client& client) {
 void ServerCore::after_close(Target& target, const Client& client) {
     const Session& session = client.driver->session();
     const int64_t now = now_us();
-    if (!client.admitted && is_handshake_failure(session.end())) {
+    if (!client.admitted() && is_handshake_failure(session.end())) {
         target.backoff.record_failure(now, this->settings_.backoff);
     }
-    if (client.admitted) {
+    if (client.admitted()) {
         target.known = client.info;
     }
-    if (!client.active && !target.retrying) {
+    if (!client.active() && !target.retrying) {
         // A later dial on the server's own is idle, unless it retries the operator's
         target.operator_dial = false;
     }
     ConnectionEnd end;
-    end.activated = client.active;
+    end.activated = client.active();
     const std::optional<ClientGoodbye>& goodbye = session.goodbye();
     end.goodbye = goodbye.has_value();
     end.reason = goodbye ? goodbye->reason : std::nullopt;
@@ -1665,7 +1671,7 @@ void ServerCore::erase_if_idle(const std::string& key) {
         return;
     }
     const Target& target = it->second;
-    if (target.client != nullptr) {
+    if (target.client() != nullptr) {
         return;
     }
     if (target.discovery) {
@@ -1676,8 +1682,7 @@ void ServerCore::erase_if_idle(const std::string& key) {
         return;
     }
     // A target with failures keeps its backoff, and one that reached a client stays dialable
-    if (!target.dial && !target.retry_pending && !target.waiting &&
-        target.backoff.failures() == 0 && !target.known) {
+    if (target.idle() && target.backoff.failures() == 0 && !target.known) {
         this->targets_.erase(it);
     }
 }
@@ -1689,8 +1694,7 @@ void ServerCore::prune_targets(int64_t now_us) {
     std::erase_if(this->targets_, [now_us, max_us](const auto& entry) {
         const Target& target = entry.second;
         const HandshakeBackoff& backoff = target.backoff;
-        return !target.discovery && !target.known && target.client == nullptr && !target.dial &&
-               !target.retry_pending && !target.waiting &&
+        return !target.discovery && !target.known && target.idle() &&
                (backoff.failures() == 0 || backoff.next_dial_us() + max_us <= now_us);
     });
 }
@@ -1708,7 +1712,7 @@ ServerCore::Target* ServerCore::find_known(const std::string& client_id) {
 
 const ServerCore::Client* ServerCore::find_connection(const std::string& client_id) const {
     for (const auto& [id, client] : this->clients_) {
-        if (client->active && client->info.client_id == client_id) {
+        if (client->active() && client->info.client_id == client_id) {
             return client.get();
         }
     }
@@ -1722,7 +1726,7 @@ bool ServerCore::connected(const std::string& client_id) const {
 void ServerCore::publish_snapshot() {
     std::vector<ClientInfo> clients;
     for (const auto& [id, client] : this->clients_) {
-        if (client->reported) {
+        if (client->reported()) {
             clients.push_back(client->info);
             clients.back().pairing = this->pairings_.contains(client->info.client_id);
         }
@@ -1733,7 +1737,7 @@ void ServerCore::publish_snapshot() {
     };
     for (const auto& [key, target] : this->targets_) {
         const bool present = target.discovery && target.discovery->present;
-        if (target.client != nullptr || (target.discovery && !present)) {
+        if (target.client() != nullptr || (target.discovery && !present)) {
             continue;
         }
         ClientInfo info;
@@ -1760,7 +1764,7 @@ void ServerCore::publish_snapshot() {
 }
 
 std::string ServerCore::describe(const Client& client) const {
-    if (client.active) {
+    if (client.active()) {
         return "\"" + printable(client.info.name) + "\" at " + client.info.address;
     }
     return client.target != nullptr ? url_for_log(client.url) : client.driver->remote_endpoint();
@@ -1776,7 +1780,7 @@ void ServerCore::shutdown(int64_t grace_us) {
         }
     }
     for (const auto& [id, client] : this->clients_) {
-        if (client->reported) {
+        if (client->reported()) {
             this->post_event([info = client->info](ServerListener& listener) {
                 listener.on_client_disconnected(info, {DisconnectReason::SERVER_STOPPED, {}});
             });
