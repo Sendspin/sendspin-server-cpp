@@ -20,6 +20,7 @@
 #include "clock.h"
 #include "crypto/keys.h"
 #include "fragmentation.h"
+#include "freed_blocks.h"
 #include "messages.h"
 #include "raw_client.h"
 #include "session.h"
@@ -1273,6 +1274,61 @@ TEST_P(SessionTest, WipesAPendingPairingFragmentAtTheEnd) {
         EXPECT_FALSE(holds_to_capacity(h.session.scratch_, psk));
         EXPECT_FALSE(holds_to_capacity(h.session.reassembler_.buffer_, psk));
     }
+}
+
+// A pairing message's first fragment, its PSK in it, followed by a longer one, grows both the
+// decrypted message's buffer and the reassembly buffer; neither frees a block holding the PSK.
+// The scan's Control is SecureReserve.WipesTheBlockItLeaves.
+TEST_P(SessionTest, GrowsItsBuffersWithoutFreeingAPairingSecret) {
+    using sendspin::server::FRAGMENT_FLAG_FIRST;
+    if (!FreedBlockScan::available()) {
+        GTEST_SKIP() << "needs the sanitizer's free hook";
+    }
+    const std::string psk = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
+    Harness h(GetParam());
+    ASSERT_NO_FATAL_FAILURE(h.activate());
+    Bytes first{sendspin::server::MESSAGE_ID_JSON};
+    const Bytes head =
+        bytes_of(R"({"type":"client/pair-finalize","payload":{"long_term_psk":")" + psk);
+    first.insert(first.end(), head.begin(), head.end());
+    h.send(h.fragment(FRAGMENT_FLAG_FIRST, first));
+    ASSERT_TRUE(holds_to_capacity(h.session.scratch_, psk));
+    ASSERT_TRUE(holds_to_capacity(h.session.reassembler_.buffer_, psk));
+    const size_t scratch_capacity = h.session.scratch_.capacity();
+    const size_t buffer_capacity = h.session.reassembler_.buffer_.capacity();
+    const Bytes longer = h.fragment(0, Bytes(4 * scratch_capacity, 'a'));
+    {
+        const FreedBlockScan scan(psk);
+        h.send(longer);
+        EXPECT_EQ(scan.holding(), 0);
+    }
+    EXPECT_FALSE(h.session.end());
+    EXPECT_GT(h.session.scratch_.capacity(), scratch_capacity);
+    EXPECT_GT(h.session.reassembler_.buffer_.capacity(), buffer_capacity);
+}
+
+// A session destroyed while a pairing message's first fragment is pending, with no end before,
+// frees neither buffer holding the PSK. The scan's Control is SecureReserve.WipesTheBlockItLeaves.
+TEST_P(SessionTest, WipesAPendingPairingFragmentWhenDestroyed) {
+    using sendspin::server::FRAGMENT_FLAG_FIRST;
+    if (!FreedBlockScan::available()) {
+        GTEST_SKIP() << "needs the sanitizer's free hook";
+    }
+    const std::string psk = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
+    std::optional<Harness> h;
+    h.emplace(GetParam());
+    ASSERT_NO_FATAL_FAILURE(h->activate());
+    Bytes first{sendspin::server::MESSAGE_ID_JSON};
+    const Bytes head =
+        bytes_of(R"({"type":"client/pair-finalize","payload":{"long_term_psk":")" + psk);
+    first.insert(first.end(), head.begin(), head.end());
+    h->send(h->fragment(FRAGMENT_FLAG_FIRST, first));
+    ASSERT_TRUE(holds_to_capacity(h->session.scratch_, psk));
+    ASSERT_TRUE(holds_to_capacity(h->session.reassembler_.buffer_, psk));
+    ASSERT_FALSE(h->session.end());
+    const FreedBlockScan scan(psk);
+    h.reset();
+    EXPECT_EQ(scan.holding(), 0);
 }
 
 // A wipe reaches the reassembly buffer's storage past a shorter message, where a longer one

@@ -19,10 +19,10 @@
 #include "crypto/base64url.h"
 #include "crypto/crypto.h"
 #include "crypto/keys.h"
+#include "freed_blocks.h"
 #include <gtest/gtest.h>
 
 #include <cstdio>
-#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -50,48 +50,6 @@ std::string hex(const uint8_t* data, size_t size) {
 }
 
 constexpr std::string_view SECRET = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
-
-// Blocks freed holding SECRET, counted by ScanningAllocator
-int freed_holding_secret = 0;
-
-// Whether a block holds SECRET. Past the vector's size the block is outside the container's
-// annotation, so the scan is not instrumented and calls nothing that is.
-__attribute__((no_sanitize("address"))) bool block_holds_secret(const uint8_t* data, size_t size) {
-    for (size_t start = 0; start + SECRET.size() <= size; ++start) {
-        size_t matched = 0;
-        while (matched < SECRET.size() &&
-               data[start + matched] == static_cast<uint8_t>(SECRET[matched])) {
-            ++matched;
-        }
-        if (matched == SECRET.size()) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// An allocator that counts the blocks it frees holding SECRET
-template <typename T>
-struct ScanningAllocator {
-    using value_type = T;
-    ScanningAllocator() = default;
-    template <typename U>
-    ScanningAllocator(const ScanningAllocator<U>& /*other*/) {}
-    T* allocate(size_t count) {
-        return std::allocator<T>().allocate(count);
-    }
-    void deallocate(T* block, size_t count) {
-        if (block_holds_secret(reinterpret_cast<const uint8_t*>(block), count * sizeof(T))) {
-            ++freed_holding_secret;
-        }
-        std::allocator<T>().deallocate(block, count);
-    }
-    bool operator==(const ScanningAllocator& /*other*/) const {
-        return true;
-    }
-};
-
-using ScannedBytes = std::vector<uint8_t, ScanningAllocator<uint8_t>>;
 
 TEST(Base64Url, EncodesAndDecodesRfc4648Vectors) {
     struct Row {
@@ -258,24 +216,28 @@ TEST(SentinelPsk, MatchesThePublishedConstants) {
 // size too, or to its size, and keeps its contents; one grown by its own insert() frees the block
 // holding them: the Control. Room it has already moves nothing.
 TEST(SecureReserve, WipesTheBlockItLeaves) {
-    freed_holding_secret = 0;
+    if (!FreedBlockScan::available()) {
+        GTEST_SKIP() << "needs the sanitizer's free hook";
+    }
     {
-        ScannedBytes control;
-        control.reserve(SECRET.size());
-        control.assign(SECRET.begin(), SECRET.end());
+        std::vector<uint8_t> control(SECRET.begin(), SECRET.end());
+        control.shrink_to_fit();
+        const FreedBlockScan scan(SECRET);
         control.insert(control.end(), SECRET.size(), 'x');
-        EXPECT_EQ(freed_holding_secret, 1);
+        EXPECT_EQ(scan.holding(), 1);
     }
 
-    freed_holding_secret = 0;
-    ScannedBytes bytes{'x'};
+    std::vector<uint8_t> bytes{'x'};
     bytes.reserve(1 + SECRET.size());
     bytes.insert(bytes.end(), SECRET.begin(), SECRET.end());
     bytes.resize(1);
     const size_t capacity = bytes.capacity();
-    secure_reserve(bytes, capacity + 1, 1 + SECRET.size());
-    EXPECT_EQ(freed_holding_secret, 0);
-    EXPECT_EQ(bytes, ScannedBytes{'x'});
+    {
+        const FreedBlockScan scan(SECRET);
+        secure_reserve(bytes, capacity + 1, 1 + SECRET.size());
+        EXPECT_EQ(scan.holding(), 0);
+    }
+    EXPECT_EQ(bytes, std::vector<uint8_t>{'x'});
     EXPECT_EQ(bytes.capacity(), capacity + 1);
 
     const uint8_t* data = bytes.data();
@@ -283,9 +245,10 @@ TEST(SecureReserve, WipesTheBlockItLeaves) {
     EXPECT_EQ(bytes.data(), data);
 
     // Its contents are wiped though none was counted as written
-    ScannedBytes unwritten(SECRET.begin(), SECRET.end());
+    std::vector<uint8_t> unwritten(SECRET.begin(), SECRET.end());
+    const FreedBlockScan scan(SECRET);
     secure_reserve(unwritten, unwritten.capacity() + 1, 0);
-    EXPECT_EQ(freed_holding_secret, 0);
+    EXPECT_EQ(scan.holding(), 0);
 }
 
 }  // namespace
