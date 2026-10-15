@@ -108,6 +108,9 @@ Placement letterbox(uint32_t src_width, uint32_t src_height, uint32_t width, uin
 // A group's images
 // ==============================================================================
 
+/// @brief An image encoded for a channel; a null pointer for an empty image
+using EncodedImage = std::shared_ptr<const std::vector<uint8_t>>;
+
 /// @brief An image the host gave, as its encoded bytes and their SHA-256, which the server's
 /// encodings of it are cached under
 struct SourceImage {

@@ -30,7 +30,6 @@
 #include "host_view.h"
 #include "memory.h"
 #include "metadata.h"
-#include "player_stream.h"
 #include "sched/constants.h"
 #include "sched/frames.h"
 #include "sched/timeline.h"

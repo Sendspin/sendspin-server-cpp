@@ -20,7 +20,7 @@
 #pragma once
 
 #include "memory.h"
-#include "transport.h"
+#include "message_kind.h"
 #include "ws_frame.h"
 
 #include <cstddef>

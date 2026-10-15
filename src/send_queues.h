@@ -19,11 +19,11 @@
 #pragma once
 
 #include "memory.h"
+#include "message_kind.h"
 #include "messages.h"
 #include "ring.h"
 #include "sched/selection.h"
 #include "sched/types.h"
-#include "transport.h"
 
 #include <cstddef>
 #include <cstdint>

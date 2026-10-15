@@ -14,6 +14,8 @@
 
 #include "ws_frame.h"
 
+#include "transport.h"
+
 #include <algorithm>
 #include <bit>
 #include <cstring>

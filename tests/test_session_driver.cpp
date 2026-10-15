@@ -515,7 +515,7 @@ TEST(SessionDriverGoodbye, EndsWithAGoodbyeThatArrivesWhileAWriteIsStalled) {
         void on_closed(SessionDriver& driver) override {
             this->closed.set_value(
                 {driver.session().end(), driver.transport_close(),
-                 sendspin::server::error_before_activation("url", driver.session()),
+                 sendspin::server::error_before_activation("url", driver.session().outcome()),
                  driver.writing_});
         }
 

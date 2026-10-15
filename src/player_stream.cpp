@@ -19,6 +19,7 @@
 #include "playback_policy.h"
 #include "sched/chunk.h"
 #include "sched/leads.h"
+#include "sched/timeline.h"
 
 #include <algorithm>
 #include <array>

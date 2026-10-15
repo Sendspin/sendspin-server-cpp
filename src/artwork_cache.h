@@ -31,12 +31,8 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <vector>
 
 namespace sendspin::server {
-
-/// @brief An image encoded for a channel; a null pointer for an empty image
-using EncodedImage = std::shared_ptr<const std::vector<uint8_t>>;
 
 class ArtworkCache {
 public:

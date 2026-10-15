@@ -24,6 +24,7 @@
 #include "crypto/keys.h"
 #include "fragmentation.h"
 #include "memory.h"
+#include "message_kind.h"
 #include "messages.h"
 #include "noise.h"
 #include "player_stream.h"
@@ -31,9 +32,9 @@
 #include "ring.h"
 #include "sched/types.h"
 #include "send_queues.h"
+#include "session_end.h"
 #include "source_feed.h"
 #include "source_stream.h"
-#include "transport.h"
 #include "trust_policy.h"
 #include "visualizer_stream.h"
 
@@ -81,28 +82,6 @@ enum class SessionPhase : uint8_t {
     ACTIVE,
     /// Ended; end() says why. A queued server/error goes out before the connection closes.
     CLOSED,
-};
-
-/// @brief Why a session ended. Only INIT_REJECTED leaves a message to send. Every end but it and
-/// GOODBYE is a silent failure (connection.md "Failure Handling").
-enum class SessionEnd : uint8_t {
-    INIT_REJECTED,  ///< server/error queued; init_error() says which
-    /// A handshake step, or a re-handshake's wait for message 2, outlived step_timeout_us
-    TIMED_OUT,
-    /// The Noise state could not be created or write message 1, or message 2 was missing,
-    /// malformed, unauthenticated or not `{}`, in the handshake or a re-handshake
-    HANDSHAKE_FAILED,
-    DECRYPT_FAILED,          ///< An AEAD failure in transport mode
-    CLEARTEXT_IN_TRANSPORT,  ///< A text message after the switch to transport mode
-    MALFORMED_FRAGMENTS,     ///< A malformed sequence (messaging.md "Fragmentation")
-    MESSAGE_TOO_LARGE,       ///< A fragmented message outgrew max_reassembled_bytes
-    PROTOCOL_ERROR,          ///< A malformed message, or one the phase does not allow
-    ENCRYPT_FAILED,          ///< The send cipher refused a message
-    QUEUE_OVERFLOW,          ///< A send queue passed its cap
-    ENCODE_FAILED,           ///< A message to send held a value over MAX_JSON_STRING_BYTES
-    GOODBYE,                 ///< client/goodbye received; goodbye() holds it
-    CLOSED_BY_HOST,          ///< close_by_host()
-    REFUSED,                 ///< refuse()
 };
 
 /// @brief One outbound WebSocket message, encrypted when BINARY
@@ -376,6 +355,12 @@ public:
     /// @brief With SessionEnd::GOODBYE: the message received
     const std::optional<ClientGoodbye>& goodbye() const {
         return this->goodbye_;
+    }
+
+    /// @brief This session's SessionOutcome
+    SessionOutcome outcome() const {
+        return {this->end_, this->client_init_ ? this->client_init_->client_id : std::string{},
+                this->init_error_, this->goodbye_};
     }
 
 private:

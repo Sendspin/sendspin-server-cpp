@@ -20,7 +20,6 @@
 #pragma once
 
 #include "messages.h"
-#include "player_stream.h"
 #include "sched/constants.h"
 #include "sched/frames.h"
 #include "sched/ledger.h"
@@ -28,6 +27,7 @@
 #include "sched/selection.h"
 #include "sched/types.h"
 #include "send_queues.h"
+#include "stream_source.h"
 #include "visualizer.h"
 
 #include <cstddef>
