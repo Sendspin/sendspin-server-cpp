@@ -14,14 +14,16 @@
 
 #include "source_decoder.h"
 
+#include "byte_order.h"
+#include "pcm_convert.h"
 #include "sched/constants.h"
+#include "sched/frames.h"
 #include <micro_flac/flac_decoder.h>
 #if SENDSPIN_SERVER_ENABLE_OPUS
 #include <opus.h>
 #endif
 
 #include <algorithm>
-#include <array>
 #include <cstring>
 #include <new>
 #include <utility>
@@ -32,8 +34,6 @@ namespace {
 
 /// The most samples per channel an Opus packet decodes to: 120 ms at 48 kHz (RFC 6716 section 3.2)
 constexpr int OPUS_MAX_PACKET_SAMPLES = 5760;
-constexpr uint32_t OPUS_MAX_CHANNELS = 2;
-constexpr std::array<uint32_t, 5> OPUS_RATES{8000, 12000, 16000, 24000, 48000};
 /// FLAC's depths (RFC 9639 section 8.2)
 constexpr uint32_t FLAC_MIN_DEPTH = 4;
 constexpr uint32_t FLAC_MAX_DEPTH = 32;
@@ -105,9 +105,8 @@ std::optional<InputFormat> source_input_format(const AudioFormat& format) {
             }
             break;
         case Codec::OPUS:
-            if (OPUS_BUILT && format.channels <= OPUS_MAX_CHANNELS &&
-                std::find(OPUS_RATES.begin(), OPUS_RATES.end(), format.sample_rate) !=
-                    OPUS_RATES.end()) {
+            if (OPUS_BUILT && format.channels <= sched::MAX_OPUS_CHANNELS &&
+                sched::is_opus_rate(format.sample_rate)) {
                 sample = SampleFormat::S16;
             }
             break;
@@ -200,16 +199,14 @@ bool SourceDecoder::start(const SourceItem& item, std::span<const uint8_t> heade
     const AudioFormat& format = item.format;
     this->flac_.reset();
     this->opus_.reset();
-    const size_t sample_bytes = output->sample_format == SampleFormat::S16   ? 2
-                                : output->sample_format == SampleFormat::S24 ? 3
-                                                                             : 4;
+    const size_t sample_size = sample_bytes(output->sample_format);
     const size_t max_frames =
         static_cast<size_t>(int64_t{output->sample_rate} * MAX_SOURCE_CHUNK_US / 1000000);
     bool reserved = true;
     switch (format.codec) {
         case Codec::PCM:
             if (output->sample_format == SampleFormat::F32) {
-                reserved = this->reserve(max_frames * format.channels * sample_bytes);
+                reserved = this->reserve(max_frames * format.channels * sample_size);
             }
             break;
         case Codec::FLAC: {
@@ -219,7 +216,7 @@ bool SourceDecoder::start(const SourceItem& item, std::span<const uint8_t> heade
             }
             // A frame decodes only with a largest frame's room left
             this->flac_frames_ = max_frames + block;
-            reserved = this->reserve(this->flac_frames_ * format.channels * sample_bytes);
+            reserved = this->reserve(this->flac_frames_ * format.channels * sample_size);
             break;
         }
         case Codec::OPUS:
@@ -228,7 +225,7 @@ bool SourceDecoder::start(const SourceItem& item, std::span<const uint8_t> heade
                 return false;
             }
             reserved =
-                this->reserve(size_t{OPUS_MAX_PACKET_SAMPLES} * format.channels * sample_bytes);
+                this->reserve(size_t{OPUS_MAX_PACKET_SAMPLES} * format.channels * sample_size);
             break;
     }
     if (!reserved || !this->sink_->begin(*output)) {
@@ -265,10 +262,8 @@ size_t SourceDecoder::start_flac(std::span<const uint8_t> header, size_t max_fra
     // length and a longer frame fails to decode
     const auto cap = static_cast<uint16_t>(std::min<size_t>(max_frames, UINT16_MAX));
     for (const size_t at : {MIN_BLOCK_BYTE, MAX_BLOCK_BYTE}) {
-        const auto size = static_cast<uint16_t>((copy[at] << 8) | copy[at + 1]);
-        if (size > cap) {
-            copy[at] = static_cast<uint8_t>(cap >> 8);
-            copy[at + 1] = static_cast<uint8_t>(cap);
+        if (read_be<uint16_t>(&copy[at]) > cap) {
+            put_be(&copy[at], cap);
         }
     }
     // NOLINTEND(readability-magic-numbers)
@@ -354,7 +349,7 @@ SourceDecoder::Decoded SourceDecoder::decode_flac(const SourceItem& item,
                                                   std::span<const uint8_t> audio) {
     const uint32_t channels = this->output_.channels;
     const bool wide = this->output_.sample_format == SampleFormat::F32;
-    const size_t sample_bytes = wide ? 4 : this->output_.sample_format == SampleFormat::S16 ? 2 : 3;
+    const size_t sample_size = sample_bytes(this->output_.sample_format);
     if (audio.empty()) {
         return Decoded::BROKEN;
     }
@@ -362,14 +357,14 @@ SourceDecoder::Decoded SourceDecoder::decode_flac(const SourceItem& item,
     size_t offset = 0;
     while (offset < audio.size()) {
         const size_t room = (this->flac_frames_ * channels) - decoded;
-        uint8_t* out = this->buffer_.get() + decoded * sample_bytes;
+        uint8_t* out = this->buffer_.get() + decoded * sample_size;
         size_t used = 0;
         size_t samples = 0;
         const micro_flac::FLACDecoderResult result =
             wide ? this->flac_->decode(audio.data() + offset, audio.size() - offset,
                                        reinterpret_cast<int32_t*>(out), room, used, samples)
                  : this->flac_->decode(audio.data() + offset, audio.size() - offset, out,
-                                       room * sample_bytes, used, samples);
+                                       room * sample_size, used, samples);
         // micro-flac allocates its block buffers at the first frame it decodes
         if (result == micro_flac::FLAC_DECODER_ERROR_MEMORY_ALLOCATION) {
             return Decoded::REFUSED;

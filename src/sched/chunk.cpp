@@ -14,6 +14,7 @@
 
 #include "sched/chunk.h"
 
+#include "byte_order.h"
 #include "fragmentation.h"
 
 #include <algorithm>
@@ -27,12 +28,6 @@ constexpr int64_t MAX_SEND_AHEAD = std::numeric_limits<uint32_t>::max();
 constexpr uint8_t BITS_PER_BYTE = 8;
 constexpr uint8_t MAX_PCM_BIT_DEPTH = 32;
 
-void put_be(uint8_t* out, uint64_t value, size_t bytes) {
-    for (size_t i = 0; i < bytes; ++i) {
-        out[i] = static_cast<uint8_t>(value >> (BITS_PER_BYTE * (bytes - 1 - i)));
-    }
-}
-
 }  // namespace
 
 uint32_t send_ahead_field(int64_t ts_us, int64_t stamp_us) {
@@ -42,8 +37,8 @@ uint32_t send_ahead_field(int64_t ts_us, int64_t stamp_us) {
 void write_chunk_header(std::span<uint8_t, CHUNK_HEADER_BYTES> out, int64_t ts_us,
                         uint32_t send_ahead) {
     out[0] = MESSAGE_ID_AUDIO_CHUNK;
-    put_be(&out[1], static_cast<uint64_t>(ts_us), sizeof(int64_t));
-    put_be(&out[1 + sizeof(int64_t)], send_ahead, sizeof(uint32_t));
+    put_be(&out[1], static_cast<uint64_t>(ts_us));
+    put_be(&out[1 + sizeof(int64_t)], send_ahead);
 }
 
 FormatShape pcm_shape(const AudioFormat& format) {

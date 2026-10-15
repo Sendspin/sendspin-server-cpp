@@ -86,6 +86,7 @@ script/clang-tidy.sh      - clang-tidy over src/ using build/compile_commands.js
 - `session_driver.h`: `SessionDriver`, which runs a `Session` over a `Connection` under the write invariant and reports `on_ready` and `on_closed` to a `SessionObserver`.
 - `noise.h`: `NoiseInitiator` (the server's side of KKpsk2, with the Sentinel Fallback's replay of message 1) and `TransportCiphers`; the cipher suite and PSK category names, and `HandshakePsk`.
 - `fragmentation.h`: inbound `Reassembler` and outbound `write_fragment()`.
+- `byte_order.h`: `put_be()`, `append_be()` and `read_be()`, the binary messages' big-endian fields.
 - `sched/`: the send path's decisions as value types and free functions over plain data, each taking `now`; `docs/internals.md` lists its files.
 - `messages.h`: builders for what the server sends (`server/state` and `server/command` included) and validating parsers for what a client sends (`client/command` and `client/leave` included), as pure functions over typed structs; `rule_for_unhandled()` applies the ignore rules.
 

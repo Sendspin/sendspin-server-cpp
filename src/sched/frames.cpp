@@ -25,7 +25,6 @@ namespace sendspin::server::sched {
 
 namespace {
 
-/// The sample rates an Opus encoder takes (RFC 6716 section 2)
 constexpr std::array<uint32_t, 5> OPUS_RATES = {8000, 12000, 16000, 24000, 48000};
 
 }  // namespace
@@ -35,13 +34,15 @@ FrameLayout frame_layout(uint32_t rate_hz, Codec codec) {
         return {};
     }
     if (codec == Codec::OPUS) {
-        const bool opus_rate =
-            std::find(OPUS_RATES.begin(), OPUS_RATES.end(), rate_hz) != OPUS_RATES.end();
-        return {1, rate_hz / CELLS_PER_SECOND, opus_rate};
+        return {1, rate_hz / CELLS_PER_SECOND, is_opus_rate(rate_hz)};
     }
     const uint32_t common = std::gcd(rate_hz, CELLS_PER_SECOND);
     const uint32_t cells = CELLS_PER_SECOND / common;
     return {cells, rate_hz / common, cells <= MAX_FRAME_CELLS};
+}
+
+bool is_opus_rate(uint32_t rate_hz) {
+    return std::find(OPUS_RATES.begin(), OPUS_RATES.end(), rate_hz) != OPUS_RATES.end();
 }
 
 int64_t frame_duration_us(uint32_t samples, uint32_t rate_hz) {
