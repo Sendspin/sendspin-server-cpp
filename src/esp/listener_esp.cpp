@@ -55,19 +55,29 @@ constexpr size_t HTTPD_STACK_BYTES = 4096;
 constexpr unsigned HTTPD_PRIORITY = 12;
 /// httpd's sessions: every accepted connection in its upgrade or handshake and every one activated
 constexpr size_t HTTPD_SESSIONS = profile::MAX_ACCEPTED_HANDSHAKES + profile::MAX_ACCEPTED_CLIENTS;
+/// The sockets httpd takes besides its sessions': its listening socket and its control socket's
+/// two; httpd_start() refuses more sessions than CONFIG_LWIP_MAX_SOCKETS less these
+constexpr size_t HTTPD_OWN_SOCKETS = 3;
+static_assert(HTTPD_SESSIONS + HTTPD_OWN_SOCKETS <= CONFIG_LWIP_MAX_SOCKETS,
+              "the listener's httpd needs CONFIG_LWIP_MAX_SOCKETS of at least its sessions "
+              "(profile::MAX_ACCEPTED_HANDSHAKES + profile::MAX_ACCEPTED_CLIENTS) plus its own 3 "
+              "sockets; raise CONFIG_LWIP_MAX_SOCKETS, leaving room for dials and mDNS");
 /// httpd's control socket's port; other httpd servers in the application (a web server,
 /// sendspin-cpp's server) take the default and the one after it
 constexpr uint16_t HTTPD_CTRL_PORT = ESP_HTTPD_DEF_CTRL_PORT + 2;
 /// The stopper task: httpd_stop() waits for httpd's task to end. Internal RAM: it lives only
 /// while the listener stops, and deletes itself
 constexpr uint32_t HTTPD_STOPPER_STACK_BYTES = 2560;
+/// The listener's destruction checks this often whether the stopper task's httpd_stop() returned
+constexpr uint32_t HTTPD_STOPPED_POLL_MS = 10;
 /// httpd's wait for each read of a session, the upgrade's request and every frame's bytes
 /// included. httpd's one task reads for every accepted connection, so a peer that sends part of a
 /// frame and stops holds all of their reads for this long.
 constexpr int HTTPD_RECV_WAIT_S = 2;
 
-/// What httpd's callbacks reach, as its global user context: held by the Listener and by itself
-/// while httpd runs, so a Listener destroyed while sessions stay open leaves it alive
+/// What httpd's callbacks reach, as its global user context: held by the Listener, and through
+/// keep by itself from listen()'s success until httpd stops (by the stopper task while it runs),
+/// or for good when httpd fails to stop
 struct ListenerState {
     WeakPtr<LoopCore> loop;
     /// The Listener::Impl, which posted handlers reach on the core task
@@ -76,7 +86,12 @@ struct ListenerState {
     httpd_handle_t server{nullptr};
     /// Set by close(): no session is taken any more, and httpd stops once the last one closes
     std::atomic<bool> closed{false};
+    /// Taken by whoever calls httpd_stop(): the stopper task, the listener's destruction, or
+    /// listen() when registering its handler fails; given back when the stopper task cannot start
+    /// or its stop fails
     std::atomic<bool> stopping{false};
+    /// Set once httpd_stop() returned: httpd's ports are free
+    std::atomic<bool> stopped{false};
     std::atomic<int> sessions{0};
     SharedPtr<ListenerState> keep;
 };
@@ -246,6 +261,36 @@ private:
     httpd_req_t* request_{nullptr};
 };
 
+SharedPtr<SessionLink> link_of(httpd_handle_t server, int fd) {
+    auto* slot = static_cast<SharedPtr<SessionLink>*>(httpd_sess_get_ctx(server, fd));
+    return slot != nullptr ? *slot : nullptr;
+}
+
+/// httpd's task, queued ahead of httpd_stop(): httpd closes its control socket before the sessions
+/// still open, and ending a pause writes to it, so every session ends here first, its held message
+/// dropped and its pause ended
+void end_sessions(void* arg) {
+    auto* server = static_cast<httpd_handle_t>(arg);
+    std::array<int, HTTPD_SESSIONS> fds{};
+    size_t count = fds.size();
+    if (httpd_get_client_list(server, &count, fds.data()) != ESP_OK) {
+        return;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (const SharedPtr<SessionLink> link = link_of(server, fds[i])) {
+            link->end_session();
+        }
+    }
+}
+
+/// Stops httpd, ending its sessions first; false when httpd_stop() failed and httpd runs on
+bool stop_httpd(httpd_handle_t server) {
+    // Unqueued, a session still paused has its pause ended as httpd closes it, which writes to
+    // httpd's control socket after httpd closed it
+    httpd_queue_work(server, &end_sessions, server);
+    return httpd_stop(server) == ESP_OK;
+}
+
 }  // namespace
 
 // ==============================================================================
@@ -302,7 +347,6 @@ public:
         if (httpd_start(&state->server, &config) != ESP_OK) {
             return false;
         }
-        state->keep = state;
 
         httpd_uri_t uri{};
         uri.uri = this->settings_.path.c_str();
@@ -315,10 +359,17 @@ public:
         uri.ws_post_handshake_cb = &Impl::on_upgrade;
 #endif
         if (httpd_register_uri_handler(state->server, &uri) != ESP_OK) {
+            // Stopped here, so the port is free once listen() returns; a session that opened
+            // meanwhile finds the stop taken as it closes
             state->closed.store(true, std::memory_order_release);
-            stop_when_idle(*state);
+            state->stopping.store(true, std::memory_order_release);
+            if (!stop_httpd(state->server)) {
+                // httpd runs on, holding its state
+                state->keep = state;
+            }
             return false;
         }
+        state->keep = state;
         this->state_ = std::move(state);
         this->port_ = port;
         return true;
@@ -326,6 +377,26 @@ public:
 
     uint16_t port() const {
         return this->port_;
+    }
+
+    /// Returns once httpd has stopped, so a listener started next finds its ports free: stops it
+    /// here, ending the sessions still open, unless the stopper task has begun to
+    void stop_now() {
+        if (!this->state_) {
+            return;
+        }
+        ListenerState& state = *this->state_;
+        while (!state.stopped.load(std::memory_order_acquire)) {
+            if (!state.stopping.exchange(true, std::memory_order_acq_rel)) {
+                if (stop_httpd(state.server)) {
+                    state.stopped.store(true, std::memory_order_release);
+                    state.keep.reset();
+                }
+                // Otherwise httpd runs on, holding its state, and its ports stay bound
+                return;
+            }
+            vTaskDelay(pdMS_TO_TICKS(HTTPD_STOPPED_POLL_MS));
+        }
     }
 
     bool family_unavailable() const {
@@ -408,11 +479,6 @@ private:
 
     static ListenerState* state_of(httpd_handle_t server) {
         return static_cast<ListenerState*>(httpd_get_global_user_ctx(server));
-    }
-
-    static SharedPtr<SessionLink> link_of(httpd_handle_t server, int fd) {
-        auto* slot = static_cast<SharedPtr<SessionLink>*>(httpd_sess_get_ctx(server, fd));
-        return slot != nullptr ? *slot : nullptr;
     }
 
     static void post(ListenerState& state, std::function<void(Impl&)> fn) {
@@ -520,8 +586,16 @@ void stop_when_idle(ListenerState& state) {
     }
     const auto stopper = [](void* arg) {
         auto* stopping = static_cast<SharedPtr<ListenerState>*>(arg);
-        httpd_stop((*stopping)->server);
-        if (const SharedPtr<LoopCore> stopped_loop = (*stopping)->loop.lock()) {
+        const SharedPtr<LoopCore> stopped_loop = (*stopping)->loop.lock();
+        ListenerState& stopped = **stopping;
+        if (stop_httpd(stopped.server)) {
+            stopped.stopped.store(true, std::memory_order_release);
+        } else {
+            // httpd runs on, holding its state; the listener's destruction tries again
+            stopped.keep = std::move(*stopping);
+            stopped.stopping.store(false, std::memory_order_release);
+        }
+        if (stopped_loop) {
             stopped_loop->task_ended();
         }
         delete stopping;
@@ -529,9 +603,10 @@ void stop_when_idle(ListenerState& state) {
     };
     if (xTaskCreatePinnedToCore(stopper, "ss_httpd_stop", HTTPD_STOPPER_STACK_BYTES, held,
                                 HTTPD_PRIORITY, nullptr, tskNO_AFFINITY) != pdPASS) {
-        // httpd keeps running, idle, holding its state
+        // httpd keeps running, idle, holding its state, until the listener's destruction stops it
         state.keep = std::move(*held);
         delete held;
+        state.stopping.store(false, std::memory_order_release);
         if (loop) {
             loop->task_ended();
         }
@@ -546,6 +621,7 @@ Listener::Listener(EventLoop& loop, TransportSettings settings, AcceptFn on_acce
 
 Listener::~Listener() {
     this->impl_->close();
+    this->impl_->stop_now();
 }
 
 bool Listener::listen(const std::string& address, uint16_t port) {

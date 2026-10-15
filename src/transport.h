@@ -219,7 +219,9 @@ public:
     /// @param admit empty to take every connection
     Listener(EventLoop& loop, TransportSettings settings, AcceptFn on_accept,
              AdmitFn admit = nullptr);
-    /// @brief Calls close()
+    /// @brief Calls close(). On ESP-IDF it then returns only once httpd has stopped and its ports
+    /// are free, stopping it, with any session still open, if its last session has not closed;
+    /// should httpd fail to stop, it runs on and its ports stay bound.
     ~Listener();
     Listener(const Listener&) = delete;
     Listener& operator=(const Listener&) = delete;

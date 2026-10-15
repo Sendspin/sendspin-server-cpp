@@ -10,6 +10,8 @@ menu "sendspin-server"
         # on earlier versions the symbol does not exist, the select is ignored, and the upgrade's
         # GET reaches the URI handler instead
         select HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
+        # LWIP_MAX_SOCKETS, which a component cannot raise, must cover httpd's sessions and its own
+        # three sockets, besides the dials and mDNS; src/esp/listener_esp.cpp asserts it
 
     config SENDSPIN_SERVER_MEMORY_STATS
         bool "Log memory statistics"
