@@ -7,7 +7,8 @@
 # The IDF components the project adds: esphome/noise-c (with its esphome/libsodium),
 # espressif/esp-dsp, micro-flac (the v0.3.0 tag, with the encoder) and micro-resampler
 # (third_party/micro-resampler). The component's Kconfig turns on the httpd options the transport
-# needs.
+# needs; the project turns on C++ exceptions (CONFIG_COMPILER_CXX_EXCEPTIONS). tests/esp_idf/ is a
+# minimal project that builds the component.
 
 include(${CMAKE_CURRENT_LIST_DIR}/sources.cmake)
 

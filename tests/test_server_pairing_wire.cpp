@@ -28,6 +28,7 @@
 #include "raw_client.h"
 #include "silence_feeder.h"
 #include "test_recorder.h"
+#include "trust_fixtures.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 
@@ -68,6 +69,7 @@ using sendspin::server::test::Bytes;
 using sendspin::server::test::bytes_of;
 using sendspin::server::test::client_time_json;
 using sendspin::server::test::MemoryProvider;
+using sendspin::server::test::psk_of;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
 namespace persistence_keys = sendspin::server::persistence_keys;
@@ -104,14 +106,6 @@ void append_be32(std::vector<uint8_t>& out, uint32_t value) {
     for (int shift = 24; shift >= 0; shift -= 8) {
         out.push_back(static_cast<uint8_t>((value >> shift) & 0xFF));
     }
-}
-
-Psk psk_of(uint8_t byte) {
-    Psk psk{};
-    for (size_t i = 0; i < psk.size(); ++i) {
-        psk[i] = static_cast<uint8_t>(byte + i);
-    }
-    return psk;
 }
 
 /// The traced plaintexts, as text

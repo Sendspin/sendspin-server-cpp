@@ -22,6 +22,7 @@
 /// whose watchdog follows the requested duration.
 
 #include "image_codec.h"
+#include "peer.h"
 #include "player_sink.h"
 #include "raw_client.h"
 #include "soak_wire_checker.h"
@@ -512,7 +513,8 @@ public:
               VisualizerCounts& visualizer)
         : profile_(profile),
           port_(sendspin::server::test::free_port()),
-          client_(make_config(profile, this->port_)),
+          client_(sendspin::server::test::peer_config(
+              profile.name + " " + std::to_string(this->port_), this->port_)),
           art_(art),
           visualizer_(visualizer) {
         if (profile.visualizer) {
@@ -561,7 +563,7 @@ public:
     CppPlayer& operator=(const CppPlayer&) = delete;
 
     std::string url() const {
-        return "ws://127.0.0.1:" + std::to_string(this->port_) + "/sendspin";
+        return sendspin::server::test::peer_url(this->port_);
     }
 
     /// On the main loop: runs the client's loop and hands the stream's format to the sink
@@ -589,14 +591,6 @@ public:
     std::string client_id;
 
 private:
-    static sendspin::SendspinClientConfig make_config(const Profile& profile, uint16_t port) {
-        sendspin::SendspinClientConfig config;
-        config.name = profile.name + " " + std::to_string(port);
-        config.server_port = port;
-        config.time_burst_interval_ms = 50;
-        return config;
-    }
-
     Profile profile_;
     uint16_t port_;
     AlwaysReady network_;
@@ -1365,10 +1359,7 @@ private:
 
     template <typename Predicate>
     void run_until(Predicate done) {
-        while (!done()) {
-            this->loop_players();
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
+        sendspin::server::test::poll_until([this] { this->loop_players(); }, done);
     }
 
     void run_for(int64_t us) {

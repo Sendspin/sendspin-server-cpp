@@ -22,15 +22,16 @@
 #include "crypto/keys.h"
 #include "crypto/pairing_token.h"
 #include "pairing.h"
+#include "peer.h"
 #include "player_sink.h"
 #include "test_ports.h"
 #include "test_recorder.h"
+#include "trust_fixtures.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 #include <noise/protocol.h>
 
 #include <sendspin/client.h>
-#include <sendspin/persistence_codec.h>
 #include <sendspin/player_role.h>
 #include <sendspin/server/server.h>
 
@@ -39,7 +40,6 @@
 #include <chrono>
 #include <cstdint>
 #include <initializer_list>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -62,58 +62,16 @@ using sendspin::server::ServerConfig;
 using sendspin::server::StartResult;
 using sendspin::server::TraceDirection;
 using sendspin::server::TracedMessage;
+using sendspin::server::test::ClientStore;
 using sendspin::server::test::MemoryProvider;
+using sendspin::server::test::psk_of;
 using sendspin::server::test::Recorder;
+using sendspin::server::test::stored_record;
 namespace persistence_keys = sendspin::server::persistence_keys;
 
 using Bytes = std::vector<uint8_t>;
 
 constexpr uint32_t RATE = 48000;
-
-Psk psk_of(uint8_t byte) {
-    Psk psk{};
-    for (size_t i = 0; i < psk.size(); ++i) {
-        psk[i] = static_cast<uint8_t>(byte + i);
-    }
-    return psk;
-}
-
-/// The record a provider holds in slot
-std::optional<ClientRecord> stored_record(const MemoryProvider& provider, size_t slot) {
-    const auto it = provider.blobs.find(persistence_keys::client_record_key(slot));
-    return it == provider.blobs.end() ? std::nullopt
-                                      : sendspin::server::decode_client_record(it->second);
-}
-
-/// A sendspin-cpp client's blob store
-class ClientStore : public sendspin::SendspinPersistenceProvider {
-public:
-    std::optional<std::vector<uint8_t>> load_blob(const std::string& key) override {
-        const std::lock_guard<std::mutex> lock(this->mutex_);
-        const auto it = this->blobs_.find(key);
-        return it == this->blobs_.end() ? std::nullopt : std::optional(it->second);
-    }
-
-    bool save_blob(const std::string& key, const uint8_t* data, size_t len) override {
-        const std::lock_guard<std::mutex> lock(this->mutex_);
-        this->blobs_[key] = std::vector<uint8_t>(data, data + len);
-        return true;
-    }
-
-    /// A pairing record for server_id with psk, as a client that paired holds it
-    void hold_record(const std::string& server_id, const Psk& psk) {
-        sendspin::SendspinPairingRecord record;
-        record.psk = psk;
-        record.server_id = server_id;
-        const auto blob = sendspin::encode_pairing_record(record);
-        ASSERT_TRUE(blob);
-        this->save_blob(sendspin::persistence_keys::record_slot_key(0), blob->data(), blob->size());
-    }
-
-private:
-    std::mutex mutex_;
-    std::map<std::string, std::vector<uint8_t>> blobs_;
-};
 
 /// What a sendspin-cpp client reports of its pairing, on its main loop (the test thread)
 class PairingListener : public sendspin::SendspinClientListener {
@@ -198,7 +156,7 @@ public:
     Peer& operator=(const Peer&) = delete;
 
     std::string url() const {
-        return "ws://127.0.0.1:" + std::to_string(this->port_) + "/sendspin";
+        return sendspin::server::test::peer_url(this->port_);
     }
 
     sendspin::SendspinClient& client() {
@@ -216,10 +174,7 @@ public:
     /// Runs the client's main loop until done() holds, with no timeout
     template <typename Predicate>
     void run_until(Predicate done) {
-        while (!done()) {
-            this->client_.loop();
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
+        sendspin::server::test::run_until(this->client_, done);
     }
 
     /// Runs the client's main loop until done() holds or about bound passed, so a test can report
@@ -237,10 +192,8 @@ public:
 
 private:
     static sendspin::SendspinClientConfig make_config(uint16_t port, const Options& options) {
-        sendspin::SendspinClientConfig config;
-        config.name = "pairing peer";
-        config.server_port = port;
-        config.time_burst_interval_ms = 50;
+        sendspin::SendspinClientConfig config =
+            sendspin::server::test::peer_config("pairing peer", port);
         if (options.pairing_psk) {
             config.pairing_psk = sendspin::SendspinPsk(*options.pairing_psk);
         }
@@ -416,12 +369,7 @@ void expect_no_secret(const Capture& capture, const std::vector<Bytes>& secrets)
 /// Runs the main loops of every peer until done() holds, with no timeout
 template <typename Predicate>
 void run_all(std::initializer_list<Peer*> peers, Predicate done) {
-    while (!done()) {
-        for (Peer* peer : peers) {
-            peer->client().loop();
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
+    sendspin::server::test::run_all_until(peers, done);
 }
 
 /// Writes the test signal into an input from a thread of its own until destroyed

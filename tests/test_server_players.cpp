@@ -19,6 +19,7 @@
 
 #include "flac_reader.h"
 #include "opus_reader.h"
+#include "peer.h"
 #include "player_sink.h"
 #include "resampler_reference.h"
 #include "sched/constants.h"
@@ -141,7 +142,9 @@ public:
            uint32_t rate, uint16_t min_buffer_ms = 150,
            std::optional<uint16_t> required_lead_ms = std::nullopt,
            size_t buffer_bytes = sendspin::PlayerRoleConfig::DEFAULT_AUDIO_BUFFER_CAPACITY)
-        : port_(sendspin::server::test::free_port()), client_(make_config(this->port_)) {
+        : port_(sendspin::server::test::free_port()),
+          client_(sendspin::server::test::peer_config("Player " + std::to_string(this->port_),
+                                                      this->port_)) {
         sendspin::PlayerRoleConfig config;
         config.audio_formats = formats;
         config.min_buffer_ms = min_buffer_ms;
@@ -163,7 +166,7 @@ public:
     Player& operator=(const Player&) = delete;
 
     std::string url() const {
-        return "ws://127.0.0.1:" + std::to_string(this->port_) + "/sendspin";
+        return sendspin::server::test::peer_url(this->port_);
     }
 
     sendspin::SendspinClient& client() {
@@ -175,14 +178,6 @@ public:
     }
 
 private:
-    static sendspin::SendspinClientConfig make_config(uint16_t port) {
-        sendspin::SendspinClientConfig config;
-        config.name = "Player " + std::to_string(port);
-        config.server_port = port;
-        config.time_burst_interval_ms = 50;
-        return config;
-    }
-
     uint16_t port_;
     AlwaysReady network_;
     sendspin::SendspinClient client_;
@@ -192,12 +187,7 @@ private:
 /// Runs every player's main loop on this thread until done() holds, with no timeout
 template <typename Predicate>
 void run_until(std::vector<std::unique_ptr<Player>>& players, Predicate done) {
-    while (!done()) {
-        for (const std::unique_ptr<Player>& player : players) {
-            player->client().loop();
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
+    sendspin::server::test::run_all_until(players, done);
 }
 
 // ==============================================================================

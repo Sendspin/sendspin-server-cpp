@@ -43,7 +43,7 @@ This builds the library (target `sendspin_server_cpp`, alias `sendspin_server_cp
 
 Dependencies (fetched automatically via CMake FetchContent at pinned versions): Boost.Beast and Boost.Asio (a system Boost 1.90 or later is used when installed), ArduinoJson, noise-c, micro-flac, micro-opus and pffft. micro-resampler and stb are vendored in `third_party/`; `NOTICES.md` lists every dependency's license.
 
-The library also builds as an ESP-IDF component (`cmake/esp_idf.cmake`).
+The library also builds as an ESP-IDF component (`cmake/esp_idf.cmake`); `tests/esp_idf/` is a minimal project that builds it.
 
 ### Tests
 

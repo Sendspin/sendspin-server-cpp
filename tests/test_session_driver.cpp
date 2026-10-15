@@ -25,6 +25,7 @@
 #include "crypto/keys.h"
 #include "fragmentation.h"
 #include "messages.h"
+#include "peer.h"
 #include "raw_client.h"
 #include "session_driver.h"
 #include "test_ports.h"
@@ -72,6 +73,7 @@ using sendspin::server::SessionEnd;
 using sendspin::server::SessionObserver;
 using sendspin::server::SessionPhase;
 using sendspin::server::SessionSettings;
+using sendspin::server::test::AlwaysReady;
 
 class RecordingObserver : public SessionObserver {
 public:
@@ -85,13 +87,6 @@ public:
 
     int ready{0};
     int closed{0};
-};
-
-class AlwaysReady : public sendspin::SendspinNetworkProvider {
-public:
-    bool is_network_ready() override {
-        return true;
-    }
 };
 
 class SessionDriverTest : public testing::Test {

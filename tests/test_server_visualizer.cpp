@@ -19,6 +19,7 @@
 /// in-process sendspin-cpp client that plays and visualizes.
 
 #include "clock.h"
+#include "peer.h"
 #include "player_sink.h"
 #include "raw_client.h"
 #include "sched/constants.h"
@@ -37,7 +38,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -67,6 +67,7 @@ using sendspin::server::test::Bytes;
 using sendspin::server::test::MemoryProvider;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
+using sendspin::server::test::run_until;
 
 constexpr uint32_t RATE = 48000;
 constexpr int64_t CELL_US = 20000;
@@ -1083,11 +1084,7 @@ public:
 TEST(ServerVisualizerPeer, DeliversFramesInTimeWithTheAudio) {
     VisualizerServer s;
     const uint16_t port = sendspin::server::test::free_port();
-    sendspin::SendspinClientConfig client_config;
-    client_config.name = "Visualizer peer";
-    client_config.server_port = port;
-    client_config.time_burst_interval_ms = 50;
-    sendspin::SendspinClient client(client_config);
+    sendspin::SendspinClient client(sendspin::server::test::peer_config("Visualizer peer", port));
     sendspin::PlayerRoleConfig player_config;
     // One format, assigned by count: GCC 13 -Warray-bounds misreads an initializer-list assignment
     player_config.audio_formats.assign(
@@ -1112,16 +1109,10 @@ TEST(ServerVisualizerPeer, DeliversFramesInTimeWithTheAudio) {
     client.set_network_provider(&network);
     client.set_unpaired_access_enabled(true);
     ASSERT_TRUE(client.start());
-    const std::string url = "ws://127.0.0.1:" + std::to_string(port) + "/sendspin";
+    const std::string url = sendspin::server::test::peer_url(port);
     ASSERT_TRUE(s.server.connect_url(url));
-    const auto run_until = [&](const std::function<bool()>& done) {
-        while (!done()) {
-            client.loop();
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
-    };
     std::string id;
-    run_until([&] {
+    run_until(client, [&] {
         for (const sendspin::server::ClientInfo& info : s.server.clients()) {
             if (info.url == url && s.recorder.contains("connected " + info.client_id)) {
                 id = info.client_id;
@@ -1140,7 +1131,7 @@ TEST(ServerVisualizerPeer, DeliversFramesInTimeWithTheAudio) {
         feed_tone(*input, 0, 2 * RATE, 0.5, SILENT);
         input->drain();
     });
-    run_until([&] {
+    run_until(client, [&] {
         const std::lock_guard<std::mutex> lock(log.mutex);
         return log.ends > 0;
     });
