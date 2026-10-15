@@ -219,9 +219,9 @@ TEST(FrameEncoderFlac, EncodesCellsThatDecodeToTheQuantizedInput) {
 }
 
 // spec player/v1.md "Codec framing": one Opus packet per frame, which decodes to the frame's 20 ms
-// of the input, behind the encoder's lookahead: libopus reports encoder_delay_samples(), so the
-// pipelines' compensation matches the encoder's. Lossy, so compared by SNR. reset() starts a stream
-// again, and a short last frame is padded to a whole packet.
+// of the input, behind the encoder's lookahead: the decoded audio lags by encoder_delay_samples(),
+// so the pipelines' compensation matches the encoder's. Lossy, so compared by SNR. reset() starts a
+// stream again, and a short last frame is padded to a whole packet.
 TEST(OpusFrameEncoder, DecodesToTheInputBehindItsLookahead) {
     using sendspin::server::test::OpusReader;
     for (const uint32_t rate : {48000U, 24000U, 8000U}) {
@@ -231,7 +231,6 @@ TEST(OpusFrameEncoder, DecodesToTheInputBehindItsLookahead) {
         ASSERT_TRUE(encoder);
         EXPECT_FALSE(sendspin::server::codec_header(format));
         const uint32_t delay = sendspin::server::encoder_delay_samples(format);
-        EXPECT_EQ(encoder->delay_samples(), delay);
         EXPECT_EQ(delay, rate / 400);
         EXPECT_EQ(sendspin::server::quantized_depth(format), 16U);
         const uint32_t block = rate / 50;
@@ -331,7 +330,7 @@ TEST(OpusFrameEncoder, DecodesAtTheInputsLevelFromAnyPacket) {
     // first frame's, as the pipeline gives it
     encoder->reset();
     const uint64_t seek = 100000;
-    const uint32_t lead = encoder->delay_samples();
+    const uint32_t lead = sendspin::server::encoder_delay_samples(format);
     Bytes primed;
     {
         const Bytes input = sendspin::server::test::tone_frames(seek - lead, BLOCK, RATE);

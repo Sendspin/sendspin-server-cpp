@@ -136,11 +136,6 @@ public:
         return this->sent_.active;
     }
 
-    /// @brief The format of the active stream
-    sched::AudioFormat sent_format() const {
-        return this->sent_.format.audio;
-    }
-
     /// @brief The operator's format for the player (SendspinServer::set_player_format()), which
     /// selection tries before the player's own preference
     void set_format_override(std::optional<AudioFormat> format) {
@@ -161,11 +156,6 @@ public:
     /// @brief The latest client/state reported `available: true`
     bool available() const {
         return this->available_;
-    }
-
-    /// @brief Whether a client/state was received
-    bool state_received() const {
-        return this->state_received_;
     }
 
     bool role_written() const {
