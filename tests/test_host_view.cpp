@@ -372,6 +372,26 @@ TEST_F(HostViewTest, StartsTheSlewOverInANewFormat) {
     }
 }
 
+// The write that takes up set_format()'s slew frees nothing: the slew it replaced stays in the view
+// until core frees it (free_retired_slew()), which leaves alone a slew set_format() made that no
+// write has taken up yet. White-box: HostView::slew_, next_slew_.
+TEST_F(HostViewTest, LeavesTheSlewAFormatReplacedForCore) {
+    HostView& view = this->make_slewing(0);
+    ASSERT_EQ(this->write(CELL).frames, CELL);
+    const uint8_t* replaced = view.slew_.output();
+    ASSERT_TRUE(view.set_format({RATE, 2, SampleFormat::F32}));
+    const uint8_t* made = view.next_slew_.output();
+    view.free_retired_slew();
+    ASSERT_EQ(view.next_slew_.output(), made);
+    const Bytes pcm(CELL * 8, 0);
+    ASSERT_EQ(view.write(pcm.data(), CELL).frames, CELL);
+    EXPECT_EQ(view.slew_.output(), made);
+    EXPECT_EQ(view.next_slew_.output(), replaced);
+    view.free_retired_slew();
+    EXPECT_FALSE(view.next_slew_.ready());
+    EXPECT_EQ(view.slew_.output(), made);
+}
+
 // While a write runs through the slew, between the step that takes it up and the steps that stage
 // its blocks, the input is FULL: another write takes nothing, and a writer waiting for room is
 // woken as the slewed write ends, the input OPEN again

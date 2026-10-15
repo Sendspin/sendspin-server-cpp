@@ -170,7 +170,7 @@ public:
     /// input owing latency plays its frames fast (sched::live_slew_ppm(), LiveSlew), with the
     /// mutex released between the steps that stage each block, and reports the positions they
     /// took; a write made meanwhile takes nothing. No allocation: the copy goes into the
-    /// preallocated staging ring.
+    /// preallocated staging ring. No free: a slew it replaces is left for core.
     WriteResult write(const void* pcm, size_t frames);
     InputState state() const;
     InputState wait_writable(int64_t timeout_us);
@@ -231,6 +231,9 @@ public:
     /// index nullopt when no instance produces frames, so admission takes the plain horizon
     void publish_shift_index(sched::EpochId epoch, std::optional<int64_t> index,
                              int64_t pipeline_latency_us);
+
+    /// @brief Frees the slew a write retired for set_format()'s
+    void free_retired_slew();
 
     JobView job_view() const;
 
@@ -300,8 +303,8 @@ private:
         std::optional<size_t> history;
     };
     /// Takes up a slew the format or epoch replaced, from set_format()'s or restarted; the one
-    /// set_format()'s replaces goes to retired, to be freed with the mutex released
-    void adopt_slew(LiveSlew& retired);
+    /// set_format()'s replaces stays in next_slew_
+    void adopt_slew();
     /// Under the mutex: claims the slew for one write of frames at ppm, copying its history
     SlewedWrite begin_slewed(uint64_t frames, int32_t ppm, InputState state);
     /// Without the mutex: runs the write through the slew a block at a time, staging each block's
@@ -388,7 +391,8 @@ private:
     /// slew_generation_ as slew_ was last taken up (adopt_slew()); read and written by write()
     uint64_t slew_seen_{0};
     /// The slew set_format() made for its format, which the next write takes up while
-    /// slew_pending_; both written by set_format() and read by write(), under the mutex
+    /// slew_pending_; otherwise the one a write retired, which core frees
+    /// (free_retired_slew()) or the next set_format() takes back to free. Both under the mutex.
     LiveSlew next_slew_;
     bool slew_pending_{false};
     /// `k*` the pipelines published for the current epoch, and the `L_p` its rebase decides with

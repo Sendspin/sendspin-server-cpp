@@ -35,7 +35,7 @@ Determine the diff: if `$ARGUMENTS` names a commit range or branch, diff that; o
 
 ## `GroupInput::write()` and the host view
 
-- `write()` never allocates, waits or does I/O. Trace every function the diff adds to its path: the host-view step, `sched::decide_write()`, the copy into the preallocated staging ring, the `Wakeup` signal and the pipeline task's wake (`AudioWorkers::Task::wake()`). A `std::vector` growth, `std::function` construction, `Dispatcher::post()` or log in that path is a finding.
+- `write()` never allocates or frees, waits or does I/O. Trace every function the diff adds to its path: the host-view step, `sched::decide_write()`, the copy into the preallocated staging ring, the `Wakeup` signal and the pipeline task's wake (`AudioWorkers::Task::wake()`). A `std::vector` growth, `std::function` construction, the destruction of an object that owns memory, `Dispatcher::post()` or log in that path is a finding.
 - The host-view mutex is held for one step and its bookkeeping. Callbacks the step decides go into the outbox and are posted after release; the `Wakeup` is signalled, and the pipeline task woken, after release.
 
 ## Allocation on hot paths

@@ -577,6 +577,7 @@ void Group::on_wake() {
         this->drop_released_input();
         return;
     }
+    this->input_->free_retired_slew();
     const HostView::FormatState format = this->input_->format();
     if (format.generation != this->input_generation_) {
         this->input_format_ = format.format;
