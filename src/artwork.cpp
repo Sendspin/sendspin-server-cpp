@@ -14,6 +14,7 @@
 
 #include "artwork.h"
 
+#include "byte_order.h"
 #include "fragmentation.h"
 
 #include <algorithm>
@@ -65,14 +66,8 @@ std::vector<uint8_t> artwork_announce(size_t channel, int64_t timestamp_us, uint
     message[0] = message_id(channel);
     message[1] = ARTWORK_FLAG_ANNOUNCE;
     // Big-endian timestamp and total_size (spec roles/artwork/v1.md "Artwork (Binary)")
-    const auto ts = static_cast<uint64_t>(timestamp_us);
-    for (size_t i = 0; i < sizeof(ts); ++i) {
-        message[2 + i] = static_cast<uint8_t>(ts >> (8 * (sizeof(ts) - 1 - i)));
-    }
-    for (size_t i = 0; i < sizeof(total_size); ++i) {
-        message[2 + sizeof(ts) + i] =
-            static_cast<uint8_t>(total_size >> (8 * (sizeof(total_size) - 1 - i)));
-    }
+    put_be(&message[2], static_cast<uint64_t>(timestamp_us));
+    put_be(&message[2 + sizeof(uint64_t)], total_size);
     return message;
 }
 

@@ -14,6 +14,7 @@
 
 #include "visualizer_analysis.h"
 
+#include "byte_order.h"
 #include "sched/constants.h"
 #include "sched/timeline.h"
 
@@ -95,11 +96,6 @@ void visit_window(std::span<const float> ring, size_t oldest, std::span<const fl
 /// A sample as the analysis takes it: clipped to full scale, and silence when not finite
 float in_range(float sample) {
     return std::isfinite(sample) ? std::clamp(sample, -FULL_SCALE, FULL_SCALE) : 0.0F;
-}
-
-void put_u16(std::vector<uint8_t>& out, uint16_t value) {
-    out.push_back(static_cast<uint8_t>(value >> 8));
-    out.push_back(static_cast<uint8_t>(value & 0xFF));
 }
 
 }  // namespace
@@ -381,21 +377,21 @@ void VisualizerAnalysis::analyze(int64_t ts_us, bool periodic, bool onset,
     if (periodic_due && (types & visualizer_type::LOUDNESS) != 0) {
         const uint16_t value = this->loudness();
         this->append_header(visualizer_type::LOUDNESS, ts_us, out);
-        put_u16(out, value);
+        append_be(out, value);
     }
     if (periodic_due && (types & visualizer_type::F_PEAK) != 0) {
         uint16_t hz = 0;
         uint16_t amplitude = 0;
         this->f_peak(hz, amplitude);
         this->append_header(visualizer_type::F_PEAK, ts_us, out);
-        put_u16(out, hz);
-        put_u16(out, amplitude);
+        append_be(out, hz);
+        append_be(out, amplitude);
     }
     if (periodic_due && (types & visualizer_type::SPECTRUM) != 0) {
         this->spectrum();
         this->append_header(visualizer_type::SPECTRUM, ts_us, out);
         for (const uint16_t value : this->spectrum_out_) {
-            put_u16(out, value);
+            append_be(out, value);
         }
     }
     if (onset_due) {
@@ -429,10 +425,7 @@ void VisualizerAnalysis::append_header(uint8_t type, int64_t ts_us,
         ++id;
     }
     out.push_back(id);
-    const auto ts = static_cast<uint64_t>(ts_us);
-    for (int shift = 56; shift >= 0; shift -= 8) {
-        out.push_back(static_cast<uint8_t>(ts >> shift));
-    }
+    append_be(out, static_cast<uint64_t>(ts_us));
 }
 
 uint16_t VisualizerAnalysis::loudness() {

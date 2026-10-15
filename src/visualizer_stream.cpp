@@ -14,6 +14,7 @@
 
 #include "visualizer_stream.h"
 
+#include "byte_order.h"
 #include "fragmentation.h"
 #include "sched/timeline.h"
 
@@ -26,11 +27,7 @@ namespace {
 
 /// The big-endian timestamp of the message at offset
 int64_t message_ts(const std::vector<uint8_t>& payload, size_t offset) {
-    uint64_t ts = 0;
-    for (size_t i = 1; i < VISUALIZER_HEADER_BYTES; ++i) {
-        ts = (ts << 8) | payload[offset + i];
-    }
-    return static_cast<int64_t>(ts);
+    return static_cast<int64_t>(read_be<uint64_t>(&payload[offset + 1]));
 }
 
 uint32_t bins_of(const VisualizerConfig& config) {

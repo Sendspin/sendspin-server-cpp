@@ -43,6 +43,9 @@ struct FrameLayout {
 /// is one cell
 FrameLayout frame_layout(uint32_t rate_hz, Codec codec);
 
+/// @brief Whether rate_hz is a sample rate an Opus encoder and decoder take (RFC 6716 section 2)
+bool is_opus_rate(uint32_t rate_hz);
+
 /// @brief `ceil(samples * 10^6 / rate)`: exact for a full frame, never shorter than exact for a
 /// short last frame
 int64_t frame_duration_us(uint32_t samples, uint32_t rate_hz);

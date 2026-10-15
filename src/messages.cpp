@@ -14,6 +14,7 @@
 
 #include "messages.h"
 
+#include "byte_order.h"
 #include "crypto/base64url.h"
 #include "crypto/crypto.h"
 #include "fragmentation.h"
@@ -1438,11 +1439,7 @@ std::optional<SourceChunk> parse_source_chunk(std::span<const uint8_t> message) 
     if (message.size() < SOURCE_CHUNK_HEADER_BYTES) {
         return std::nullopt;
     }
-    uint64_t timestamp = 0;
-    for (size_t i = 1; i < SOURCE_CHUNK_HEADER_BYTES; ++i) {
-        timestamp = (timestamp << 8) | message[i];
-    }
-    const auto capture_us = static_cast<int64_t>(timestamp);
+    const auto capture_us = static_cast<int64_t>(read_be<uint64_t>(&message[1]));
     if (capture_us > MAX_SOURCE_TIMESTAMP_US || capture_us < -MAX_SOURCE_TIMESTAMP_US) {
         return std::nullopt;
     }

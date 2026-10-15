@@ -57,10 +57,6 @@ micro_flac::PcmFormat flac_input(const sched::AudioFormat& format) {
     return {format.sample_rate, format.channels, format.bit_depth};
 }
 
-/// An RFC 6716 packet carries one or two channels; a multistream needs a container the spec's
-/// framing has none of (player/v1.md "Codec framing")
-constexpr uint8_t MAX_OPUS_CHANNELS = 2;
-
 /// The encoder's lookahead at the restricted low-delay application: 2.5 ms
 constexpr uint32_t OPUS_DELAY_DIVISOR = 400;
 
@@ -148,7 +144,7 @@ sched::FormatShape output_shape(const sched::AudioFormat& format) {
         shape.layout = sched::frame_layout(format.sample_rate, format.codec);
         shape.max_frame_bytes = OPUS_MAX_PACKET_BYTES;
         shape.encoder_available = OPUS_BUILT && shape.layout.usable && format.channels >= 1 &&
-                                  format.channels <= MAX_OPUS_CHANNELS;
+                                  format.channels <= sched::MAX_OPUS_CHANNELS;
         return shape;
     }
     if (format.codec != sched::Codec::FLAC) {

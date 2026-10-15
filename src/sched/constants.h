@@ -53,6 +53,10 @@ constexpr uint8_t MESSAGE_ID_AUDIO_CHUNK = 4;
 /// @brief The deepest FLAC sample the encoder takes
 constexpr uint8_t MAX_FLAC_BIT_DEPTH = 24;
 
+/// @brief The most channels of an Opus stream: an RFC 6716 packet carries one or two, and a
+/// multistream needs a container the spec's framing has none of (player/v1.md "Codec framing")
+constexpr uint8_t MAX_OPUS_CHANNELS = 2;
+
 /// @brief `P_prep`: cells between a cursor and a new pipeline's first frame at a format switch
 constexpr int64_t SWITCH_PREP_CELLS = 2;
 
