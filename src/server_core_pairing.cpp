@@ -219,7 +219,7 @@ void ServerCore::submit_pairing_code(const std::string& client_id, const std::st
     }
     pairing.attempt->set_code(std::move(*prs));
     const auto client = this->clients_.find(pairing.connection);
-    if (client != this->clients_.end() && client->second->active && !client->second->closed) {
+    if (client != this->clients_.end() && client->second->active() && !client->second->closed) {
         this->start_round(*client->second, pairing);
     }
 }
@@ -238,7 +238,7 @@ void ServerCore::cancel_pairing(const std::string& client_id) {
     // client can say why the attempt ended
     if (pairing.attempt) {
         const auto client = this->clients_.find(pairing.connection);
-        if (client != this->clients_.end() && client->second->active) {
+        if (client != this->clients_.end() && client->second->active()) {
             client->second->driver->session().queue_json_message(
                 build_pair_abort(PairAbortReason::USER_CANCELLED));
         }
@@ -298,7 +298,7 @@ void ServerCore::unpair(const std::string& client_id) {
 ServerCore::Client* ServerCore::pairing_connection(const std::string& client_id) {
     Client* found = nullptr;
     this->for_each_connection(client_id, [&found](Client& client) {
-        if (!client.closed && (found == nullptr || client.reported)) {
+        if (!client.closed && (found == nullptr || client.reported())) {
             found = &client;
         }
     });
@@ -390,7 +390,7 @@ void ServerCore::start_round(Client& client, Pairing& pairing) {
 }
 
 void ServerCore::on_pairing_message(Client& client, const ClientPairing& message) {
-    if (!client.active) {
+    if (!client.active()) {
         return;
     }
     const std::string client_id = client.info.client_id;
@@ -525,7 +525,7 @@ void ServerCore::finalize_pairing(Client& client, const HandshakePsk& psk) {
             }
             const auto found = this->clients_.find(connection);
             Client* client =
-                found != this->clients_.end() && found->second->active && !found->second->closed
+                found != this->clients_.end() && found->second->active() && !found->second->closed
                     ? found->second.get()
                     : nullptr;
             if (client == nullptr || !saved || it->second.late_abort) {
@@ -591,7 +591,7 @@ void ServerCore::end_pairing(const std::string& client_id, PairingResult result,
     ClientInfo info = pairing.info;
     const auto found =
         pairing.connection != 0 ? this->clients_.find(pairing.connection) : this->clients_.end();
-    if (found != this->clients_.end() && found->second->active && !found->second->closed) {
+    if (found != this->clients_.end() && found->second->active() && !found->second->closed) {
         Client& client = *found->second;
         info = client.info;
         if (leave && pairing.attempt) {

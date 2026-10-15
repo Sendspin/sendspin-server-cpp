@@ -42,6 +42,23 @@ class ServerCore::Client : public SessionObserver,
                            public GroupMember,
                            public ExternalNew {
 public:
+    /// @brief How far the connection got; each phase before CLOSED implies the ones before it
+    enum class Phase : uint8_t {
+        /// Not yet activated
+        HANDSHAKE,
+        /// The client is activated
+        ACTIVE,
+        /// The client took the connection: its first client/state arrived, or its first
+        /// activation carried no roles, after which it need not send one (messaging.md
+        /// "client/state")
+        ADMITTED,
+        /// Reported with on_client_connected() and listed in clients(): admitted, and the only
+        /// connection of its client_id so reported
+        REPORTED,
+        /// on_closed() ended the connection toward its target, pairing and source
+        CLOSED,
+    };
+
     Client(ServerCore& core, Target* target, std::string url, uint64_t id)
         : core_(core), target(target), url(std::move(url)), id(id) {}
 
@@ -111,6 +128,18 @@ public:
         return this->core_.handshake_psk(init.client_id, this->pairing_dial);
     }
 
+    bool active() const {
+        return this->phase != Phase::HANDSHAKE && this->phase != Phase::CLOSED;
+    }
+
+    bool admitted() const {
+        return this->phase == Phase::ADMITTED || this->phase == Phase::REPORTED;
+    }
+
+    bool reported() const {
+        return this->phase == Phase::REPORTED;
+    }
+
 private:
     ServerCore& core_;
 
@@ -122,15 +151,11 @@ public:
     std::unique_ptr<SessionDriver> driver;
     /// Set when the client is activated
     ClientInfo info;
-    bool active{false};
-    /// on_closed() ran: the connection no longer counts as in its handshake
+    /// Left at the phase the connection reached while on_closed() ends it toward its target,
+    /// pairing and source, and CLOSED after
+    Phase phase{Phase::HANDSHAKE};
+    /// on_closed() started: the connection no longer counts as in its handshake
     bool closed{false};
-    /// The client took the connection: its first client/state arrived, or its first activation
-    /// carried no roles, after which it need not send one (messaging.md "client/state")
-    bool admitted{false};
-    /// Reported with on_client_connected() and listed in clients(): admitted, and the only
-    /// connection of its client_id so reported
-    bool reported{false};
     /// When the client was activated
     int64_t activated_us{0};
     /// The client may play: its activations carry every implemented role
@@ -167,7 +192,7 @@ void ServerCore::for_each_known(const std::string& client_id, F&& fn) {
 template <class F>
 void ServerCore::for_each_connection(const std::string& client_id, F&& fn) {
     for (const auto& [id, client] : this->clients_) {
-        if (client->active && client->info.client_id == client_id) {
+        if (client->active() && client->info.client_id == client_id) {
             fn(*client);
         }
     }

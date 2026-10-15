@@ -92,7 +92,7 @@ void ServerCore::refresh_source(const std::string& client_id, const Client* call
     Client* chosen = nullptr;
     this->for_each_connection(client_id, [&chosen](Client& client) {
         if (!client.closed && client.driver->session().source().role_written() &&
-            (chosen == nullptr || client.reported)) {
+            (chosen == nullptr || client.reported())) {
             chosen = &client;
         }
     });

@@ -163,8 +163,9 @@ set_source_files_properties(test_group_audio.cpp PROPERTIES COMPILE_OPTIONS -fno
 # Session::scratch_, the buffer_ of Session::reassembler_ and of a Reassembler of its own to their
 # capacity to show a pairing message's PSK, or a longer message's bytes, wiped from them, which
 # nothing the session sends or reports shows.
-# test_server_core.cpp reads ServerCore::targets_ to show a dial waiting out its backoff, and a
-# lost instance's target gone with its wait, and a dial that waited not started once no longer due,
+# test_server_core.cpp reads ServerCore::targets_ (a target's phase: ServerCore::RetryArmed, a
+# PendingDial) to show a dial waiting out its backoff, and a lost instance's target gone with its
+# wait, and a dial that waited not started once no longer due,
 # which only the absence of a dial would otherwise show, calls ServerCore::prune_targets() with a chosen
 # time, and shortens HandshakeBackoff::next_dial_us_ so the deferred dial needs no full wait; it
 # also wraps a group's pipeline job (Group::audio_, AudioWorkers::Task::job_, replaced under the

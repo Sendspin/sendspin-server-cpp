@@ -196,6 +196,55 @@ TEST(ServerAccept, ReportsASecondConnectionOfAClientOnlyInThePlaceOfTheFirst) {
     EXPECT_TRUE(clients[0].connected);
 }
 
+// messaging.md "client/goodbye": a second connection of a client that took the connection,
+// unreported while the first is, leaves with no error; one that leaves before its client/state is a
+// goodbye before activation
+TEST(ServerAccept, ReportsNoErrorWhenATakenSecondConnectionSaysGoodbye) {
+    struct Row {
+        const char* name;
+        bool takes;
+        size_t errors;
+    };
+    const Row rows[] = {
+        {"a second connection that took it", true, 0},
+        {"Control: one that leaves before its client/state", false, 1},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        ServerConfig config = sendspin::server::test::local_config();
+        config.approve_all_clients = true;
+        LocalServer s;
+        ASSERT_EQ(s.start(config), StartResult::OK);
+        RawClient first;
+        const std::string id = first.noise.identity().peer_id();
+        RawClient second(
+            sendspin::server::CipherSuite::CHACHAPOLY_SHA256,
+            *sendspin::server::Identity::from_private_bytes(first.noise.identity().private_bytes));
+        connect_to(s.server, first, PLAYER_HELLO);
+        s.recorder.wait_for("connected " + id);
+        if (row.takes) {
+            connect_to(s.server, second, PLAYER_HELLO);
+        } else {
+            EXPECT_EQ(second.dial(s.server.listen_port()), 101U);
+            second.complete_handshake();
+            second.send_json(PLAYER_HELLO);
+            EXPECT_NE(second.receive_until("server/activate"), "");
+        }
+        second.send_json(client_goodbye_json("shutdown"));
+        second.read_until_closed();
+        // A later client's connection: every event of the goodbye is delivered before it
+        RawClient later;
+        connect_to(s.server, later, PLAYER_HELLO);
+        s.recorder.wait_for("connected " + later.noise.identity().peer_id());
+        EXPECT_EQ(s.recorder.count_errors(sendspin::server::ErrorKind::GOODBYE_BEFORE_ACTIVATION),
+                  row.errors);
+        // The reported connection stays
+        EXPECT_EQ(s.recorder.count("disconnected " + id + " " +
+                                   std::to_string(static_cast<int>(DisconnectReason::GOODBYE))),
+                  0U);
+    }
+}
+
 // SendspinServer::disconnect() closes every connection of the client, one still in its handshake
 // once its client/init named the client among them, and reports the client gone once: a
 // connection the host is closing is not reported in the place of the one that closed first, and

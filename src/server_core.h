@@ -49,6 +49,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace sendspin::server {
@@ -307,6 +308,15 @@ public:
 private:
     class Client;
 
+    /// @brief A target's retry timer is armed
+    struct RetryArmed {};
+
+    /// @brief A target's dial waits for connection_limits::MAX_DIALING to allow it
+    struct AwaitingSlot {
+        /// The order in which it became due
+        uint64_t order{0};
+    };
+
     /// @brief One client to dial: a URL the host asked for, keyed by the URL, or a client found by
     /// browsing, keyed by DISCOVERED_KEY and its instance. Its dial and retry timer call back with
     /// a pointer to it, so it is never moved, and destroying it cancels both.
@@ -318,9 +328,10 @@ private:
         /// Set for a client found by browsing
         std::optional<DiscoveryEntry> discovery;
         HandshakeBackoff backoff;
-        std::optional<PendingDial> dial;
+        /// Idle; its retry timer armed; waiting for a dial slot; its dial in progress; or the
+        /// connection to it, from the dial's success until the connection closes
+        std::variant<std::monostate, RetryArmed, AwaitingSlot, PendingDial, Client*> phase;
         std::unique_ptr<Timer> retry;
-        bool retry_pending{false};
         /// A URL target whose last connection ended with Reconnect::AGAIN
         bool reconnecting{false};
         /// A URL target connect_url() asked to retry until a connection to it is activated
@@ -333,13 +344,19 @@ private:
         bool host_stopped{false};
         /// The next connection is for the client's pairing
         bool pairing_dial{false};
-        /// Set while its dial waits for connection_limits::MAX_DIALING to allow it: the order
-        /// in which it became due
-        std::optional<uint64_t> waiting;
-        /// The connection to this target, from the dial's success until it closes
-        Client* client{nullptr};
         /// The client of the last connection, from its activation on
         std::optional<ClientInfo> known;
+
+        /// @brief Whether no retry, wait, dial or connection is in progress
+        bool idle() const {
+            return std::holds_alternative<std::monostate>(this->phase);
+        }
+
+        /// @brief The connection to this target, or nullptr
+        Client* client() const {
+            Client* const* client = std::get_if<Client*>(&this->phase);
+            return client != nullptr ? *client : nullptr;
+        }
     };
 
     /// @brief The key prefix of a target found by browsing; no URL starts with it

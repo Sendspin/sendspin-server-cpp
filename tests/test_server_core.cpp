@@ -51,6 +51,7 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -88,6 +89,14 @@ struct TargetState {
     bool waiting{false};  // next_dial_us is in the future
 };
 
+bool dial_in_progress(const sendspin::server::ServerCore::Target& target) {
+    return std::holds_alternative<sendspin::server::PendingDial>(target.phase);
+}
+
+bool retry_armed(const sendspin::server::ServerCore::Target& target) {
+    return std::holds_alternative<sendspin::server::ServerCore::RetryArmed>(target.phase);
+}
+
 // messaging.md "client/goodbye": backoff on repeated failures toward one target
 TEST(ServerCoreBackoff, ADialAfterAFailureWaitsOutTheBackoff) {
     ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
@@ -116,7 +125,7 @@ TEST(ServerCoreBackoff, ADialAfterAFailureWaitsOutTheBackoff) {
             TargetState state;
             const auto it = core.targets_.find(url);
             if (it != core.targets_.end()) {
-                state = {true, it->second.dial.has_value(), it->second.retry_pending,
+                state = {true, dial_in_progress(it->second), retry_armed(it->second),
                          it->second.backoff.failures(),
                          it->second.backoff.next_dial_us() > sendspin::server::now_us()};
             }
@@ -216,7 +225,7 @@ TEST(ServerCoreBackoff, RetriesAUrlUntilConnectedUntilCancelled) {
                 TargetState state;
                 const auto it = core.targets_.find(url);
                 if (it != core.targets_.end()) {
-                    state = {true, it->second.dial.has_value(), it->second.retry_pending,
+                    state = {true, dial_in_progress(it->second), retry_armed(it->second),
                              it->second.backoff.failures(),
                              it->second.backoff.next_dial_us() > sendspin::server::now_us()};
                 }
@@ -271,7 +280,7 @@ TEST(ServerCoreDiscovery, ALostInstanceCancelsItsDialWait) {
     loop.post([&] {
         const auto it = core.targets_.find(key);
         waiting.set_value(
-            {it != core.targets_.end(), it != core.targets_.end() && it->second.retry_pending});
+            {it != core.targets_.end(), it != core.targets_.end() && retry_armed(it->second)});
     });
     const std::pair<bool, bool> before = waiting.get_future().get();
     EXPECT_TRUE(before.first);
@@ -333,7 +342,7 @@ TEST(ServerCoreDiscovery, ADialThatWaitedChecksAgainBeforeItStarts) {
         std::promise<State> read;
         loop.post([&] {
             const auto& entry = core.targets_.at(url);
-            read.set_value({entry.retry_pending, entry.dial.has_value(), entry.backoff.failures()});
+            read.set_value({retry_armed(entry), dial_in_progress(entry), entry.backoff.failures()});
         });
         state = read.get_future().get();
     }
