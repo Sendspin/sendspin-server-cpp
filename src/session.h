@@ -102,6 +102,7 @@ enum class SessionEnd : uint8_t {
     ENCODE_FAILED,           ///< A message to send held a value over MAX_JSON_STRING_BYTES
     GOODBYE,                 ///< client/goodbye received; goodbye() holds it
     CLOSED_BY_HOST,          ///< close_by_host()
+    REFUSED,                 ///< refuse()
 };
 
 /// @brief One outbound WebSocket message, encrypted when BINARY
@@ -341,6 +342,10 @@ public:
     /// @brief Ends the session for the host (SendspinServer::disconnect()); what is queued is
     /// dropped. Does nothing once the session ended.
     void close_by_host();
+
+    /// @brief Ends a session in READY_FOR_ACTIVATION that the server has no room for
+    /// (connection_limits), with no activation
+    void refuse();
 
     /// @brief The PSK the session's keys come from, from AWAIT_CLIENT_HELLO on
     const PskMatch& psk_match() const {

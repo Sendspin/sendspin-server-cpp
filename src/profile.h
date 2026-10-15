@@ -52,6 +52,14 @@ constexpr size_t STAGING_RING_MAX_BYTES = (EMBEDDED ? size_t{2} : size_t{64}) * 
 constexpr size_t MAX_ACCEPTED_HANDSHAKES = EMBEDDED ? 8 : 64;
 /// @brief Dials and dialed connections in their handshake (connection_limits::MAX_DIALING)
 constexpr size_t MAX_DIALING = EMBEDDED ? 4 : 32;
+/// @brief Activated accepted connections (connection_limits::MAX_ACCEPTED_CLIENTS): the embedded
+/// profile's players
+constexpr size_t MAX_ACCEPTED_CLIENTS = EMBEDDED ? 8 : 64;
+/// @brief Activated accepted connections that may not play
+/// (connection_limits::MAX_ACCEPTED_UNAPPROVED)
+constexpr size_t MAX_ACCEPTED_UNAPPROVED = EMBEDDED ? 4 : 16;
+static_assert(MAX_ACCEPTED_UNAPPROVED < MAX_ACCEPTED_CLIENTS,
+              "unapproved clients must leave room for clients that play");
 
 /// @brief Internal RAM a new connection leaves free (connection_limits::heap_admits()); none on
 /// the host profile, and a host reports no internal heap whatever the profile

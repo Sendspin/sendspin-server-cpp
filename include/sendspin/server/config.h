@@ -46,7 +46,8 @@ constexpr const char* PATH = "/sendspin";
 /// @brief Limits on ServerConfig values; SendspinServer::start() refuses a configuration past
 /// them with StartResult::INVALID_CONFIG
 namespace config_limits {
-/// The server's name, and a group's (SendspinServer::create_group(), rename_group())
+/// The server's name, a group's (SendspinServer::create_group(), rename_group()), and a client's,
+/// to which its client/hello name is cut (ClientInfo::name)
 constexpr size_t MAX_NAME_BYTES = 1024;
 /// BCP 47 tags in practice stay within 35 characters (RFC 5646 section 4.4.1)
 constexpr size_t MAX_LANGUAGE_TAG_BYTES = 64;
@@ -123,7 +124,7 @@ enum class LogLevel : uint8_t {
     /// record that is not valid, a client record not saved
     ERROR,
     /// A failure the server recovers from: a dial or a dialed connection's handshake, mDNS
-    /// unavailable, connections refused while too many are in their handshake
+    /// unavailable, connections refused while too many are in their handshake or activated
     WARN,
     /// Each connection and its end, a failed handshake of a connection the server accepted, each
     /// dial and the wait before one, mDNS available again, each pairing and its end

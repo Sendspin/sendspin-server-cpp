@@ -480,6 +480,36 @@ bool ServerCore::admit_accept() {
     return false;
 }
 
+bool ServerCore::admit_activation(bool playable) {
+    size_t accepted = 0;
+    size_t unapproved = 0;
+    for (const auto& [id, other] : this->clients_) {
+        if (other->active && other->target == nullptr) {
+            ++accepted;
+            unapproved += other->playable ? 0 : 1;
+        }
+    }
+    const bool full = accepted >= connection_limits::MAX_ACCEPTED_CLIENTS;
+    if (!full && (playable || unapproved < connection_limits::MAX_ACCEPTED_UNAPPROVED)) {
+        if (this->refused_activations_ > 0) {
+            SS_LOGI(this->log_, "activating accepted clients again, after refusing %zu",
+                    this->refused_activations_);
+            this->refused_activations_ = 0;
+        }
+        return true;
+    }
+    // Once per run of refusals, as admit_accept()
+    if (this->refused_activations_++ == 0) {
+        if (full) {
+            SS_LOGW(this->log_, "refusing clients: %zu accepted clients are activated", accepted);
+        } else {
+            SS_LOGW(this->log_, "refusing clients that may not play: %zu are activated",
+                    unapproved);
+        }
+    }
+    return false;
+}
+
 void ServerCore::on_accepted(Connection connection) {
     if (this->stopping_) {
         return;
@@ -506,7 +536,7 @@ void ServerCore::on_ready(Client& client) {
     const ClientHello& hello = *session.client_hello();
     client.info = ClientInfo{};
     client.info.client_id = session.client_init()->client_id;
-    client.info.name = hello.name;
+    client.info.name = utf8_prefix(hello.name, config_limits::MAX_NAME_BYTES);
     client.info.url = client.url;
     client.info.unpaired_access = hello.unpaired_access_enabled;
     // NOLINTEND(bugprone-unchecked-optional-access)
@@ -519,6 +549,13 @@ void ServerCore::on_ready(Client& client) {
     client.info.address = client.driver->remote_endpoint();
     client.info.accepted = client.target == nullptr;
     client.info.discovered = client.target != nullptr && client.target->discovery.has_value();
+    const bool playable = this->decide(client, false).playable;
+    // A peer can connect with fresh keys at will: an accepted connection past a cap is closed
+    if (client.target == nullptr && !this->admit_activation(playable)) {
+        client.driver->session().refuse();
+        client.driver->pump();
+        return;
+    }
     client.active = true;
     if (client.target != nullptr) {
         client.target->retrying = false;
@@ -537,15 +574,14 @@ void ServerCore::on_ready(Client& client) {
                      ? DialIntent::PAIRING
                      : DialIntent::IDLE;
     }
-    // Every client is in one group: a player back within its grace in the group it left, a client
-    // that may play in the server's, any other alone
-    const bool playable = this->decide(client, false).playable;
     // connection.md "Multiple servers (server-initiated)": a client that may play arbitrates its
     // first activation and holds its client/state until it took the connection, so it counts as
     // connected from that client/state (on_client_state()); one held with no roles at once
     if (!playable) {
         this->admit(client);
     }
+    // Every client is in one group: a player back within its grace in the group it left, a client
+    // that may play in the server's, any other alone
     Group* group = nullptr;
     const auto held = this->held_.find(client.info.client_id);
     if (held != this->held_.end() && playable) {
@@ -1472,6 +1508,8 @@ void ServerCore::on_closed(Client& client) {
     if (client.admitted) {
         SS_LOGI(this->log_, "%s disconnected: %s", this->describe(client).c_str(),
                 end_description(driver.session(), driver.transport_close()).c_str());
+    } else if (driver.session().end() == SessionEnd::REFUSED) {
+        // admit_activation() logs a run of refusals once, as any peer can repeat them
     } else if (is_handshake_failure(driver.session().end())) {
         // A dial's failures are bounded by its backoff; any peer can repeat an accepted one
         SS_LOG_AT(this->log_, client.target != nullptr ? LogLevel::WARN : LogLevel::INFO,
@@ -1512,10 +1550,11 @@ void ServerCore::on_closed(Client& client) {
                 break;
             }
         }
-    } else if (!client.admitted && driver.session().end() != SessionEnd::CLOSED_BY_HOST) {
+    } else if (!client.admitted && driver.session().end() != SessionEnd::CLOSED_BY_HOST &&
+               driver.session().end() != SessionEnd::REFUSED) {
         // Ended before the client took it: a failed handshake, or a refusal such as
         // `concurrent_attempt`; the host's own close (disconnect(), cancel_connect_url()) is no
-        // error
+        // error, nor the server's refusal past a cap, which admit_activation() logs
         this->post_event([error = error_before_activation(client.url, driver.session())](
                              ServerListener& listener) { listener.on_error(error); });
     }
