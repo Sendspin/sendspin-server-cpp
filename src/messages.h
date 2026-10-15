@@ -482,6 +482,9 @@ struct ClientPairing {
     int64_t rx_us{0};
 };
 
+/// @brief Whether a client message's `type` is one of the pairing messages (pairing.md "Messages")
+bool is_pairing_type(std::string_view type);
+
 using ClientMessage = std::variant<MalformedMessage, ClientHello, ClientGoodbye, ClientTime,
                                    ClientState, ClientCommand, ClientLeave, ClientPairing,
                                    ClientStreamStart, ClientStreamEnd, OtherMessage>;

@@ -66,6 +66,12 @@ public:
     /// @param is_buffered whether a fragmented message with this `orig_type` is reassembled;
     /// another type is tracked to its last fragment and DISCARDED, as the ignore rules allow
     Reassembler(size_t max_message_bytes, bool (*is_buffered)(uint8_t message_id));
+    /// @brief Wipes the reassembly buffer
+    ~Reassembler();
+    Reassembler(const Reassembler&) = delete;
+    Reassembler& operator=(const Reassembler&) = delete;
+    Reassembler(Reassembler&&) = delete;
+    Reassembler& operator=(Reassembler&&) = delete;
 
     /// @brief Takes one decrypted plaintext
     Outcome accept(std::span<const uint8_t> plaintext);
@@ -76,7 +82,8 @@ public:
         return this->message_;
     }
 
-    /// @brief Zeros the reassembly buffer, after a message that may carry a secret
+    /// @brief Zeros the reassembly buffer, spare capacity included, as far as it was written since
+    /// the last wipe, after a message that may carry a secret. A failed sequence wipes it too.
     void wipe();
 
 private:
@@ -86,6 +93,8 @@ private:
     std::span<const uint8_t> message_;
     size_t max_message_bytes_;
     bool (*is_buffered_)(uint8_t);
+    /// The largest size buffer_ reached since the last wipe: how far its storage holds bytes
+    size_t written_{0};
     bool in_progress_{false};
     bool discarding_{false};
 };

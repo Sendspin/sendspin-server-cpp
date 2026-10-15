@@ -393,6 +393,8 @@ private:
     bool queue_text(const std::string& text);
     bool queue_json(const std::string& json);
     bool queue(OutboundPlaintext message);
+    /// @brief Zeros scratch_ as far as it was written since the last wipe, spare capacity included
+    void wipe_scratch();
     /// @brief Traces an inbound plaintext, its pairing secrets replaced
     void trace_inbound(std::span<const uint8_t> plaintext, int64_t rx_us);
     /// @brief An activation's message and stream roles, its active_roles appended to the queued
@@ -449,6 +451,8 @@ private:
     std::optional<InitError> init_error_;
     std::optional<SessionEnd> end_;
     std::vector<uint8_t> scratch_;
+    /// The largest size scratch_ reached since the last wipe: how far its storage holds bytes
+    size_t scratch_written_{0};
     int64_t deadline_us_{0};
     PlayerStream player_;
     VisualizerStream visualizer_;

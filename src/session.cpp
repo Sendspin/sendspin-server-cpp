@@ -206,6 +206,7 @@ void Session::on_transport_message(MessageKind kind, std::span<const uint8_t> pa
         return;
     }
     this->scratch_.assign(payload.begin(), payload.end());
+    this->scratch_written_ = std::max(this->scratch_written_, this->scratch_.size());
     if (!this->ciphers_ || !this->ciphers_->decrypt(this->scratch_)) {
         this->finish(SessionEnd::DECRYPT_FAILED);
         return;
@@ -232,12 +233,20 @@ void Session::on_transport_message(MessageKind kind, std::span<const uint8_t> pa
             }
             return;
         case Reassembler::Outcome::MALFORMED:
+            // The reassembler wiped its buffer; the fragment here may carry part of a secret too
+            this->wipe_scratch();
             this->finish(SessionEnd::MALFORMED_FRAGMENTS);
             return;
         case Reassembler::Outcome::TOO_LARGE:
+            this->wipe_scratch();
             this->finish(SessionEnd::MESSAGE_TOO_LARGE);
             return;
     }
+}
+
+void Session::wipe_scratch() {
+    secure_zero_storage(this->scratch_, this->scratch_written_);
+    this->scratch_written_ = 0;
 }
 
 void Session::trace_inbound(std::span<const uint8_t> plaintext, int64_t rx_us) {
@@ -261,9 +270,12 @@ void Session::on_application_message(std::span<const uint8_t> message, int64_t r
         return;
     }
     ClientMessage parsed = parse_client_message(as_text(message.subspan(1)), rx_us);
-    if (std::holds_alternative<ClientPairing>(parsed)) {
-        // A pairing message may carry a secret, which no buffer keeps once parsed
-        secure_zero(this->scratch_.data(), this->scratch_.size());
+    // A pairing message may carry a secret, which no buffer keeps once parsed, whether or not it
+    // passed validation; so may a message whose type could not be read
+    const MalformedMessage* malformed = std::get_if<MalformedMessage>(&parsed);
+    if (std::holds_alternative<ClientPairing>(parsed) ||
+        (malformed != nullptr && (malformed->type.empty() || is_pairing_type(malformed->type)))) {
+        this->wipe_scratch();
         this->reassembler_.wipe();
     }
     // connection.md "Re-handshake": message 2 answers the server's message 1, and travels under
