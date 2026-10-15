@@ -135,7 +135,8 @@ public:
     int64_t activated_us{0};
     /// The client may play: its activations carry every implemented role
     bool playable{false};
-    /// The client's group, from its activation until it closes
+    /// The client's group, from its activation until it closes. A pump can close the connection
+    /// at once (SessionDriver::pump()), so it is read again after one.
     Group* group{nullptr};
     /// The latest client/state's `available`; nullopt before the first
     std::optional<bool> available;

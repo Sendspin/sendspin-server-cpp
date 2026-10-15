@@ -22,6 +22,7 @@
 #include "crypto/base64url.h"
 #include "crypto/cpace.h"
 #include "crypto/pairing_code.h"
+#include "crypto/pairing_token.h"
 #include "crypto/psk_wrap.h"
 #include "fragmentation.h"
 #include "messages.h"
@@ -610,6 +611,104 @@ TEST(PairingWireLeftovers, DropsMessagesOfACancelledAttempt) {
     ClientSide second(client, 2);
     client.send_json(second.init_json());
     EXPECT_EQ(client.receive_json().find(R"({"type":"server/pair-init")"), 0U);
+}
+
+/// The Pairing PSK Flow's client/pair-init for the first activation of a handshake
+const char* const PSK_INIT = R"({"type":"client/pair-init","payload":{"pairing_index":1}})";
+
+/// The Pairing PSK Flow's client/pair-finalize, carrying long_term as it is
+std::string psk_finalize_json(const Psk& long_term) {
+    return R"({"type":"client/pair-finalize","payload":{"long_term_psk":")" + b64(long_term) +
+           R"("}})";
+}
+
+/// The pairing token of client with pairing_psk
+std::string token_of(const RawClient& client, const Psk& pairing_psk) {
+    return sendspin::server::format_pairing_token(client.noise.identity().public_bytes,
+                                                  pairing_psk);
+}
+
+/// The client's side of a Pairing PSK attempt from its pairing activation, the re-handshake to the
+/// pairing PSK done: client/pair-init and client/pair-finalize with long_term, which the server
+/// saves in slot 0 and reports PAIRED, once
+void pair_with_pairing_psk(Server& s, RawClient& client, const Psk& long_term) {
+    const std::string activation = client.receive_until("server/activate");
+    EXPECT_NE(activation.find(R"("method":"pairing_psk")"), std::string::npos) << activation;
+    client.send_json(PSK_INIT);
+    client.send_json(psk_finalize_json(long_term));
+    EXPECT_EQ(client.receive_until("server/pair-finalize"),
+              R"({"type":"server/pair-finalize","payload":{}})");
+    const std::optional<sendspin::server::ClientRecord> record = s.provider.record(0);
+    ASSERT_TRUE(record && record->long_term_psk);
+    EXPECT_EQ(*record->long_term_psk, long_term);
+    const std::string paired =
+        Recorder::pairing_result(client.noise.identity().peer_id(), PairingResult::PAIRED);
+    s.recorder.wait_for(paired);
+    EXPECT_EQ(s.recorder.count(paired), 1U);
+}
+
+// pairing.md "Pairing index", "Entering and leaving pairing": the count restarts at every
+// handshake, so a pairing activation written before a re-handshake counts index 1 under the old
+// keys too. A Pairing PSK attempt begun after a cancelled code attempt starts behind a
+// re-handshake to the pairing PSK. Sent under the Sentinel's keys before message 2, the cancelled
+// attempt's client/pair-init, with its commit_B, and a client/pair-finalize are dropped: they are
+// leftovers, and prove no pairing PSK. Control: the same messages after the re-handshake pair.
+TEST(PairingWireLeftovers, DropsAttemptMessagesSentBeforeItsReHandshake) {
+    Server s;
+    RawClient client;
+    ASSERT_NO_FATAL_FAILURE(begin_dynamic(s, client));
+    const std::string id = client.noise.identity().peer_id();
+    ASSERT_TRUE(s.server.cancel_pairing(id));
+    EXPECT_EQ(client.receive_until("server/activate"),
+              R"({"type":"server/activate","payload":{"activities":[]}})");
+    s.recorder.wait_for(Recorder::pairing_result(id, PairingResult::CANCELLED));
+
+    const Psk pairing_psk = psk_of(0x40);
+    ASSERT_TRUE(s.server.submit_pairing_token(id, token_of(client, pairing_psk)));
+    const std::string message_1 = client.receive_until("noise/handshake");
+    const ClientSide cancelled(client, 1);
+    client.send_json(cancelled.init_json());
+    client.send_json(PSK_INIT);
+    client.send_json(psk_finalize_json(psk_of(0x60)));
+    client.noise.psk = pairing_psk;
+    ASSERT_TRUE(client.noise.read_rekey_message_1(message_1)) << message_1;
+    client.send_binary(client.noise.rekey_message_2());
+    ASSERT_NO_FATAL_FAILURE(pair_with_pairing_psk(s, client, psk_of(0x70)));
+}
+
+// pairing.md "Pairing index": a paired client's Pairing PSK attempt that a second token replaces
+// leaves two re-handshakes queued, back to the long-term PSK and then to the pairing PSK. Under
+// the pairing PSK the first attempt's activation counted index 1, so its client/pair-init, a
+// client/pair-finalize and its pair/abort sent before those re-handshakes fit the new attempt's
+// step and PSK; they are dropped as sent before its activation. Control: the init and finalize
+// after them pair.
+TEST(PairingWireLeftovers, DropsAttemptMessagesSentBeforeTheReHandshakesAReplacementQueued) {
+    RawClient client;
+    const std::string id = client.noise.identity().peer_id();
+    const Psk long_term = psk_of(0x30);
+    Server s([&](ServerConfig& /*config*/, GatedProvider& provider) {
+        seed_record(provider, id, sendspin::server::ApprovalScope::PLAYBACK, long_term);
+    });
+    client.noise.psk = long_term;
+    ASSERT_NO_FATAL_FAILURE(connect(s, client));
+    const Psk pairing_psk = psk_of(0x40);
+    ASSERT_TRUE(s.server.submit_pairing_token(id, token_of(client, pairing_psk)));
+    ASSERT_NO_FATAL_FAILURE(rekey_to(client, pairing_psk));
+    const std::string activation = client.receive_until("server/activate");
+    EXPECT_NE(activation.find(R"("method":"pairing_psk")"), std::string::npos) << activation;
+
+    // The second token cancels the first attempt and begins the next in one step
+    ASSERT_TRUE(s.server.submit_pairing_token(id, token_of(client, pairing_psk)));
+    EXPECT_EQ(client.receive_until("pair/abort"),
+              R"({"type":"pair/abort","payload":{"reason":"user_cancelled"}})");
+    client.send_json(PSK_INIT);
+    client.send_json(psk_finalize_json(psk_of(0x60)));
+    client.send_json(R"({"type":"pair/abort","payload":{"reason":"user_cancelled"}})");
+    ASSERT_NO_FATAL_FAILURE(rekey_to(client, long_term));
+    EXPECT_EQ(client.receive_until("server/activate").find(R"("activities":["pairing"])"),
+              std::string::npos);
+    ASSERT_NO_FATAL_FAILURE(rekey_to(client, pairing_psk));
+    ASSERT_NO_FATAL_FAILURE(pair_with_pairing_psk(s, client, psk_of(0x70)));
 }
 
 // pairing.md "server/pair-finalize": sent only once the record is persisted. A save that fails

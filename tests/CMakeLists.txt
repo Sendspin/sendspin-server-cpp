@@ -156,7 +156,11 @@ set_source_files_properties(test_group_audio.cpp PROPERTIES COMPILE_OPTIONS -fno
 # time, and shortens HandshakeBackoff::next_dial_us_ so the deferred dial needs no full wait; it
 # also wraps a group's pipeline job (Group::audio_, AudioWorkers::Task::job_, replaced under the
 # pool's mutex between two jobs) with a step that swaps its encoder (GroupAudio::instances_) for
-# one that refuses on the group audio thread, to show core's handling of a pipeline failure.
+# one that refuses on the group audio thread, to show core's handling of a pipeline failure. It
+# finds a connection in ServerCore::clients_ and, once its SessionDriver::writing_ and waiting_
+# show no write outstanding, so that its end closes it at once, caps its control FIFO at what it
+# holds (Session::queues_, SendQueues::caps_ and control_bytes_), so the next message queued,
+# inside a group's move or stop, overflows it: no client can time the FIFO's last free byte.
 # test_session_driver.cpp reads SessionDriver::writing_ and waiting_ and the session's fragment
 # progress to send a goodbye while a write is stalled, and writing_ again at the close to tell
 # which end closed, states nothing else shows; ActiveDriver::activate() reads writing_ and waiting_

@@ -63,7 +63,7 @@ At `client/init` the session asks which PSK message 1 references (`select_handsh
 
 ### Pairing
 
-`begin_pairing()` posts to core, which keeps one `ServerCore::Pairing` per client with its `PairingAttempt` (`pairing.h`). A client that is not connected is dialed for the pairing. A connection under another PSK than the method's is re-handshaken to it first. `judge_pairing_message()` decides each pairing message against the attempt's step:
+`begin_pairing()` posts to core, which keeps one `ServerCore::Pairing` per client with its `PairingAttempt` (`pairing.h`). A client that is not connected is dialed for the pairing. A connection under another PSK than the method's is re-handshaken to it first, and the attempt drops the leftovers sent before that completes. `judge_pairing_message()` decides each pairing message against the attempt's step:
 
 | Step | Next accepted | Then |
 | --- | --- | --- |

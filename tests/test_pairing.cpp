@@ -98,6 +98,8 @@ TEST(JudgePairingMessage, FitsEachMessageToItsStep) {
     pending_seen.pending_seen = true;
     PairingContext last_round = context(AWAIT_CONFIRM, DYNAMIC);
     last_round.round = sendspin::server::MAX_PAIRING_ROUNDS;
+    PairingContext rekeying = context(AWAIT_INIT, PSK);
+    rekeying.rekeying = true;
     const Row rows[] = {
         // client/pair-init and client/pair-pending carry the index
         {"Control: dynamic client/pair-init with commit_B", context(AWAIT_INIT, DYNAMIC),
@@ -123,6 +125,17 @@ TEST(JudgePairingMessage, FitsEachMessageToItsStep) {
          with_commit(message_of(PairingMessageKind::INIT, 1)), ERROR},
         {"a second client/pair-pending", pending_seen, message_of(PairingMessageKind::PENDING, 1),
          ERROR},
+        // The count restarts at every handshake: index 1 under older keys is not the attempt's
+        {"Control: Pairing PSK client/pair-init", context(AWAIT_INIT, PSK),
+         message_of(PairingMessageKind::INIT, 1), ACCEPT},
+        {"client/pair-init while a re-handshake is pending", rekeying,
+         message_of(PairingMessageKind::INIT, 1), DISCARD},
+        {"an earlier code attempt's client/pair-init while one is pending", rekeying,
+         with_commit(message_of(PairingMessageKind::INIT, 1)), DISCARD},
+        {"client/pair-init above the activations written while one is pending", rekeying,
+         message_of(PairingMessageKind::INIT, 2), ERROR},
+        {"pair/abort while one is pending", rekeying, message_of(PairingMessageKind::ABORT),
+         DISCARD},
         // The rounds
         {"Control: client/pair-auth after server/pair-auth", context(AWAIT_AUTH, DYNAMIC),
          message_of(PairingMessageKind::AUTH), ACCEPT},

@@ -680,7 +680,9 @@ void ServerCore::on_client_state(Client& client) {
     if (turned_unavailable) {
         this->leave_group(client);
     }
-    client.group->on_client_state(client);
+    if (client.group != nullptr) {
+        client.group->on_client_state(client);
+    }
 }
 
 void ServerCore::on_client_leave(Client& client) {
@@ -690,13 +692,14 @@ void ServerCore::on_client_leave(Client& client) {
 }
 
 void ServerCore::leave_group(Client& client) {
-    if (client.group->member_count() > 1) {
-        const GroupId previous = client.group->id();
-        this->move_to_solo_group(client);
-        client.previous_group = previous;
-        client.solo_group = client.group->id();
+    // Held: the pumps below can clear client.group
+    Group& group = *client.group;
+    if (group.member_count() > 1) {
+        const Group& solo = this->move_to_solo_group(client);
+        client.previous_group = group.id();
+        client.solo_group = solo.id();
     } else {
-        client.group->server_stop();
+        group.server_stop();
     }
 }
 
@@ -1194,8 +1197,10 @@ void ServerCore::on_playback_changed(Group& group) {
     }
 }
 
-void ServerCore::move_to_solo_group(Client& client) {
-    this->move_member(client, this->new_group(client.info.name));
+Group& ServerCore::move_to_solo_group(Client& client) {
+    Group& solo = this->new_group(client.info.name);
+    this->move_member(client, solo);
+    return solo;
 }
 
 void ServerCore::move_member(Client& client, Group& to) {
@@ -1357,6 +1362,10 @@ void ServerCore::place(const std::string& client_id, std::optional<GroupId> targ
     }
     // Each connection of the client is judged on its own
     for (Client* client : connections) {
+        // An earlier move's pump can close it
+        if (client->group == nullptr) {
+            continue;
+        }
         facts.playable = client->playable;
         facts.in_target = target == client->group->id();
         if (move_action(facts) == MoveAction::MOVE) {

@@ -531,7 +531,8 @@ private:
     /// one of its own, remembering the group it left; alone, its group's playback stops
     void leave_group(Client& client);
     /// @brief A new stopped group holding client alone
-    void move_to_solo_group(Client& client);
+    /// @return the new group, which outlives the handler even when the move closed the connection
+    Group& move_to_solo_group(Client& client);
     /// @brief client leaves its group for to, which may then be erased
     void move_member(Client& client, Group& to);
     /// @brief Moves client_id's connections, or the place held for it, as move_action() decides,
