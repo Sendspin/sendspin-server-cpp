@@ -18,6 +18,7 @@
 
 #include "fragmentation.h"
 #include "player_stream.h"
+#include "wire_messages.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -36,6 +37,7 @@ using sendspin::server::PlayerSupport;
 using sendspin::server::SampleFormat;
 using sendspin::server::StreamSource;
 namespace sched = sendspin::server::sched;
+namespace wire = sendspin::server::test::wire;
 
 constexpr int64_t T0 = 1000000;
 constexpr int64_t START_US = 500000;
@@ -168,7 +170,7 @@ Sent run(FakeGroup& group) {
         const uint32_t depth = stream.cursor_format().bit_depth;
         const sendspin::server::PackedChunk chunk = stream.take_chunk(&group, 16384, now);
         EXPECT_FALSE(chunk.plaintext.bytes.empty());
-        const size_t frames = (chunk.plaintext.bytes.size() - sched::CHUNK_HEADER_BYTES) / PAYLOAD;
+        const size_t frames = (chunk.plaintext.bytes.size() - wire::AUDIO_CHUNK_HEADER) / PAYLOAD;
         for (size_t i = 0; i < frames; ++i) {
             sent.cells.emplace_back(((chunk.ts_us - T0) / sched::CELL_US) + static_cast<int64_t>(i),
                                     depth);

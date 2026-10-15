@@ -21,6 +21,7 @@
 #include "feeder.h"
 #include "raw_client.h"
 #include "test_recorder.h"
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 
@@ -52,6 +53,7 @@ using sendspin::server::examples::AudioInfo;
 using sendspin::server::examples::AudioSource;
 using sendspin::server::examples::Feeder;
 using sendspin::server::test::MemoryProvider;
+namespace wire = sendspin::server::test::wire;
 
 constexpr uint32_t RATE = 48000;
 
@@ -420,8 +422,6 @@ private:
 /// first file's first, pass after pass
 void expect_gapless_loop(const std::vector<std::shared_ptr<Positions>>& files, uint64_t frames) {
     constexpr size_t PASSES = 3;
-    constexpr size_t HEADER = 13;
-    constexpr uint8_t AUDIO_CHUNK = 4;
     constexpr int64_t US_PER_SECOND = 1000000;
     MemoryProvider provider;
     Log log(false);
@@ -466,7 +466,7 @@ void expect_gapless_loop(const std::vector<std::shared_ptr<Positions>>& files, u
         const std::optional<std::vector<uint8_t>> message = client.receive_plaintext();
         ASSERT_TRUE(message);
         ASSERT_FALSE(message->empty());
-        if (message->front() != AUDIO_CHUNK) {
+        if (message->front() != wire::AUDIO_CHUNK_ID) {
             JsonDocument doc;
             ASSERT_EQ(deserializeJson(doc, message->data() + 1, message->size() - 1),
                       DeserializationError::Ok);
@@ -476,12 +476,9 @@ void expect_gapless_loop(const std::vector<std::shared_ptr<Positions>>& files, u
             starts += type == "stream/start" ? 1 : 0;
             continue;
         }
-        ASSERT_GT(message->size(), HEADER);
-        int64_t ts = 0;
-        for (size_t i = 1; i < 9; ++i) {
-            ts = (ts << 8) | (*message)[i];
-        }
-        const size_t chunk_frames = (message->size() - HEADER) / 4;
+        ASSERT_GT(message->size(), wire::AUDIO_CHUNK_HEADER);
+        const int64_t ts = wire::timestamp_at(*message);
+        const size_t chunk_frames = (message->size() - wire::AUDIO_CHUNK_HEADER) / 4;
         if (next_ts) {
             EXPECT_EQ(ts, *next_ts) << "a gap or overlap in the timeline";
         }
@@ -489,7 +486,7 @@ void expect_gapless_loop(const std::vector<std::shared_ptr<Positions>>& files, u
         next_ts = ts + static_cast<int64_t>(chunk_frames * US_PER_SECOND / RATE);
         for (size_t i = 0; i < chunk_frames; ++i) {
             const std::optional<uint16_t> position =
-                Positions::position_of(message->data() + HEADER + (4 * i));
+                Positions::position_of(message->data() + wire::AUDIO_CHUNK_HEADER + (4 * i));
             ASSERT_TRUE(position) << "a frame the files do not hold";
             if (previous) {
                 const auto expected = static_cast<uint16_t>((*previous + 1) % frames);

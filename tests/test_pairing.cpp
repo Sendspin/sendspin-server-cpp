@@ -20,6 +20,7 @@
 #include "fragmentation.h"
 #include "messages.h"
 #include "pairing.h"
+#include "wire_messages.h"
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -38,6 +39,7 @@ using sendspin::server::PairingOffers;
 using sendspin::server::PairingStep;
 using sendspin::server::PairingVerdict;
 using sendspin::server::PairMethod;
+namespace wire = sendspin::server::test::wire;
 
 ClientPairing message_of(PairingMessageKind kind, uint32_t index = 0) {
     ClientPairing message;
@@ -398,7 +400,7 @@ TEST(RedactPairingSecrets, ReplacesEverySecretField) {
         ASSERT_EQ(redacted.has_value(), row.redacted.has_value());
         if (redacted) {
             ASSERT_FALSE(redacted->empty());
-            EXPECT_EQ(redacted->front(), sendspin::server::MESSAGE_ID_JSON);
+            EXPECT_EQ(redacted->front(), wire::JSON_ID);
             EXPECT_EQ(std::string(redacted->begin() + 1, redacted->end()), *row.redacted);
         }
     }

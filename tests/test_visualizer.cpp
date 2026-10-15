@@ -20,6 +20,7 @@
 #include "fft.h"
 #include "visualizer.h"
 #include "visualizer_analysis.h"
+#include "wire_messages.h"
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -42,6 +43,7 @@ using sendspin::server::VisualizerAnalysis;
 using sendspin::server::VisualizerConfig;
 using sendspin::server::VisualizerRequest;
 namespace type = sendspin::server::visualizer_type;
+namespace wire = sendspin::server::test::wire;
 
 constexpr uint32_t RATE = 48000;
 constexpr size_t WINDOW = 2048;
@@ -487,7 +489,7 @@ struct Decoded {
 };
 
 uint16_t u16_at(const std::vector<uint8_t>& bytes, size_t at) {
-    return static_cast<uint16_t>((bytes[at] << 8) | bytes[at + 1]);
+    return wire::field_at<uint16_t>(bytes, at);
 }
 
 Decoded decode(const std::vector<uint8_t>& bytes, uint32_t bins) {
@@ -495,22 +497,18 @@ Decoded decode(const std::vector<uint8_t>& bytes, uint32_t bins) {
     size_t at = 0;
     while (at < bytes.size()) {
         const uint8_t id = bytes[at];
-        int64_t ts = 0;
-        for (size_t i = 1; i < 9; ++i) {
-            ts = (ts << 8) | bytes[at + i];
-        }
-        out.timestamps.push_back(ts);
-        const size_t data = at + 9;
+        out.timestamps.push_back(wire::timestamp_at(bytes, at + wire::TIMESTAMP_AT));
+        const size_t data = at + wire::VISUALIZER_HEADER;
         switch (id) {
-            case 16:
+            case wire::LOUDNESS_ID:
                 out.loudness = u16_at(bytes, data);
                 at = data + 2;
                 break;
-            case 18:
+            case wire::F_PEAK_ID:
                 out.f_peak = {u16_at(bytes, data), u16_at(bytes, data + 2)};
                 at = data + 4;
                 break;
-            case 19: {
+            case wire::SPECTRUM_ID: {
                 std::vector<uint16_t> values;
                 for (uint32_t i = 0; i < bins; ++i) {
                     values.push_back(u16_at(bytes, data + (2 * size_t{i})));
@@ -519,7 +517,7 @@ Decoded decode(const std::vector<uint8_t>& bytes, uint32_t bins) {
                 at = data + (2 * size_t{bins});
                 break;
             }
-            case 20:
+            case wire::PEAK_ID:
                 out.peak = bytes[data];
                 at = data + 1;
                 break;

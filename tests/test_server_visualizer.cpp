@@ -25,6 +25,7 @@
 #include "sched/constants.h"
 #include "test_ports.h"
 #include "test_recorder.h"
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 
@@ -64,15 +65,15 @@ using sendspin::server::TraceDirection;
 using sendspin::server::TracedMessage;
 using sendspin::server::WriteResult;
 using sendspin::server::test::Bytes;
+using sendspin::server::test::LocalServer;
 using sendspin::server::test::MemoryProvider;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
 using sendspin::server::test::run_until;
+namespace wire = sendspin::server::test::wire;
 
 constexpr uint32_t RATE = 48000;
 constexpr int64_t CELL_US = 20000;
-constexpr size_t CHUNK_HEADER = 13;
-constexpr uint8_t AUDIO_CHUNK = 4;
 /// A tone at the center of an FFT bin of the 2048-sample window at RATE
 constexpr double TONE_HZ = 44.0 * RATE / 2048;
 constexpr const char* PCM16 =
@@ -151,19 +152,20 @@ public:
             }
             Entry entry;
             const uint8_t id = plaintext->empty() ? 0 : plaintext->front();
-            if (id == AUDIO_CHUNK || (id >= 16 && id <= 23)) {
-                entry.type = id == AUDIO_CHUNK ? "chunk" : "visualizer";
+            if (id == wire::AUDIO_CHUNK_ID || wire::is_visualizer(id)) {
+                entry.type = id == wire::AUDIO_CHUNK_ID ? "chunk" : "visualizer";
                 entry.id = id;
                 entry.bytes = plaintext->size();
-                for (size_t i = 1; i < 9 && i < plaintext->size(); ++i) {
-                    entry.ts = (entry.ts << 8) | (*plaintext)[i];
+                const size_t header =
+                    id == wire::AUDIO_CHUNK_ID ? wire::AUDIO_CHUNK_HEADER : wire::VISUALIZER_HEADER;
+                if (plaintext->size() >= wire::TIMESTAMP_AT + sizeof(int64_t)) {
+                    entry.ts = wire::timestamp_at(*plaintext);
                 }
-                const size_t header = id == AUDIO_CHUNK ? CHUNK_HEADER : 9;
                 if (plaintext->size() > header) {
                     entry.data.assign(plaintext->begin() + static_cast<std::ptrdiff_t>(header),
                                       plaintext->end());
                 }
-            } else if (id == 0) {
+            } else if (id == wire::JSON_ID) {
                 entry.json.assign(plaintext->begin() + 1, plaintext->end());
                 JsonDocument doc;
                 EXPECT_EQ(deserializeJson(doc, entry.json), DeserializationError::Ok);
@@ -279,7 +281,7 @@ struct VisualizerTrace {
         int64_t stamp_us{0};
         int64_t ts{0};
         size_t bytes{0};
-        /// A visualization message's type byte, or AUDIO_CHUNK
+        /// A visualization message's type byte, or wire::AUDIO_CHUNK_ID
         uint8_t id{0};
         Bytes data;
     };
@@ -292,16 +294,15 @@ struct VisualizerTrace {
         const uint8_t id = message.plaintext.front();
         Sent sent;
         sent.stamp_us = message.stamp_us;
-        if ((id >= 16 && id <= 23) || id == AUDIO_CHUNK) {
-            for (size_t i = 1; i < 9; ++i) {
-                sent.ts = (sent.ts << 8) | message.plaintext[i];
-            }
+        if (wire::is_visualizer(id) || id == wire::AUDIO_CHUNK_ID) {
+            sent.ts = wire::timestamp_at(message.plaintext);
             sent.bytes = message.plaintext.size();
             sent.id = id;
-            const size_t header = id == AUDIO_CHUNK ? CHUNK_HEADER : 9;
+            const size_t header =
+                id == wire::AUDIO_CHUNK_ID ? wire::AUDIO_CHUNK_HEADER : wire::VISUALIZER_HEADER;
             sent.data.assign(message.plaintext.begin() + static_cast<std::ptrdiff_t>(header),
                              message.plaintext.end());
-        } else if (id == 0) {
+        } else if (id == wire::JSON_ID) {
             const std::string json(message.plaintext.begin() + 1, message.plaintext.end());
             const bool named = json.find("visualizer") != std::string::npos;
             sent.reset = named && (json.find("stream/clear") != std::string::npos ||
@@ -384,7 +385,7 @@ std::vector<const Entry*> first_stream(const RawVisualizer& client) {
 }
 
 uint16_t u16_at(const Bytes& data, size_t at) {
-    return static_cast<uint16_t>((data[at] << 8) | data[at + 1]);
+    return wire::field_at<uint16_t>(data, at);
 }
 
 // ==============================================================================
@@ -435,12 +436,15 @@ TEST(ServerVisualizer, StreamsTheEchoedConfigurationOnTheAudioTimeline) {
         EXPECT_GE(message->ts, last);
         last = message->ts;
         const std::map<uint8_t, size_t> sizes = {
-            {16, 11}, {18, 13}, {19, 9 + (2 * BINS)}, {20, 10}};
+            {wire::LOUDNESS_ID, wire::VISUALIZER_HEADER + 2},
+            {wire::F_PEAK_ID, wire::VISUALIZER_HEADER + 4},
+            {wire::SPECTRUM_ID, wire::VISUALIZER_HEADER + (2 * BINS)},
+            {wire::PEAK_ID, wire::VISUALIZER_HEADER + 1}};
         ASSERT_TRUE(sizes.contains(message->id)) << int{message->id};
         EXPECT_EQ(message->bytes, sizes.at(message->id));
         // A peak at a cell's start, and every periodic instant at 25 per second on a cell's too
         EXPECT_EQ((message->ts - chunks[0]->ts) % CELL_US, 0) << int{message->id};
-        if (message->id == 16) {
+        if (message->id == wire::LOUDNESS_ID) {
             loudness_ts.push_back(message->ts);
         }
     }
@@ -454,7 +458,7 @@ TEST(ServerVisualizer, StreamsTheEchoedConfigurationOnTheAudioTimeline) {
             if (sent.reset && !loudness.empty()) {
                 break;
             }
-            if (sent.id == 16) {
+            if (sent.id == wire::LOUDNESS_ID) {
                 loudness.push_back(sent);
             }
         }
@@ -464,13 +468,13 @@ TEST(ServerVisualizer, StreamsTheEchoedConfigurationOnTheAudioTimeline) {
     EXPECT_EQ((loudness_ts.front() - chunks[0]->ts) % CELL_US, 0);
     // The tone, half scale, past the first window of the stream: about -6 dB
     const auto later = std::find_if(messages.begin(), messages.end(), [&](const Entry* m) {
-        return m->id == 18 && m->ts >= loudness_ts.front() + (4 * CELL_US);
+        return m->id == wire::F_PEAK_ID && m->ts >= loudness_ts.front() + (4 * CELL_US);
     });
     ASSERT_NE(later, messages.end());
     EXPECT_EQ(u16_at((*later)->data, 0), static_cast<uint16_t>(std::lround(TONE_HZ)));
     EXPECT_NEAR(u16_at((*later)->data, 2), 58960, 200);
-    const auto spectrum =
-        std::find_if(later, messages.end(), [](const Entry* m) { return m->id == 19; });
+    const auto spectrum = std::find_if(later, messages.end(),
+                                       [](const Entry* m) { return m->id == wire::SPECTRUM_ID; });
     ASSERT_NE(spectrum, messages.end());
     std::vector<uint16_t> bins;
     for (uint32_t i = 0; i < BINS; ++i) {
@@ -625,7 +629,7 @@ TEST(ServerVisualizer, StaysOnTimeAcrossALiveStallWithNoPlayer) {
     std::optional<int64_t> first_after;
     int64_t last = 0;
     for (const VisualizerTrace::Sent& sent : sent_to(s, client.id)) {
-        if (sent.reset || sent.id != 16) {
+        if (sent.reset || sent.id != wire::LOUDNESS_ID) {
             continue;
         }
         EXPECT_GE(sent.ts, last);
@@ -667,7 +671,7 @@ TEST(ServerVisualizer, StartsAJoinerTheGroupLeadPastItsStart) {
     for (const VisualizerTrace::Sent& sent : sent_to(s, joiner.id)) {
         if (sent.start && !started) {
             started = sent.stamp_us;
-        } else if (started && sent.id == 16) {
+        } else if (started && sent.id == wire::LOUDNESS_ID) {
             first = sent;
             break;
         }
@@ -705,7 +709,7 @@ TEST(ServerVisualizer, EndsTheStreamAfterItsLastMessageBeforeTheDrainCompletes) 
         } else if (sent.reset) {
             ended = sent.stamp_us;
             break;
-        } else if (sent.id == 16) {
+        } else if (sent.id == wire::LOUDNESS_ID) {
             messages.push_back(sent);
         }
     }
@@ -726,32 +730,30 @@ TEST(ServerVisualizer, EndsTheStreamAfterItsLastMessageBeforeTheDrainCompletes) 
 // object ignored; its approval activates the visualizer and moves it into the server's group,
 // which plays
 TEST(ServerVisualizer, StartsOnItsRolesStateThatComesLate) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
+    LocalServer s;
     ServerConfig config = sendspin::server::test::local_config();
     config.name = "Approving";
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
+    ASSERT_EQ(s.start(config), StartResult::OK);
     const std::string loudness = R"({"types":["loudness"],"rate_max":50})";
-    RawVisualizer client(server, "Late", 100000, loudness);
-    recorder.wait_for("approval needed " + client.id);
+    RawVisualizer client(s.server, "Late", 100000, loudness);
+    s.recorder.wait_for("approval needed " + client.id);
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access): set while the server runs
     const std::shared_ptr<GroupInput> input =
-        server.open_input(*server.default_group(), s16_input()).input;
+        s.server.open_input(*s.server.default_group(), s16_input()).input;
     ASSERT_TRUE(input);
     std::thread host([&] {
         feed_tone(*input, 0, RATE, 0.5);
         input->drain();
     });
-    recorder.wait_for("group " + std::to_string(input->group().value) + " playing");
-    ASSERT_TRUE(server.approve(client.id, sendspin::server::ApprovalScope::PLAYBACK));
+    s.recorder.wait_for("group " + std::to_string(input->group().value) + " playing");
+    ASSERT_TRUE(s.server.approve(client.id, sendspin::server::ApprovalScope::PLAYBACK));
     // The activation and the move are written, and their markers taken
     ASSERT_TRUE(client.read_until_type("group/update"));
     client.client.send_json(sendspin::server::test::client_time_json(1));
     ASSERT_TRUE(client.read_until_type("server/time"));
     EXPECT_TRUE(stream_events(client).empty());
     client.send_state(true, loudness);
-    recorder.wait_for(Recorder::drained(input->id(), DrainOutcome::PLAYED));
+    s.recorder.wait_for(Recorder::drained(input->id(), DrainOutcome::PLAYED));
     host.join();
     client.client.send_json(sendspin::server::test::client_time_json(2));
     ASSERT_TRUE(client.read_until_type("server/time"));
@@ -914,7 +916,7 @@ TEST(ServerVisualizer, KeepsMessagesWithinTheBufferCapacity) {
     int64_t last_stamp = 0;
     size_t messages = 0;
     for (size_t i = 0; i < sent.size(); ++i) {
-        if (sent[i].reset || sent[i].start || sent[i].id == AUDIO_CHUNK) {
+        if (sent[i].reset || sent[i].start || sent[i].id == wire::AUDIO_CHUNK_ID) {
             continue;
         }
         ++messages;
@@ -922,7 +924,7 @@ TEST(ServerVisualizer, KeepsMessagesWithinTheBufferCapacity) {
         last_stamp = sent[i].stamp_us;
         int64_t counted = 0;
         for (size_t j = i; j-- > 0 && !sent[j].reset;) {
-            if (sent[j].id != AUDIO_CHUNK && sent[j].ts > sent[i].stamp_us) {
+            if (sent[j].id != wire::AUDIO_CHUNK_ID && sent[j].ts > sent[i].stamp_us) {
                 counted += static_cast<int64_t>(sent[j].bytes);
             }
         }
@@ -1003,11 +1005,12 @@ TEST(ServerVisualizer, ReconfiguresAnActiveStreamInPlace) {
         feed_tone(*input, 0, 3 * RATE, 0.5);
         input->drain();
     });
-    ASSERT_TRUE(client.read_until([](const Entry& entry) { return entry.id == 16; }));
+    ASSERT_TRUE(
+        client.read_until([](const Entry& entry) { return entry.id == wire::LOUDNESS_ID; }));
     const size_t before = client.log.size();
     client.send_state(true, R"({"types":["f_peak"],"rate_max":10})");
-    ASSERT_TRUE(client.read_until([](const Entry& entry) { return entry.id == 18; }));
-    ASSERT_TRUE(client.read_until([](const Entry& entry) { return entry.id == 18; }));
+    ASSERT_TRUE(client.read_until([](const Entry& entry) { return entry.id == wire::F_PEAK_ID; }));
+    ASSERT_TRUE(client.read_until([](const Entry& entry) { return entry.id == wire::F_PEAK_ID; }));
     EXPECT_EQ(stream_events(client, before), (std::vector<std::string>{"stream/start visualizer"}));
     int64_t last_old = 0;
     std::vector<int64_t> new_ts;
@@ -1156,7 +1159,7 @@ TEST(ServerVisualizerPeer, DeliversFramesInTimeWithTheAudio) {
     }
     int64_t last_ts = 0;
     for (const VisualizerTrace::Sent& message : sent) {
-        if (message.reset || message.start || message.id == AUDIO_CHUNK) {
+        if (message.reset || message.start || message.id == wire::AUDIO_CHUNK_ID) {
             continue;
         }
         EXPECT_GE(message.ts, last_ts);
@@ -1176,7 +1179,7 @@ TEST(ServerVisualizerPeer, DeliversFramesInTimeWithTheAudio) {
     // The tone's first sample, from the chunk holding it
     std::optional<int64_t> onset;
     for (const VisualizerTrace::Sent& chunk : sent) {
-        if (chunk.id != AUDIO_CHUNK || onset) {
+        if (chunk.id != wire::AUDIO_CHUNK_ID || onset) {
             continue;
         }
         for (size_t frame = 0; frame + 4 <= chunk.data.size(); frame += 4) {
@@ -1192,7 +1195,7 @@ TEST(ServerVisualizerPeer, DeliversFramesInTimeWithTheAudio) {
     constexpr int64_t WINDOW_US = 2048 * 1000000 / RATE;
     size_t loud_after = 0;
     for (const VisualizerTrace::Sent& message : sent) {
-        if (message.id != 16) {
+        if (message.id != wire::LOUDNESS_ID) {
             continue;
         }
         const bool loud = u16_at(message.data, 0) > 30000;

@@ -18,6 +18,7 @@
 
 #include "fragmentation.h"
 #include "send_queues.h"
+#include "wire_messages.h"
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -36,6 +37,7 @@ using SendChoice = sendspin::server::sched::Choice;
 using sendspin::server::sched::RoleSet;
 using sendspin::server::sched::StreamRole;
 using Bytes = std::vector<uint8_t>;
+namespace wire = sendspin::server::test::wire;
 
 constexpr size_t FRAGMENT = 16384;
 
@@ -174,7 +176,7 @@ TEST(SendQueues, HoldATimeReplyUntilTheFragmentedMessageEnds) {
     ASSERT_TRUE(queues.push_control({MessageKind::BINARY, {sendspin::server::MESSAGE_ID_JSON}}));
 
     const OutboundPlaintext first = queues.take_control(sendspin::server::MAX_TRANSPORT_PLAINTEXT);
-    EXPECT_EQ(first.bytes[0], sendspin::server::MESSAGE_ID_FRAGMENT);
+    EXPECT_EQ(first.bytes[0], wire::FRAGMENT_ID);
     ASSERT_TRUE(queues.push_time({7, 70}));
 
     std::vector<SendChoice> taken;
@@ -219,7 +221,7 @@ TEST(SendQueues, LeaveRoomForTheTransportTag) {
     size_t fragments = 0;
     while (queues.next() != SendChoice::NONE) {
         const OutboundPlaintext fragment = queues.take_control(FRAGMENT);
-        EXPECT_EQ(fragment.bytes[0], sendspin::server::MESSAGE_ID_FRAGMENT);
+        EXPECT_EQ(fragment.bytes[0], wire::FRAGMENT_ID);
         EXPECT_GE(room(fragment), sendspin::server::TRANSPORT_TAG_BYTES) << fragments;
         ++fragments;
     }

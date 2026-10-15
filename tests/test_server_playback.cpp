@@ -21,6 +21,7 @@
 #include "flac_reader.h"
 #include "raw_client.h"
 #include "test_recorder.h"
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 
@@ -63,18 +64,17 @@ using sendspin::server::test::client_state_json;
 using sendspin::server::test::client_time_json;
 using sendspin::server::test::DecodedFlacFrame;
 using sendspin::server::test::FlacReader;
-using sendspin::server::test::MemoryProvider;
+using sendspin::server::test::LocalServer;
 using sendspin::server::test::player_hello_json;
 using sendspin::server::test::player_state_json;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
+namespace wire = sendspin::server::test::wire;
 
 constexpr uint32_t RATE = 48000;
 constexpr uint64_t FRAMES_PER_CELL = RATE / 50;
 constexpr int64_t CELL_US = 20000;
 constexpr int64_t J_MIN_US = 100000;
-constexpr size_t HEADER = 13;
-constexpr uint8_t AUDIO_CHUNK = 4;
 constexpr const char* PCM16 =
     R"([{"codec":"pcm","sample_rate":48000,"channels":2,"bit_depth":16}])";
 
@@ -187,16 +187,13 @@ public:
                 return false;
             }
             Entry entry;
-            if (!plaintext->empty() && plaintext->front() == AUDIO_CHUNK) {
-                EXPECT_GE(plaintext->size(), HEADER);
+            if (!plaintext->empty() && plaintext->front() == wire::AUDIO_CHUNK_ID) {
+                EXPECT_GE(plaintext->size(), wire::AUDIO_CHUNK_HEADER);
                 entry.type = "chunk";
-                for (size_t i = 1; i < 9; ++i) {
-                    entry.chunk.ts = (entry.chunk.ts << 8) | (*plaintext)[i];
-                }
-                for (size_t i = 9; i < HEADER; ++i) {
-                    entry.chunk.send_ahead = (entry.chunk.send_ahead << 8) | (*plaintext)[i];
-                }
-                entry.chunk.payload.assign(plaintext->begin() + HEADER, plaintext->end());
+                entry.chunk.ts = wire::timestamp_at(*plaintext);
+                entry.chunk.send_ahead = wire::field_at<uint32_t>(*plaintext, wire::SEND_AHEAD_AT);
+                entry.chunk.payload.assign(plaintext->begin() + wire::AUDIO_CHUNK_HEADER,
+                                           plaintext->end());
             } else if (!plaintext->empty()) {
                 entry.json.assign(plaintext->begin() + 1, plaintext->end());
                 JsonDocument doc;
@@ -275,13 +272,13 @@ bool ordered(const std::vector<Entry>& log) {
 }
 
 /// A started server that approves every client
-class PlaybackServer {
+class PlaybackServer : public LocalServer {
 public:
     PlaybackServer() {
         ServerConfig config = sendspin::server::test::local_config();
         config.name = "Playback";
         config.approve_all_clients = true;
-        EXPECT_EQ(this->server.start(config, &this->provider, &this->recorder), StartResult::OK);
+        EXPECT_EQ(this->start(config), StartResult::OK);
     }
 
     std::shared_ptr<GroupInput> open() {
@@ -304,10 +301,6 @@ public:
         }
         return input;
     }
-
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
 };
 
 /// Duration of a PCM16 stereo payload at RATE
@@ -417,11 +410,11 @@ TEST(ServerPlayback, StreamsADrainedClipWithinTheLedgerFromAStartupLead) {
         // counting fit the capacity (output delay 0)
         const int64_t tau = chunk.ts - chunk.send_ahead;
         EXPECT_GE(tau, start_stamp);
-        int64_t counted = HEADER + static_cast<int64_t>(chunk.payload.size());
+        int64_t counted = wire::AUDIO_CHUNK_HEADER + static_cast<int64_t>(chunk.payload.size());
         for (size_t j = 0; j < i; ++j) {
             const Chunk& earlier = chunks[j]->chunk;
             if (earlier.ts + duration_us(earlier.payload) > tau) {
-                counted += HEADER + static_cast<int64_t>(earlier.payload.size());
+                counted += wire::AUDIO_CHUNK_HEADER + static_cast<int64_t>(earlier.payload.size());
             }
         }
         EXPECT_LE(counted, CAPACITY);
@@ -580,11 +573,12 @@ TEST(ServerPlayback, RecountsTheLedgerWhenTheOutputDelayChanges) {
             ++*expected_position;
         }
         const int64_t tau = chunk.ts - chunk.send_ahead;
-        int64_t counted = HEADER + static_cast<int64_t>(chunk.payload.size());
+        int64_t counted = wire::AUDIO_CHUNK_HEADER + static_cast<int64_t>(chunk.payload.size());
         int64_t undelayed = counted;
         for (const Chunk* earlier : sent) {
             const int64_t end = earlier->ts + duration_us(earlier->payload);
-            const int64_t bytes = HEADER + static_cast<int64_t>(earlier->payload.size());
+            const int64_t bytes =
+                wire::AUDIO_CHUNK_HEADER + static_cast<int64_t>(earlier->payload.size());
             counted += end - delay > tau ? bytes : 0;
             undelayed += end > tau ? bytes : 0;
         }
@@ -678,14 +672,14 @@ TEST(ServerPlayback, SwitchesAStreamInPlaceWhenThePlayerPrefersAnotherFormat) {
         }
         // I12 under the spec's count since the stream's start, the switch counting nothing
         const int64_t tau = entry.chunk.ts - entry.chunk.send_ahead;
-        int64_t counted = HEADER + static_cast<int64_t>(payload.size());
+        int64_t counted = wire::AUDIO_CHUNK_HEADER + static_cast<int64_t>(payload.size());
         for (const auto& [end, bytes] : sent) {
             if (end > tau) {
                 counted += bytes;
             }
         }
         EXPECT_LE(counted, CAPACITY);
-        sent.emplace_back(next_ts, HEADER + static_cast<int64_t>(payload.size()));
+        sent.emplace_back(next_ts, wire::AUDIO_CHUNK_HEADER + static_cast<int64_t>(payload.size()));
     }
     EXPECT_EQ(starts, 2U);
     EXPECT_GT(wide, 0U);
@@ -1484,33 +1478,31 @@ TEST(ServerPlayback, ReportsEachPlaybackTransitionOnce) {
 // default_group() is the server's group while it runs, even when a client's own group carries the
 // same name
 TEST(ServerPlayback, NamesTheServersGroupAsTheDefault) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    EXPECT_FALSE(server.default_group().has_value());
+    LocalServer s;
+    EXPECT_FALSE(s.server.default_group().has_value());
     ServerConfig config = sendspin::server::test::local_config();
     config.name = "Shared name";
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-    const std::optional<GroupId> server_group = server.default_group();
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    const std::optional<GroupId> server_group = s.server.default_group();
     ASSERT_TRUE(server_group.has_value());
 
     // Not approved for playback, so it joins a group of its own named after it
     RawClient client;
-    ASSERT_TRUE(server.connect_url(client.url()));
+    ASSERT_TRUE(s.server.connect_url(client.url()));
     client.activate(player_hello_json("Shared name", PCM16, 100000));
     // groups() lists a group before its first on_group_changed
     const std::string server_group_event = "group " + std::to_string(server_group->value) + " ";
-    recorder.wait_for_match([&](const std::string& what) {
+    s.recorder.wait_for_match([&](const std::string& what) {
         return what.starts_with("group ") && !what.starts_with(server_group_event);
     });
-    const std::vector<GroupInfo> groups = server.groups();
+    const std::vector<GroupInfo> groups = s.server.groups();
     ASSERT_EQ(groups.size(), 2U);
     EXPECT_EQ(groups[0].name, groups[1].name);
     for (const GroupInfo& group : groups) {
         EXPECT_EQ(group.id == server_group, group.client_ids.empty());
     }
-    server.stop();
-    EXPECT_FALSE(server.default_group().has_value());
+    s.server.stop();
+    EXPECT_FALSE(s.server.default_group().has_value());
 }
 
 TEST(ServerPlayback, SaysWhyItCannotOpenAnInput) {

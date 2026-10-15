@@ -19,6 +19,7 @@
 
 #include "fragmentation.h"
 #include "visualizer_stream.h"
+#include "wire_messages.h"
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -36,6 +37,7 @@ using sendspin::server::VisualizerStream;
 using sendspin::server::VisualizerSupport;
 namespace sched = sendspin::server::sched;
 namespace type = sendspin::server::visualizer_type;
+namespace wire = sendspin::server::test::wire;
 
 constexpr int64_t T0 = 1000000;
 constexpr sched::EpochId EPOCH{1};
@@ -158,11 +160,7 @@ VisualizerStream started(FakeGroup& group, uint32_t capacity, int64_t stamp_us,
 }
 
 int64_t ts_of(const OutboundPlaintext& message) {
-    int64_t ts = 0;
-    for (size_t i = 1; i < 9; ++i) {
-        ts = (ts << 8) | message.bytes[i];
-    }
-    return ts;
+    return wire::timestamp_at(message.bytes);
 }
 
 /// One message taken: its timestamp and when
