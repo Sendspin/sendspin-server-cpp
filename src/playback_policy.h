@@ -93,6 +93,8 @@ ActivationDecision decide_activation(const PskMatch& psk, bool paired, const Cli
 /// @brief The send path's form of a client's format; nullopt when a field does not fit it
 std::optional<sched::AudioFormat> to_sched(const AudioFormat& format);
 AudioFormat from_sched(const sched::AudioFormat& format);
+/// @brief A codec as the host sees it
+StreamCodec stream_codec(Codec codec);
 /// @brief A format as the host sees it
 StreamFormat stream_format(const sched::AudioFormat& format);
 /// @brief A host's format as a client lists one

@@ -292,6 +292,7 @@ TEST(PlayerFormat, PrefersTheClientsChoiceAmongWhatTheInputGives) {
     const AudioFormat opus{Codec::OPUS, 2, 48000, 16};
     const AudioFormat opus_44{Codec::OPUS, 2, 44100, 16};
     const AudioFormat opus_24{Codec::OPUS, 2, 48000, 24};
+    const AudioFormat opus_32{Codec::OPUS, 2, 48000, 32};
     const AudioFormat opus_mono_16k{Codec::OPUS, 1, 16000, 16};
     const AudioFormat opus_mono_16k_24{Codec::OPUS, 1, 16000, 24};
     // One FLAC frame at its bound plus the 13-byte header
@@ -347,8 +348,8 @@ TEST(PlayerFormat, PrefersTheClientsChoiceAmongWhatTheInputGives) {
         // it and the server streams it, at the rates and channel counts it takes
         {"Opus listed first", {opus, pcm16}, 100000, std::nullopt, opus, {}, true},
         {"Opus preferred", {pcm16, opus}, 100000, opus, opus, {}, true},
-        // An Opus stream is 16-bit whatever depth the entry lists, so a preference that differs
-        // only in depth is the listed entry
+        // An Opus stream is 16-bit whatever depth the entry lists, so a preference or an excluded
+        // format that differs from it only in depth is the listed entry; a PCM one is not
         {"Opus mono at 16 kHz, listed at 24 bits",
          {opus_mono_16k_24},
          100000,
@@ -357,6 +358,29 @@ TEST(PlayerFormat, PrefersTheClientsChoiceAmongWhatTheInputGives) {
          {},
          true},
         {"Opus preferred at another depth", {pcm16, opus}, 100000, opus_24, opus, {}, true},
+        {"Opus listed at 32 bits", {opus_32, pcm16}, 100000, std::nullopt, opus, {}, true},
+        {"Opus preferred at 16 bits, listed at 24", {pcm16, opus_24}, 100000, opus, opus, {}, true},
+        {"Control: a PCM preference at another depth is not the listed entry",
+         {opus, pcm16},
+         100000,
+         pcm24,
+         opus,
+         {},
+         true},
+        {"an excluded Opus format at another depth excludes the entry",
+         {opus, pcm16},
+         100000,
+         std::nullopt,
+         pcm16,
+         {sched::AudioFormat{sched::Codec::OPUS, 48000, 2, 24}},
+         true},
+        {"Control: an excluded PCM format at another depth leaves the entry",
+         {pcm16, opus},
+         100000,
+         std::nullopt,
+         pcm16,
+         {sched::AudioFormat{sched::Codec::PCM, 48000, 2, 24}},
+         true},
         {"Opus at a rate it does not take",
          {opus_44, pcm16},
          100000,

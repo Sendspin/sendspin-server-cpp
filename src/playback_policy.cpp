@@ -84,23 +84,12 @@ std::optional<sched::AudioFormat> to_sched(const AudioFormat& format) {
         return std::nullopt;
     }
     sched::AudioFormat converted;
-    switch (format.codec) {
-        case Codec::OPUS:
-            converted.codec = sched::Codec::OPUS;
-            break;
-        case Codec::FLAC:
-            converted.codec = sched::Codec::FLAC;
-            break;
-        case Codec::PCM:
-            converted.codec = sched::Codec::PCM;
-            break;
-    }
+    converted.codec = format.codec;
     converted.sample_rate = format.sample_rate;
     converted.channels = static_cast<uint8_t>(format.channels);
     converted.bit_depth = static_cast<uint8_t>(format.bit_depth);
-    // Spec player/v1.md: bit_depth is ignored for opus. A stream decodes to 16-bit samples, the
-    // depth sendspin-cpp and aiosendspin take from stream/start, so every Opus entry is 16-bit
-    // and entries differing only in depth are one format
+    // Spec player/v1.md: bit_depth is ignored for opus. The server encodes Opus from 16-bit PCM,
+    // so every Opus entry is 16-bit and entries differing only in depth are one format
     if (converted.codec == sched::Codec::OPUS) {
         converted.bit_depth = OPUS_BIT_DEPTH;
     }
@@ -109,36 +98,28 @@ std::optional<sched::AudioFormat> to_sched(const AudioFormat& format) {
 
 AudioFormat from_sched(const sched::AudioFormat& format) {
     AudioFormat converted;
-    switch (format.codec) {
-        case sched::Codec::OPUS:
-            converted.codec = Codec::OPUS;
-            break;
-        case sched::Codec::FLAC:
-            converted.codec = Codec::FLAC;
-            break;
-        case sched::Codec::PCM:
-            converted.codec = Codec::PCM;
-            break;
-    }
+    converted.codec = format.codec;
     converted.sample_rate = format.sample_rate;
     converted.channels = format.channels;
     converted.bit_depth = format.bit_depth;
     return converted;
 }
 
-StreamFormat stream_format(const sched::AudioFormat& format) {
-    StreamFormat converted;
-    switch (format.codec) {
-        case sched::Codec::OPUS:
-            converted.codec = StreamCodec::OPUS;
-            break;
-        case sched::Codec::FLAC:
-            converted.codec = StreamCodec::FLAC;
-            break;
-        case sched::Codec::PCM:
-            converted.codec = StreamCodec::PCM;
+StreamCodec stream_codec(Codec codec) {
+    switch (codec) {
+        case Codec::OPUS:
+            return StreamCodec::OPUS;
+        case Codec::FLAC:
+            return StreamCodec::FLAC;
+        case Codec::PCM:
             break;
     }
+    return StreamCodec::PCM;
+}
+
+StreamFormat stream_format(const sched::AudioFormat& format) {
+    StreamFormat converted;
+    converted.codec = stream_codec(format.codec);
     converted.sample_rate = format.sample_rate;
     converted.channels = format.channels;
     converted.bit_depth = format.bit_depth;
