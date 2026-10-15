@@ -7,6 +7,7 @@ sendspin-server-cpp is licensed under the Apache License 2.0 (`LICENSE`). It inc
 ### micro-resampler
 
 - Location: `third_party/micro-resampler/` (`VENDORED.md`)
+- Source: this vendored copy; there is no public upstream repository
 - Version: v0.0.6
 - License: Apache-2.0 (`third_party/micro-resampler/LICENSE`)
 - Copyright 2025-2026 Kevin Ahrendt
@@ -121,6 +122,17 @@ CMake FetchContent downloads these at the pinned versions in `cmake/`; each is u
 | GoogleTest (tests only) | <https://github.com/google/googletest> | BSD-3-Clause |
 | sendspin-cpp (tests only) | <https://github.com/Sendspin/sendspin-cpp> | Apache-2.0 |
 | IXWebSocket (tests only, fetched by sendspin-cpp) | <https://github.com/machinezone/IXWebSocket> | BSD-3-Clause |
+
+## ESP-IDF build
+
+The ESP-IDF component (`cmake/esp_idf.cmake`) builds with these in place of Boost, OpenSSL, the fetched noise-c and pffft, and without micro-opus; the vendored code, ArduinoJson and micro-flac (with micro-ogg-demuxer) are as above.
+
+| Dependency | Source | License |
+| --- | --- | --- |
+| noise-c, the `esphome/noise-c` registry component | <https://github.com/esphome-libs/noise-c> | MIT |
+| libsodium, the `esphome/libsodium` registry component that noise-c brings | <https://github.com/esphome-libs/libsodium> (a port of <https://github.com/jedisct1/libsodium>) | ISC; the port's packaging MIT |
+| esp-dsp, the `espressif/esp-dsp` registry component | <https://github.com/espressif/esp-dsp> | Apache-2.0 |
+| ESP-IDF, with its FreeRTOS, mbedTLS, lwIP and esp_http_server components | <https://github.com/espressif/esp-idf> | Apache-2.0; FreeRTOS MIT; mbedTLS Apache-2.0 OR GPL-2.0-or-later (<https://github.com/Mbed-TLS/mbedtls>); lwIP BSD-3-Clause |
 
 ## System libraries
 

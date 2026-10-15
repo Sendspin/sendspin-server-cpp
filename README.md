@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Sendspin/sendspin-server-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Sendspin/sendspin-server-cpp/actions/workflows/ci.yml)
 
-C++ library implementing the server side of the [Sendspin synchronized audio streaming protocol](https://www.sendspin-audio.com/), so that an application (a media player, a sound server sink, a small daemon) can stream synchronized audio to Sendspin players. Targets macOS and Linux. For the client side, see [sendspin-cpp](https://github.com/Sendspin/sendspin-cpp).
+C++ library implementing the server side of the [Sendspin synchronized audio streaming protocol](https://www.sendspin-audio.com/), so that an application (a media player, a sound server sink, a small daemon) can stream synchronized audio to Sendspin players. Targets macOS and Linux, and builds as an ESP-IDF component. For the client side, see [sendspin-cpp](https://github.com/Sendspin/sendspin-cpp).
 
 ## Status
 
@@ -17,6 +17,141 @@ Early development. The public API changes between releases without deprecation, 
 - Controller, metadata, artwork (JPEG or PNG, fitted to each channel), color and visualizer roles
 - Source role: a client's captured audio routed into a group's live input, played a fixed latency after its capture, the source's clock drift corrected (ASRC on a host, single frames dropped or repeated on ESP-IDF)
 - `examples/server_cli`: a command-line and browser-controlled host on the public API
+
+## Usage Example
+
+A host that plays a 440 Hz tone to every client that enables unpaired access. `include/sendspin/server/server.h` documents each call and the threading contract, and `examples/server_cli` is a complete host.
+
+```cpp
+#include <sendspin/server/server.h>
+
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <map>
+#include <numbers>
+#include <optional>
+#include <string>
+#include <vector>
+
+using namespace sendspin::server;
+
+// Holds the server key and the client records. A real host stores them on disk, so that clients
+// see the same server across runs.
+class MemoryProvider : public PersistenceProvider {
+public:
+    std::optional<std::vector<uint8_t>> load_blob(const std::string& key) override {
+        auto it = blobs_.find(key);
+        if (it == blobs_.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+
+    bool save_blob(const std::string& key, const uint8_t* data, size_t len) override {
+        blobs_[key].assign(data, data + len);
+        return true;
+    }
+
+private:
+    std::map<std::string, std::vector<uint8_t>> blobs_;
+};
+
+// Called on the server's dispatch thread, one call at a time
+class PrintingListener : public ServerListener {
+public:
+    void on_client_connected(const ClientInfo& client) override {
+        std::printf("connected: %s\n", client.name.c_str());
+    }
+
+    void on_pairing_required(const ClientInfo& client) override {
+        std::printf("needs pairing: %s\n", client.name.c_str());
+    }
+};
+
+int main() {
+    MemoryProvider provider;
+    PrintingListener listener;
+    SendspinServer server;
+
+    ServerConfig config;
+    config.name = "Living Room";
+    // Plays to every client that enables unpaired access; otherwise approve() or pair each client
+    config.approve_all_clients = true;
+    if (server.start(config, &provider, &listener) != StartResult::OK) {
+        return 1;
+    }
+
+    // On a host the server advertises itself over mDNS and dials the clients it finds; every
+    // approved client joins the server's group
+    constexpr uint32_t RATE = 48000;
+    InputOptions options{.format = {.sample_rate = RATE, .channels = 2}};
+    OpenedInput opened = server.open_input(*server.default_group(), options);
+    if (opened.result != OpenInputResult::OK) {
+        return 1;
+    }
+    GroupInput& input = *opened.input;
+
+    // A buffered input takes PCM as far ahead as its players can hold: write until it refuses,
+    // then wait for room
+    std::vector<int16_t> block(RATE / 50 * 2);
+    for (uint64_t pos = 0;;) {
+        for (size_t i = 0; i < block.size() / 2; ++i) {
+            double t = static_cast<double>(pos + i) / RATE;
+            auto s = static_cast<int16_t>(3000 * std::sin(2 * std::numbers::pi * 440 * t));
+            block[2 * i] = block[2 * i + 1] = s;
+        }
+        size_t done = 0;
+        while (done < block.size() / 2) {
+            WriteResult result = input.write(block.data() + 2 * done, block.size() / 2 - done);
+            done += result.frames;
+            if (result.state == InputState::FULL) {
+                input.wait_writable(100'000);
+            } else if (result.state != InputState::OPEN) {
+                // The group's last member left it (STOP_LATCHED), or the server closed the input
+                return 0;
+            }
+        }
+        pos += done;
+    }
+}
+```
+
+### Host (CMake)
+
+Consume the library as a subproject, here through FetchContent (`tests/consumer/` is such a project); the requirements under [Host (macOS/Linux)](#host-macoslinux) apply:
+
+```cmake
+cmake_minimum_required(VERSION 3.25)
+project(my_host LANGUAGES C CXX)
+
+include(FetchContent)
+FetchContent_Declare(
+    sendspin_server_cpp
+    GIT_REPOSITORY https://github.com/Sendspin/sendspin-server-cpp.git
+    GIT_TAG        main  # pin a commit
+)
+FetchContent_MakeAvailable(sendspin_server_cpp)
+
+add_executable(my_host main.cpp)
+target_link_libraries(my_host PRIVATE sendspin_server_cpp::sendspin_server_cpp)
+```
+
+### ESP-IDF
+
+The library is an ESP-IDF component (`cmake/esp_idf.cmake`, with the repository's `Kconfig`) and requires ESP-IDF 5.5 or later. The repository's root is the component, named after its directory, or a wrapper component includes `cmake/esp_idf.cmake` and sources the root's `Kconfig`, fixing the name whatever the checkout's directory; `tests/esp_idf/` is a minimal project that builds it the second way, as `components/sendspin_server`. The component builds with the embedded profile's limits (`src/profile.h`), without Opus and without an mDNS backend: supply a `DiscoveryProvider` in `ServerConfig::discovery` (`include/sendspin/server/discovery.h`), or dial clients with `connect_url()`.
+
+The project supplies the component's dependencies and settings:
+
+- `esphome/noise-c` (which brings `esphome/libsodium`) and `espressif/esp-dsp` from the component registry, in a component's `idf_component.yml`, at the versions in `tests/esp_idf/main/idf_component.yml`
+- micro-flac at its v0.3.0 tag with its submodules, in a component directory named `micro-flac`, and `third_party/micro-resampler`, both in `EXTRA_COMPONENT_DIRS`
+- ArduinoJson's source tree at v7.4.1 (`cmake/dependencies.cmake`'s pin), named by `SENDSPIN_SERVER_ARDUINOJSON_SOURCE_DIR` before `project()` or in the environment
+- `CONFIG_COMPILER_CXX_EXCEPTIONS`, and a `CONFIG_DSP_MAX_FFT_SIZE` of at least 4096 (`CONFIG_DSP_MAX_FFT_SIZE_4096`)
+- `CONFIG_PTHREAD_TASK_CORE_DEFAULT` left at ESP-IDF's default of -1 (no core affinity), or the build fails
+- `CONFIG_LWIP_MAX_SOCKETS` and `CONFIG_LWIP_MAX_ACTIVE_TCP` raised from ESP-IDF's defaults, as below
+
+`CONFIG_LWIP_MAX_SOCKETS` must be raised from ESP-IDF's default of 10: the listener's httpd takes a socket for each accepted connection in its handshake and each activated one, plus three of its own (19), and a build with fewer fails; the dials and mDNS need more, as `tests/esp_idf/sdkconfig.defaults` allows. `CONFIG_LWIP_MAX_ACTIVE_TCP` must be raised from 16 too: those sessions, the connections waiting in httpd's backlog (as many as accepted connections in their handshake) and the dials in their handshake (28) must fit, or the build fails, and each activated dialed connection takes one more.
 
 ## Documentation
 
@@ -43,7 +178,7 @@ This builds the library (target `sendspin_server_cpp`, alias `sendspin_server_cp
 
 Dependencies (fetched automatically via CMake FetchContent at pinned versions): Boost.Beast and Boost.Asio (a system Boost 1.90 or later is used when installed), ArduinoJson, noise-c, micro-flac, micro-opus and pffft. micro-resampler and stb are vendored in `third_party/`; `NOTICES.md` lists every dependency's license.
 
-The library also builds as an ESP-IDF component (`cmake/esp_idf.cmake`); `tests/esp_idf/` is a minimal project that builds it. The project raises `CONFIG_LWIP_MAX_SOCKETS` from ESP-IDF's default of 10: the listener's httpd takes a socket for each accepted connection in its handshake and each activated one, plus three of its own (19 on the embedded profile), and a build with fewer fails; the dials and mDNS need more, as `tests/esp_idf/sdkconfig.defaults` allows. It raises `CONFIG_LWIP_MAX_ACTIVE_TCP` from 16 too: those sessions, the connections waiting in httpd's backlog (as many as accepted connections in their handshake) and the dials in their handshake (28 on the embedded profile) must fit, or the build fails, and each activated dialed connection takes one more.
+The library also builds as an ESP-IDF component; see [ESP-IDF](#esp-idf).
 
 ### Tests
 
