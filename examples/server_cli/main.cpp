@@ -86,6 +86,7 @@ using sendspin::server::GroupInfo;
 using sendspin::server::GroupInput;
 using sendspin::server::InputId;
 using sendspin::server::InputState;
+using sendspin::server::MAX_VOLUME;
 using sendspin::server::Metadata;
 using sendspin::server::MetadataProgress;
 using sendspin::server::OpenInputResult;
@@ -411,7 +412,6 @@ const char* to_string(Feeder::Phase phase) {
 
 constexpr int64_t US_PER_MS = 1000;
 constexpr int DECIMAL_BASE = 10;
-constexpr long MAX_VOLUME = 100;
 constexpr double US_PER_S = 1e6;
 constexpr double BYTES_PER_KB = 1000.0;
 
@@ -773,7 +773,7 @@ public:
     void stop(GroupId group) {
         if (this->release_route(group)) {
             this->console_.print("stopped the routed source; route it again with: route <client>");
-            this->server_->set_controller_caps(group, {});
+            this->set_caps(group, {});
             return;
         }
         const std::optional<LiveFeeder::Status> live = this->live_status(group);
@@ -781,13 +781,13 @@ public:
             // Once standard input ended there is nothing to play again
             this->console_.print(live->ended ? "stopped standard input"
                                              : "stopped standard input; play it again with: live");
-            this->server_->set_controller_caps(group, {});
+            this->set_caps(group, {});
             return;
         }
         const bool playing = this->now_playing_.with(group, [](Feeder&) {});
         this->now_playing_.replace(group, nullptr);
         this->console_.print(playing ? "stopped" : "nothing playing");
-        this->server_->set_controller_caps(group, {});
+        this->set_caps(group, {});
     }
 
     /// A controller's command in group, on the dispatch thread
@@ -873,6 +873,11 @@ private:
         return true;
     }
 
+    /// Sets the group's controller caps; a group gone meanwhile has no controllers to offer them
+    void set_caps(GroupId group, const ControllerCaps& caps) {
+        (void)this->server_->set_controller_caps(group, caps);
+    }
+
     /// The group's file's metadata at position_ms, taking effect at at_us, and its controller
     /// caps
     void publish_metadata(GroupId group, size_t file, uint64_t position_ms, int64_t at_us) {
@@ -893,8 +898,9 @@ private:
         caps.commands = {TransportCommand::PLAY, TransportCommand::PAUSE,
                          TransportCommand::STOP, TransportCommand::PREVIOUS,
                          TransportCommand::SEEK, TransportCommand::SEEK_RELATIVE};
-        this->server_->set_controller_caps(group, caps);
-        this->server_->set_metadata(group, metadata, at_us);
+        this->set_caps(group, caps);
+        // As for the caps, a group gone meanwhile has no members to show the metadata
+        (void)this->server_->set_metadata(group, metadata, at_us);
     }
 
     /// A feeder's report, on its thread or the dispatch thread; it calls no feeder
@@ -1082,7 +1088,7 @@ bool Playback::live(GroupId group) {
     // A live input has no position to seek to
     ControllerCaps caps;
     caps.commands = {TransportCommand::PLAY, TransportCommand::PAUSE, TransportCommand::STOP};
-    this->server_->set_controller_caps(group, caps);
+    this->set_caps(group, caps);
     this->console_.print("playing standard input live in group " + std::to_string(group.value));
     return true;
 }
@@ -1106,7 +1112,7 @@ bool Playback::route(GroupId group, const std::string& client_id) {
     // A live input has no position to seek to; stop ends the route
     ControllerCaps caps;
     caps.commands = {TransportCommand::PLAY, TransportCommand::PAUSE, TransportCommand::STOP};
-    this->server_->set_controller_caps(group, caps);
+    this->set_caps(group, caps);
     this->console_.print("routing the source of " + client_id + " into group " +
                          std::to_string(group.value) + "; it streams whenever it is ready");
     return true;
@@ -1515,7 +1521,7 @@ void print_help(Console& console) {
     console.print("                     which resumes at the newest it read");
     console.print("  seek <seconds>     continue the group's file from this position");
     console.print("  stop               stop the group's file or standard input");
-    console.print("  volume <0-100>     set the group's volume");
+    console.print("  volume <0-" + std::to_string(MAX_VOLUME) + ">     set the group's volume");
     console.print("  mute on|off        mute or unmute the group");
     console.print("  art <file>|off     show a JPEG or PNG file as the group's album art, which");
     console.print("                     also sets its colors from the image, or none");
@@ -2437,13 +2443,19 @@ int run(int argc, char** argv) {
         } else if (command == "volume" && !argument.empty()) {
             char* end = nullptr;
             const long volume = std::strtol(argument.c_str(), &end, DECIMAL_BASE);
-            if (end == argument.c_str() || *end != '\0' || volume < 0 || volume > MAX_VOLUME) {
-                console.print("not a volume from 0 to 100: " + argument);
+            if (end == argument.c_str() || *end != '\0' || volume < 0 ||
+                volume > long{MAX_VOLUME}) {
+                console.print("not a volume from 0 to " + std::to_string(MAX_VOLUME) + ": " +
+                              argument);
                 continue;
             }
-            server.set_group_volume(selected, static_cast<uint32_t>(volume));
+            if (!server.set_group_volume(selected, static_cast<uint32_t>(volume))) {
+                console.print("no such group");
+            }
         } else if (command == "mute" && (argument == "on" || argument == "off")) {
-            server.set_group_mute(selected, argument == "on");
+            if (!server.set_group_mute(selected, argument == "on")) {
+                console.print("no such group");
+            }
         } else if ((command == "art" || command == "artist") && !argument.empty()) {
             set_art(server, selected,
                     command == "art" ? ArtworkSource::ALBUM : ArtworkSource::ARTIST, arguments,
@@ -2452,8 +2464,8 @@ int run(int argc, char** argv) {
             const std::optional<Colors> colors = parse_colors(arguments);
             if (!colors) {
                 print_help(console);
-            } else {
-                server.set_colors(selected, *colors, server.now_us());
+            } else if (!server.set_colors(selected, *colors, server.now_us())) {
+                console.print("no such group");
             }
         } else if (command == "status") {
             print_status(server, selected, console, now_playing, playback);

@@ -39,7 +39,6 @@ namespace {
 constexpr size_t MAX_FIELD_BYTES = 2048;
 /// The longest media path a command may carry
 constexpr size_t MAX_PATH_BYTES = 4096;
-constexpr uint32_t MAX_VOLUME = 100;
 
 // ==============================================================================
 // Request checks
@@ -318,15 +317,19 @@ Outcome group_command(const Context& context, std::string_view command, GroupId 
     if (command == "volume") {
         const JsonVariantConst volume = args["volume"];
         if (!volume.is<uint32_t>() || volume.as<uint32_t>() > MAX_VOLUME) {
-            return "a volume from 0 to 100 is required";
+            return "a volume from 0 to " + std::to_string(MAX_VOLUME) + " is required";
         }
-        server.set_group_volume(group, volume.as<uint32_t>());
+        if (!server.set_group_volume(group, volume.as<uint32_t>())) {
+            return "no such group";
+        }
     } else if (command == "mute") {
         const std::optional<bool> muted = bool_field(args, "muted");
         if (!muted) {
             return "muted is required";
         }
-        server.set_group_mute(group, *muted);
+        if (!server.set_group_mute(group, *muted)) {
+            return "no such group";
+        }
     } else if (command == "rename_group") {
         const std::optional<std::string> name =
             text_field(args, "name", config_limits::MAX_NAME_BYTES);
@@ -356,8 +359,11 @@ Outcome group_command(const Context& context, std::string_view command, GroupId 
             return "a source, album or artist, is required";
         }
         // An image comes by POST /artwork; this clears one
-        server.set_artwork(group, name == "album" ? ArtworkSource::ALBUM : ArtworkSource::ARTIST,
-                           {}, server.now_us());
+        if (!server.set_artwork(group,
+                                name == "album" ? ArtworkSource::ALBUM : ArtworkSource::ARTIST, {},
+                                server.now_us())) {
+            return "no such group";
+        }
     } else {
         const JsonVariantConst object = args["colors"];
         const std::optional<Colors> colors = object.is<JsonObjectConst>()
@@ -367,7 +373,9 @@ Outcome group_command(const Context& context, std::string_view command, GroupId 
             return "colors must map background_dark, background_light, primary, accent, on_dark "
                    "or on_light to rrggbb";
         }
-        server.set_colors(group, *colors, server.now_us());
+        if (!server.set_colors(group, *colors, server.now_us())) {
+            return "no such group";
+        }
     }
     return std::nullopt;
 }

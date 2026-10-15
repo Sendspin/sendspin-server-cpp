@@ -974,7 +974,8 @@ TEST(ServerPlayback, AnswersEveryDrainOnceWithItsOutcome) {
         s.recorder.wait_for_count(Recorder::drained(id, row.outcome), drains.size());
         // Once the server stops, every callback it was going to deliver has been delivered
         s.server.stop();
-        s.server.start(sendspin::server::test::local_config(), &s.provider, nullptr);
+        EXPECT_EQ(s.server.start(sendspin::server::test::local_config(), &s.provider, nullptr),
+                  StartResult::OK);
         std::vector<std::pair<DrainId, DrainOutcome>> expected;
         for (const DrainId drain : drains) {
             expected.emplace_back(drain, row.outcome);
@@ -1470,7 +1471,8 @@ TEST(ServerPlayback, ReportsEachPlaybackTransitionOnce) {
 
     // Once the server stops, every event it was going to deliver has been delivered
     s.server.stop();
-    s.server.start(sendspin::server::test::local_config(), &s.provider, nullptr);
+    EXPECT_EQ(s.server.start(sendspin::server::test::local_config(), &s.provider, nullptr),
+              StartResult::OK);
     EXPECT_EQ(s.recorder.count(playing), 3U);
     EXPECT_EQ(s.recorder.count(stopped), 3U);
 }

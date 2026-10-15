@@ -30,7 +30,8 @@ void gather_into_server_group(SendspinServer& server) {
             continue;
         }
         for (const std::string& client_id : group.client_ids) {
-            server.move_client(client_id, *target);
+            // false only once the server stops, which leaves nothing to gather
+            (void)server.move_client(client_id, *target);
         }
     }
 }

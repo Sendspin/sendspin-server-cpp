@@ -60,7 +60,8 @@ The design standards that code in this repository is held to. This document is n
 
 - **The consumer-facing API is exactly `include/sendspin/server/`.** Internal types and headers stay in `src/`; nothing appears in a public header for tests or internal plumbing. Public headers include only the standard library and each other.
 - **Pimpl.** A public class with state holds it behind `Impl` or an internal handle, so internals change without touching the headers.
-- **Errors are values** (`StartResult`, `false` for an unknown id, `ServerListener::on_error()`), never exceptions across the API.
+- **Errors are values** (`StartResult`, `false` for an unknown id, `ServerListener::on_error()`), never exceptions across the API. A result the caller must act on is `[[nodiscard]]`: `StartResult`, `OpenedInput`, `RoutedSource` and every call whose `false` or nullopt means the request was refused; a cancel or a disconnect, which may find nothing to do, is not. A caller that rightly ignores one discards it with `(void)` and says why.
+- **A limit the host must respect is a named constant** in the public headers (`MAX_VOLUME`, `MAX_PLAYBACK_SPEED`, `config_limits`), which the library's and the example's C++ use instead of restating its value.
 - **Configuration travels in structs** with default member initializers (`ServerConfig`, `ServerTiming`, `InputOptions`), not positional optional parameters.
 - **A contract is documented once and enforced by documentation,** not by defensive checks: a documented precondition is not re-checked at each call. A check at one of several equivalent sites is at all of them or none.
 - **Threading is documented at the declaration:** which thread may call a method, whether it waits, and on which thread a callback runs.

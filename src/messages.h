@@ -265,7 +265,6 @@ constexpr uint8_t SET_OUTPUT_DELAY = 0x04;
 
 /// @brief The largest `output_delay_ms` (roles/player/v1.md "client/state player object")
 constexpr uint32_t MAX_OUTPUT_DELAY_MS = 5000;
-constexpr uint32_t MAX_VOLUME = 100;
 
 /// @brief A validated client/state player object (roles/player/v1.md "client/state player
 /// object")
