@@ -598,17 +598,21 @@ void stop_when_idle(ListenerState& state) {
     }
     const auto stopper = [](void* arg) {
         auto* stopping = static_cast<SharedPtr<ListenerState>*>(arg);
-        const SharedPtr<LoopCore> stopped_loop = (*stopping)->loop.lock();
-        ListenerState& stopped = **stopping;
-        if (stop_httpd(stopped.server)) {
-            stopped.stopped.store(true, std::memory_order_release);
-        } else {
-            // httpd runs on, holding its state; the listener's destruction tries again
-            stopped.keep = std::move(*stopping);
-            stopped.stopping.store(false, std::memory_order_release);
-        }
-        if (stopped_loop) {
-            stopped_loop->task_ended();
+        // A scope of its own, since vTaskDelete() runs no destructor. The loop is locked first: a
+        // failed stop hands the state back, and the listener's destruction may then free it.
+        {
+            const SharedPtr<LoopCore> stopped_loop = (*stopping)->loop.lock();
+            ListenerState& stopped = **stopping;
+            if (stop_httpd(stopped.server)) {
+                stopped.stopped.store(true, std::memory_order_release);
+            } else {
+                // httpd runs on, holding its state; the listener's destruction tries again
+                stopped.keep = std::move(*stopping);
+                stopped.stopping.store(false, std::memory_order_release);
+            }
+            if (stopped_loop) {
+                stopped_loop->task_ended();
+            }
         }
         delete stopping;
         vTaskDelete(nullptr);
