@@ -108,6 +108,8 @@ std::string end_description(const Session& session, std::optional<CloseReason> t
             return "a message could not be encoded";
         case SessionEnd::CLOSED_BY_HOST:
             return "the host disconnected it";
+        case SessionEnd::REFUSED:
+            return "refused past a cap on activated clients";
         case SessionEnd::GOODBYE:
             break;
     }

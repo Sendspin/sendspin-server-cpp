@@ -52,11 +52,8 @@ namespace {
 constexpr size_t HTTPD_STACK_BYTES = 4096;
 /// As a dialed connection's receive task (ThreadRole::LINK_READER)
 constexpr unsigned HTTPD_PRIORITY = 12;
-/// Accepted connections a run keeps open, past those in their handshake: the embedded profile's
-/// players
-constexpr size_t ACCEPTED_CONNECTIONS = 8;
-/// httpd's sessions: every accepted connection in its upgrade or handshake and every one past it
-constexpr size_t HTTPD_SESSIONS = profile::MAX_ACCEPTED_HANDSHAKES + ACCEPTED_CONNECTIONS;
+/// httpd's sessions: every accepted connection in its upgrade or handshake and every one activated
+constexpr size_t HTTPD_SESSIONS = profile::MAX_ACCEPTED_HANDSHAKES + profile::MAX_ACCEPTED_CLIENTS;
 /// httpd's control socket's port; other httpd servers in the application (a web server,
 /// sendspin-cpp's server) take the default and the one after it
 constexpr uint16_t HTTPD_CTRL_PORT = ESP_HTTPD_DEF_CTRL_PORT + 2;

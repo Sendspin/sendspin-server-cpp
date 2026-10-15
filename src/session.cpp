@@ -978,6 +978,10 @@ void Session::close_by_host() {
     }
 }
 
+void Session::refuse() {
+    this->finish(SessionEnd::REFUSED);
+}
+
 void Session::finish(SessionEnd end) {
     if (end != SessionEnd::INIT_REJECTED) {
         this->queues_.clear();

@@ -50,12 +50,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The library and the server_cli example, without sanitizers
           - name: Linux x86-64
             os: ubuntu-24.04
+            cache: ubuntu-24.04
             install: sudo apt-get update && sudo apt-get install -y ccache libssl-dev pkg-config libavahi-client-dev
+            source: .
           - name: macOS arm64
             os: macos-15
+            cache: macos-15
             install: brew install ccache openssl@3
+            source: .
+          # The options the other jobs leave at their defaults, flipped (the tests need Opus)
+          - name: Linux x86-64, Opus and discovery off, memory statistics on
+            os: ubuntu-24.04
+            cache: features-off
+            install: sudo apt-get update && sudo apt-get install -y ccache libssl-dev pkg-config
+            source: .
+            options: -DSENDSPIN_SERVER_ENABLE_OPUS=OFF -DSENDSPIN_SERVER_ENABLE_DISCOVERY=OFF -DSENDSPIN_SERVER_MEMORY_STATS=ON
+          # The library as a subproject (tests/consumer/)
+          - name: Linux x86-64, consumer project
+            os: ubuntu-24.04
+            cache: consumer
+            install: sudo apt-get update && sudo apt-get install -y ccache libssl-dev pkg-config libavahi-client-dev
+            source: tests/consumer
+            options: -DSENDSPIN_SERVER_USE_CCACHE=ON
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 300M
@@ -69,12 +88,11 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-build-${{ matrix.os }}-${{ github.sha }}
-          restore-keys: ccache-build-${{ matrix.os }}-
+          key: ccache-build-${{ matrix.cache }}-${{ github.sha }}
+          restore-keys: ccache-build-${{ matrix.cache }}-
 
       - name: Configure CMake
-        # The library and the server_cli example, without sanitizers
-        run: cmake -B build -DSENDSPIN_SERVER_ENABLE_WERROR=ON .
+        run: cmake -S ${{ matrix.source }} -B build -DSENDSPIN_SERVER_ENABLE_WERROR=ON ${{ matrix.options }}
 
       - name: Build
         run: |
@@ -87,7 +105,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-build-${{ matrix.os }}-${{ github.sha }}
+          key: ccache-build-${{ matrix.cache }}-${{ github.sha }}
 
   test-linux:
     name: Unit tests (Linux x86-64, ASan)
@@ -262,9 +280,29 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build-asan --output-on-failure
 
+  # The ESP-IDF component, compiled and linked into tests/esp_idf/'s application with warnings as
+  # errors; the S3 build has internal RAM only, the P4 build PSRAM and the memory statistics
+  esp-idf:
+    name: ESP-IDF build (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v5.5.5@sha256:a9231d0697ab8f7517cc072e93b7c83e04907bfbfba80b6440d7dbbf90665cf2
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32s3, esp32p4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C tests/esp_idf set-target ${{ matrix.target }}
+          idf.py -C tests/esp_idf build
+
   ci:
     name: CI
-    needs: [pre-commit, lint, build, test-linux, test-embedded, test-tsan, test-macos]
+    needs: [pre-commit, lint, build, test-linux, test-embedded, test-tsan, test-macos, esp-idf]
     runs-on: ubuntu-latest
     if: always()
     steps:

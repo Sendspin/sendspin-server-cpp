@@ -40,14 +40,10 @@ public:
     virtual ~PersistenceProvider() = default;
 
     /// @return The bytes stored under key, or nullopt when there are none
-    virtual std::optional<std::vector<uint8_t>> load_blob(const std::string& /*key*/) {
-        return std::nullopt;
-    }
+    virtual std::optional<std::vector<uint8_t>> load_blob(const std::string& key) = 0;
 
     /// @return true when the write was accepted: stored, or queued until the next commit()
-    virtual bool save_blob(const std::string& /*key*/, const uint8_t* /*data*/, size_t /*len*/) {
-        return false;
-    }
+    virtual bool save_blob(const std::string& key, const uint8_t* data, size_t len) = 0;
 
     /// @brief Makes every accepted write durable. A provider that writes through in save_blob()
     /// keeps the default.
@@ -210,9 +206,9 @@ public:
     InputId id() const;
     GroupId group() const;
 
-    /// @brief Copies up to frames frames of PCM in the input's format. Never blocks or allocates;
-    /// real-time safe. Takes as many as the input admits, up to about the group's lead plus its
-    /// write-ahead past the time now playing; state says why it took fewer. A new input admits
+    /// @brief Copies up to frames frames of PCM in the input's format. Never blocks, allocates or
+    /// frees; real-time safe. Takes as many as the input admits, up to about the group's lead plus
+    /// its write-ahead past the time now playing; state says why it took fewer. A new input admits
     /// nothing (InputState::FULL) until the server has attached it to its group. A live input's
     /// writer drops what write() refuses and never resends what a stall held back.
     ///
@@ -324,7 +320,8 @@ public:
                       ServerListener* listener);
 
     /// @brief Closes every connection and stops the server's threads. Each connected client is
-    /// reported with DisconnectReason::SERVER_STOPPED, after the events that came before the stop.
+    /// reported with DisconnectReason::SERVER_STOPPED, after the events that came before the stop
+    /// and after its source's open stream is reported stopped.
     void stop();
 
     /// @brief The clock of every timestamp the server sends, in microseconds: monotonic, and

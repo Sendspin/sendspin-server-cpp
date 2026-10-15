@@ -30,7 +30,9 @@ constexpr uint8_t APPROVAL_PLAYBACK = 1;
 constexpr uint8_t APPROVAL_PLAYBACK_AND_SOURCE = 2;
 
 namespace layout {
-constexpr size_t APPROVAL = X25519_KEY_SIZE;
+constexpr size_t VERSION = 0;
+constexpr size_t KEY = VERSION + 1;
+constexpr size_t APPROVAL = KEY + X25519_KEY_SIZE;
 constexpr size_t PSK_FLAG = APPROVAL + 1;
 constexpr size_t PSK = PSK_FLAG + 1;
 constexpr size_t NAME_LENGTH = PSK + PSK_SIZE;
@@ -110,7 +112,8 @@ bool encode_client_record(const ClientRecord& record, ClientRecordBlob& blob) {
     if (!key || record.newer_identifiers.size() > persistence_keys::RECORD_IDENTIFIERS) {
         return false;
     }
-    std::copy(key->begin(), key->end(), blob.begin());
+    blob[layout::VERSION] = persistence_keys::CLIENT_RECORD_VERSION;
+    std::copy(key->begin(), key->end(), blob.begin() + layout::KEY);
     uint8_t approval = APPROVAL_NONE;
     if (record.approval) {
         approval = *record.approval == ApprovalScope::PLAYBACK ? APPROVAL_PLAYBACK
@@ -137,11 +140,12 @@ bool encode_client_record(const ClientRecord& record, ClientRecordBlob& blob) {
 }
 
 std::optional<ClientRecord> decode_client_record(std::span<const uint8_t> blob) {
-    if (blob.size() != persistence_keys::CLIENT_RECORD_SIZE) {
+    if (blob.size() != persistence_keys::CLIENT_RECORD_SIZE ||
+        blob[layout::VERSION] != persistence_keys::CLIENT_RECORD_VERSION) {
         return std::nullopt;
     }
     ClientRecord record;
-    record.client_id = b64url_encode(blob.data(), X25519_KEY_SIZE);
+    record.client_id = b64url_encode(blob.data() + layout::KEY, X25519_KEY_SIZE);
     if (!public_key_from_peer_id(record.client_id)) {
         return std::nullopt;
     }

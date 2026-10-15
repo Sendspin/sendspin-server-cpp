@@ -479,6 +479,59 @@ TEST(GroupAudioThread, AnswersAFullRingOnceTheJobFreesIt) {
     dispatcher->join();
 }
 
+// The write that takes up set_format()'s slew leaves the slew it replaced in the view, and core
+// frees it as it handles the group's wakeup. The pipeline jobs signal that wakeup too, so a write's
+// signal can fold into one whose handler is not posted yet: the test runs the handler itself.
+// White-box: Group::on_wake(), HostView::slew_, next_slew_, mutex_.
+TEST(GroupAudioThread, FreesTheSlewAWriteReplacedOnCore) {
+    using sendspin::server::Group;
+    constexpr uint32_t RATE = 48000;
+    sendspin::server::test::Recorder recorder;
+    const auto dispatcher = std::make_shared<sendspin::server::Dispatcher>();
+    sendspin::server::EventLoop loop;
+    AudioWorkers workers(1);
+    std::thread core([&] { loop.run(); });
+    uint64_t next_instance = 1;
+    sendspin::server::ArtworkCache artwork = unused_artwork();
+    std::unique_ptr<Group> group;
+    sendspin::server::InputOptions options{{RATE, 2, sendspin::server::SampleFormat::S16}};
+    options.kind = sendspin::server::InputKind::LIVE;
+    const auto view = std::make_shared<sendspin::server::HostView>(
+        sendspin::server::GroupId{1}, sendspin::server::InputId{1}, options,
+        sendspin::server::GroupParams{300000, 0, 200000}, dispatcher, &recorder);
+    on_core(loop, [&] {
+        group = std::make_unique<Group>(
+            loop, workers, sendspin::server::GroupId{1}, "Live", next_instance,
+            sendspin::server::ResamplerQuality::MEDIUM, false,
+            sendspin::server::GroupHooks{[] {}, [](const sendspin::server::ServerError&) {}, [] {},
+                                         [](const std::string&) {}},
+            artwork);
+        EXPECT_TRUE(group->attach_input(view));
+    });
+    // A cell in either format
+    const std::vector<uint8_t> pcm(size_t{RATE} / 50 * 8, 0);
+    ASSERT_GT(view->write(pcm.data(), RATE / 50).frames, 0U);
+    ASSERT_TRUE(view->set_format({RATE, 2, sendspin::server::SampleFormat::F32}));
+    const uint8_t* made = [&] {
+        const std::lock_guard<std::mutex> lock(view->mutex_);
+        return view->next_slew_.output();
+    }();
+    ASSERT_GT(view->write(pcm.data(), RATE / 50).frames, 0U);
+    const auto [adopted, retired] = on_core(loop, [&] {
+        group->on_wake();
+        const std::lock_guard<std::mutex> lock(view->mutex_);
+        return std::pair{view->slew_.output() == made, view->next_slew_.ready()};
+    });
+    EXPECT_TRUE(adopted);
+    EXPECT_FALSE(retired);
+    on_core(loop, [&] { group.reset(); });
+    workers.stop();
+    loop.post([&] { loop.shutdown(0); });
+    core.join();
+    dispatcher->finish();
+    dispatcher->join();
+}
+
 /// A group with no input, playing epoch 1 on its own anchor, with a frame ring for instance 7 and
 /// an analysis on instance 8, and its INFO lines in lines. White-box: it sets the state an
 /// epoch's start sets (playing_, epoch_, anchor_, rings_, pipelines_.analyses).

@@ -94,7 +94,10 @@ PskCategory attempt_psk(PairMethod method) {
     return method == PairMethod::PAIRING_PSK ? PskCategory::PAIRING : PskCategory::SENTINEL;
 }
 
-PairingVerdict judge_pairing_message(const PairingContext& ctx, const ClientPairing& message) {
+namespace {
+
+/// judge_pairing_message() before the keys the message came under are considered
+PairingVerdict judge_step(const PairingContext& ctx, const ClientPairing& message) {
     const bool dynamic = ctx.method == PairMethod::DYNAMIC_PAIRING_CODE;
     if (is_index_message(message.kind)) {
         // pairing.md "Pairing index"
@@ -149,6 +152,17 @@ PairingVerdict judge_pairing_message(const PairingContext& ctx, const ClientPair
             break;
     }
     return fits ? PairingVerdict::ACCEPT : PairingVerdict::PROTOCOL_ERROR;
+}
+
+}  // namespace
+
+PairingVerdict judge_pairing_message(const PairingContext& ctx, const ClientPairing& message) {
+    if (ctx.rekeying && is_index_message(message.kind)) {
+        return message.pairing_index > ctx.written_index ? PairingVerdict::PROTOCOL_ERROR
+                                                         : PairingVerdict::DISCARD;
+    }
+    const PairingVerdict verdict = judge_step(ctx, message);
+    return ctx.rekeying && verdict == PairingVerdict::ACCEPT ? PairingVerdict::DISCARD : verdict;
 }
 
 std::optional<std::vector<uint8_t>> code_prs(std::string_view input, PairMethod method,
@@ -229,7 +243,7 @@ PairingAttempt::~PairingAttempt() {
     secure_zero(this->nonce_a_.data(), this->nonce_a_.size());
 }
 
-PairingContext PairingAttempt::context(uint32_t written_index) const {
+PairingContext PairingAttempt::context(uint32_t written_index, bool rekeying) const {
     PairingContext ctx;
     ctx.step = this->step_;
     ctx.method = this->method_;
@@ -238,6 +252,7 @@ PairingContext PairingAttempt::context(uint32_t written_index) const {
     ctx.declared_before = this->declared_before_;
     ctx.pending_seen = this->pending_seen_;
     ctx.round = this->round_;
+    ctx.rekeying = rekeying;
     return ctx;
 }
 

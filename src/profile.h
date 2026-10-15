@@ -52,6 +52,14 @@ constexpr size_t STAGING_RING_MAX_BYTES = (EMBEDDED ? size_t{2} : size_t{64}) * 
 constexpr size_t MAX_ACCEPTED_HANDSHAKES = EMBEDDED ? 8 : 64;
 /// @brief Dials and dialed connections in their handshake (connection_limits::MAX_DIALING)
 constexpr size_t MAX_DIALING = EMBEDDED ? 4 : 32;
+/// @brief Activated accepted connections (connection_limits::MAX_ACCEPTED_CLIENTS): the embedded
+/// profile's players
+constexpr size_t MAX_ACCEPTED_CLIENTS = EMBEDDED ? 8 : 64;
+/// @brief Activated accepted connections that may not play
+/// (connection_limits::MAX_ACCEPTED_UNAPPROVED)
+constexpr size_t MAX_ACCEPTED_UNAPPROVED = EMBEDDED ? 4 : 16;
+static_assert(MAX_ACCEPTED_UNAPPROVED < MAX_ACCEPTED_CLIENTS,
+              "unapproved clients must leave room for clients that play");
 
 /// @brief Internal RAM a new connection leaves free (connection_limits::heap_admits()); none on
 /// the host profile, and a host reports no internal heap whatever the profile
@@ -71,14 +79,13 @@ constexpr size_t INBOUND_RING_BYTES = (EMBEDDED ? size_t{1} : size_t{4}) * 64 * 
 /// eight players with their other messages, and on the host many more connections
 constexpr size_t INBOUND_RING_MESSAGES = EMBEDDED ? 128 : 1024;
 
-/// @brief Default cap on a reassembled inbound message (SessionSettings::max_reassembled_bytes)
-constexpr size_t DEFAULT_MAX_REASSEMBLED_BYTES = size_t{1024} * 1024;
+/// @brief Default cap on a reassembled inbound message (SessionSettings::max_reassembled_bytes); on
+/// the embedded profile, room for a source's chunk of 150 ms of 96 kHz stereo 32-bit PCM
+constexpr size_t DEFAULT_MAX_REASSEMBLED_BYTES = (EMBEDDED ? size_t{128} : size_t{1024}) * 1024;
 
-/// @brief A routed source's feed to its decoder (SourceFeed): at least one largest chunk the
-/// server takes; on the host two default-sized reassembled messages, and on the embedded profile
-/// 150 ms of 96 kHz stereo 32-bit PCM twice over; a larger chunk fails the stream
-constexpr size_t SOURCE_FEED_BYTES =
-    EMBEDDED ? size_t{256} * 1024 : 2 * DEFAULT_MAX_REASSEMBLED_BYTES;
+/// @brief A routed source's feed to its decoder (SourceFeed): two of the largest chunks the server
+/// takes, default-sized reassembled messages
+constexpr size_t SOURCE_FEED_BYTES = 2 * DEFAULT_MAX_REASSEMBLED_BYTES;
 /// @brief The most items a source's feed holds: about a second of 20 ms chunks on the embedded
 /// profile, five on the host
 constexpr size_t SOURCE_FEED_ITEMS = EMBEDDED ? 64 : 256;

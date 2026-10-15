@@ -42,6 +42,7 @@
 #include <future>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <thread>
 #include <utility>
@@ -60,13 +61,20 @@ std::once_flag noise_init_once;
 
 std::atomic<uint64_t> next_input_id{1};
 
+/// Whether every byte of key is fill: an erased store reads as all zeros or all 0xFF, a fixed key
+/// anyone knows, which X25519 accepts
+bool is_erased_key(std::span<const uint8_t> key, uint8_t fill) {
+    return std::all_of(key.begin(), key.end(), [fill](uint8_t byte) { return byte == fill; });
+}
+
 /// The stored server key, or a new one saved and committed; nullopt when the provider fails or
-/// holds a blob that is not a valid key
+/// holds a blob that is not a valid key, an erased one included
 std::optional<Identity> load_or_create_identity(PersistenceProvider& provider, const Logger& log) {
     std::optional<std::vector<uint8_t>> blob = provider.load_blob(persistence_keys::SERVER_KEY);
     if (blob) {
         std::optional<Identity> identity;
-        if (blob->size() == persistence_keys::SERVER_KEY_SIZE) {
+        if (blob->size() == persistence_keys::SERVER_KEY_SIZE && !is_erased_key(*blob, 0x00) &&
+            !is_erased_key(*blob, 0xFF)) {
             std::array<uint8_t, X25519_KEY_SIZE> private_bytes{};
             std::copy(blob->begin(), blob->end(), private_bytes.begin());
             identity = Identity::from_private_bytes(private_bytes);
@@ -678,10 +686,18 @@ private:
                 running->sink.on_unavailable();
             }
         }
-        running->core_thread = start_thread(ThreadRole::CORE, [run = running.get()] {
-            run->loop.run();
-            run->core_owner.reset();
-        });
+        try {
+            running->core_thread = start_thread(ThreadRole::CORE, [run = running.get()] {
+                run->loop.run();
+                run->core_owner.reset();
+            });
+        } catch (...) {
+            // The provider's sink goes with the run
+            if (running->discovery) {
+                running->discovery->stop();
+            }
+            throw;
+        }
         const std::lock_guard<std::mutex> lock(this->mutex_);
         this->running_ = std::move(running);
         return StartResult::OK;

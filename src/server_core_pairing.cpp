@@ -413,7 +413,7 @@ void ServerCore::on_pairing_message(Client& client, const ClientPairing& message
     ctx.written_index = session.pairing_index();
     ctx.declared_before = client.declared_pairing;
     if (pairing != nullptr) {
-        ctx = pairing->attempt->context(session.pairing_index());
+        ctx = pairing->attempt->context(session.pairing_index(), session.rekey_pending());
     }
     switch (judge_pairing_message(ctx, message)) {
         case PairingVerdict::DISCARD:

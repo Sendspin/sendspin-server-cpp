@@ -1,0 +1,6 @@
+# The P4 build compiles the PSRAM stack placement and the memory statistics; the S3 build, with
+# internal RAM only, their absence
+CONFIG_SPIRAM=y
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
+CONFIG_SENDSPIN_SERVER_MEMORY_STATS=y
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y

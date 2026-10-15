@@ -54,7 +54,8 @@
 namespace sendspin::server {
 
 /// @brief Caps on connections in their handshake, from the TCP accept or the dial's start until
-/// the client is activated or the connection closes, and the internal RAM a new one needs
+/// the client is activated or the connection closes, and on activated accepted connections; and
+/// the internal RAM a new one needs
 namespace connection_limits {
 /// Accepted connections in their WebSocket upgrade or handshake, far above what one network's
 /// clients start at once. One accepted past it is closed at once, which the log reports.
@@ -63,6 +64,13 @@ constexpr size_t MAX_ACCEPTED_HANDSHAKES = profile::MAX_ACCEPTED_HANDSHAKES;
 /// while unreachable ones time out. A dial past it waits for one of them to end, in the order the
 /// dials became due.
 constexpr size_t MAX_DIALING = profile::MAX_DIALING;
+/// Activated accepted connections. One past it is closed once its handshake completes, with no
+/// activation (SessionEnd::REFUSED), which the log reports.
+constexpr size_t MAX_ACCEPTED_CLIENTS = profile::MAX_ACCEPTED_CLIENTS;
+/// Activated accepted connections that may not play (not approved or not paired), each held in a
+/// group of its own, so that peers cycling keys leave room for clients that play. One past it is
+/// refused as one past MAX_ACCEPTED_CLIENTS is.
+constexpr size_t MAX_ACCEPTED_UNAPPROVED = profile::MAX_ACCEPTED_UNAPPROVED;
 
 /// @brief The internal RAM a new connection needs
 struct HeapReserve {
@@ -290,9 +298,10 @@ public:
     void set_colors(GroupId group, const Colors& colors, int64_t at_us);
     void cancel_scheduled_colors(GroupId group);
 
-    /// @brief Closes every input, resolving pending drains as stopped, closes every connection,
-    /// reports connected clients as stopped, ends the dispatch thread after the events already
-    /// posted, and ends the loop
+    /// @brief Reports every started source, then every connected client and pairing, as stopped,
+    /// with nothing from post_event() after them; closes every input, resolving pending drains as
+    /// stopped, and every connection; ends the dispatch thread after the events already posted,
+    /// and ends the loop
     void shutdown(int64_t grace_us);
 
 private:
@@ -372,6 +381,10 @@ private:
     /// connection_limits::MAX_ACCEPTED_HANDSHAKES accepted connections are in their upgrade or
     /// handshake, and room_for_connection()
     bool admit_accept();
+    /// @brief Whether an accepted connection may be activated, playable or not: while fewer than
+    /// connection_limits::MAX_ACCEPTED_CLIENTS accepted connections are activated, and, for one
+    /// that may not play, fewer than connection_limits::MAX_ACCEPTED_UNAPPROVED that may not
+    bool admit_activation(bool playable);
     void on_accepted(Connection connection);
     /// @brief A client for connection, its session started
     Client& add_client(Connection connection, Target* target, std::string url);
@@ -531,7 +544,8 @@ private:
     /// one of its own, remembering the group it left; alone, its group's playback stops
     void leave_group(Client& client);
     /// @brief A new stopped group holding client alone
-    void move_to_solo_group(Client& client);
+    /// @return the new group, which outlives the handler even when the move closed the connection
+    Group& move_to_solo_group(Client& client);
     /// @brief client leaves its group for to, which may then be erased
     void move_member(Client& client, Group& to);
     /// @brief Moves client_id's connections, or the place held for it, as move_action() decides,
@@ -691,6 +705,8 @@ private:
     uint64_t next_waiting_{0};
     /// Connections refused since the listener last took one
     size_t refused_accepts_{0};
+    /// Accepted connections refused activation since one was last activated
+    size_t refused_activations_{0};
     bool stopping_{false};
 };
 

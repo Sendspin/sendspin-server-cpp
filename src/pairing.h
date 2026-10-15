@@ -107,6 +107,9 @@ struct PairingContext {
     bool pending_seen{false};
     /// The rounds run, 0 before the first server/pair-init
     uint32_t round{0};
+    /// A re-handshake is queued or under way on the connection (Session::rekey_pending()): the
+    /// client does not have the attempt's activation yet
+    bool rekeying{false};
 };
 
 /// @brief Whether message fits ctx (pairing.md "Messages", "Pairing index", "Sequence
@@ -118,7 +121,10 @@ struct PairingContext {
 /// without an index is a leftover once the connection declared pairing before. Two choices the
 /// spec leaves open: a pairing_index of 0 is below any count an attempt has, so a leftover; and
 /// a pair/abort with a reason this server does not recognize still ends the attempt
-/// (result_of_abort()), since the client has ended it.
+/// (result_of_abort()), since the client has ended it. While ctx.rekeying, a message that would
+/// fit is dropped, and so is a message with a pairing_index up to the activations written, a
+/// leftover of an earlier attempt whatever its fields, since the count restarts at every
+/// handshake.
 PairingVerdict judge_pairing_message(const PairingContext& ctx, const ClientPairing& message);
 
 /// @brief A code the operator entered, as CPace's PRS for an attempt's method and format
@@ -166,8 +172,9 @@ public:
         return this->round_;
     }
 
-    /// @brief The context judge_pairing_message() takes, with the activations written
-    PairingContext context(uint32_t written_index) const;
+    /// @brief The context judge_pairing_message() takes, with the activations written and whether
+    /// a re-handshake is pending
+    PairingContext context(uint32_t written_index, bool rekeying) const;
 
     /// @brief A client/pair-pending was accepted
     void note_pending() {

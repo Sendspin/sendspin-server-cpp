@@ -16,15 +16,17 @@
 /// @brief The source role end to end (spec roles/source/v1.md): sources activated only with
 /// their approval, a routed source's audio streamed into a group and played by its players, PCM
 /// and FLAC bit for bit and Opus decoded, a stall's backlog dropped and a long gap starting a new
-/// run, and the protocol errors that close a source's connection. The sources are in-process
-/// sendspin-cpp clients and the raw test client (for FLAC, which the sendspin-cpp source does not
-/// send, timestamps of the test's choosing and misbehavior); the players are sendspin-cpp clients.
+/// run, the protocol errors that close a source's connection, and a stop that reports the source's
+/// stream stopped before its client. The sources are in-process sendspin-cpp clients and the raw
+/// test client (for FLAC, which the sendspin-cpp source does not send, timestamps of the test's
+/// choosing and misbehavior); the players are sendspin-cpp clients.
 
 #include "clock.h"
 #include "crypto/keys.h"
 #include "fragmentation.h"
 #include "frame_encoder.h"
 #include "opus_reader.h"
+#include "peer.h"
 #include "player_sink.h"
 #include "raw_client.h"
 #include "test_ports.h"
@@ -163,7 +165,9 @@ class Peer : public sendspin::SourceRoleListener {
 public:
     /// @param bits the player's and the PCM source's depth; an Opus source captures 16 bits
     Peer(bool player, std::optional<Codec> source, uint32_t bits)
-        : port_(sendspin::server::test::free_port()), client_(make_config(this->port_)) {
+        : port_(sendspin::server::test::free_port()),
+          client_(sendspin::server::test::peer_config("Peer " + std::to_string(this->port_),
+                                                      this->port_)) {
         if (player) {
             sendspin::PlayerRoleConfig config;
             config.audio_formats.push_back({Codec::PCM, 2, RATE, static_cast<uint8_t>(bits)});
@@ -229,7 +233,7 @@ public:
     }
 
     std::string url() const {
-        return "ws://127.0.0.1:" + std::to_string(this->port_) + "/sendspin";
+        return sendspin::server::test::peer_url(this->port_);
     }
 
     sendspin::SendspinClient& client() {
@@ -245,14 +249,6 @@ public:
     int stops{0};
 
 private:
-    static sendspin::SendspinClientConfig make_config(uint16_t port) {
-        sendspin::SendspinClientConfig config;
-        config.name = "Peer " + std::to_string(port);
-        config.server_port = port;
-        config.time_burst_interval_ms = 50;
-        return config;
-    }
-
     uint16_t port_;
     AlwaysReady network_;
     sendspin::SendspinClient client_;
@@ -303,12 +299,7 @@ public:
     /// Runs every peer's main loop on this thread until done() holds, with no timeout
     template <typename Predicate>
     void run_until(Predicate done) {
-        while (!done()) {
-            for (const std::unique_ptr<Peer>& peer : this->peers) {
-                peer->client().loop();
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
+        sendspin::server::test::run_all_until(this->peers, done);
     }
 
     /// A copy of what the trace holds for client_id
@@ -597,6 +588,57 @@ TEST(ServerSources, ReportTheOpenStreamWhereverItIsRouted) {
     ASSERT_EQ(again.result, RouteSourceResult::OK);
     s.run_until([&] { return s.recorder.count(started(s.group())) == 2; });
     raw.close();
+}
+
+// SendspinServer::stop(): a routed source's open stream is reported stopped before its client is
+// reported stopped, as when its connection closes, and nothing is reported after the client; for a
+// routed source that never opened a stream, only its client is reported. The second start(), with
+// no listener, joins the first run's dispatch thread, so every report of the stop is recorded by
+// then. Takes about 2 s: the raw client never answers the server's close, so each stop waits out
+// its grace.
+TEST(ServerSources, ReportASourceStoppedBeforeItsClientWhenTheServerStops) {
+    const Signal signal(16);
+    struct Row {
+        const char* name;
+        bool opened;
+    };
+    const Row rows[] = {
+        {"an open stream", true},
+        {"no stream", false},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        Rig s(signal);
+        RawClient raw;
+        const std::string id = raw.noise.identity().peer_id();
+        const sendspin::server::GroupId group = s.group();
+        const sendspin::server::RoutedSource routed = s.server.route_source(id, group);
+        ASSERT_EQ(routed.result, RouteSourceResult::OK);
+        ASSERT_NO_FATAL_FAILURE(connect_raw_source(s, raw));
+        EXPECT_NE(raw.receive_until("server/command").find("start"), std::string::npos);
+        if (row.opened) {
+            raw.send_json(
+                R"({"type":"client-stream/start","payload":{"source":{"codec":"pcm","channels":2,)"
+                R"("sample_rate":48000,"bit_depth":16}}})");
+            s.recorder.wait_for(
+                Recorder::source_started(id, group, StreamFormat{StreamCodec::PCM, RATE, 2, 16}));
+        }
+
+        s.server.stop();
+        ASSERT_EQ(s.server.start(sendspin::server::test::local_config(), &s.provider, nullptr),
+                  StartResult::OK);
+        const std::vector<Recorder::Entry> entries = s.recorder.entries();
+        ASSERT_GE(entries.size(), 2U);
+        const std::string source_stopped =
+            "source stopped " + id + " " + std::to_string(group.value);
+        EXPECT_EQ(s.recorder.count(source_stopped), row.opened ? 1U : 0U);
+        if (row.opened) {
+            EXPECT_EQ(entries[entries.size() - 2].what, source_stopped);
+        }
+        const auto stopped = static_cast<int>(sendspin::server::DisconnectReason::SERVER_STOPPED);
+        EXPECT_EQ(entries.back().what, "disconnected " + id + " " + std::to_string(stopped));
+        raw.close();
+    }
 }
 
 // roles/source/v1.md "Unpaired access": an approval for playback activates the client without its

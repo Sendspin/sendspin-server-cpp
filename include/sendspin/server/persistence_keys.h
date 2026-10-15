@@ -18,12 +18,14 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace sendspin::server::persistence_keys {
 
 /// @brief The server's static X25519 private key, raw. The server_id derives from it, so clients
-/// pair with it: keep it in the host's backup set.
+/// pair with it: keep it in the host's backup set. start() fails rather than replace a blob of
+/// another size, or of all zeros or all 0xFF bytes, as an erased store reads.
 inline constexpr const char* SERVER_KEY = "server_key";
 inline constexpr size_t SERVER_KEY_SIZE = 32;
 
@@ -35,16 +37,19 @@ inline constexpr size_t RECORD_NAME_BYTES = 64;
 inline constexpr size_t RECORD_IDENTIFIERS = 4;
 /// @brief The longest unrecognized identifier a client record keeps, in bytes
 inline constexpr size_t RECORD_IDENTIFIER_BYTES = 32;
-/// @brief A client record, in this order: the client's X25519 public key, the key its
-/// `client_id` encodes (32 bytes); one byte of approval (0 none, 1 ApprovalScope::PLAYBACK, 2
-/// ApprovalScope::PLAYBACK_AND_SOURCE); one byte that is 1 when a long-term PSK follows and 0
-/// when the next 32 bytes are zeros; the long-term PSK (32 bytes); the name's length, then the
-/// name padded with zeros to RECORD_NAME_BYTES; the identifier count, then RECORD_IDENTIFIERS
-/// fields each of a length byte and RECORD_IDENTIFIER_BYTES bytes padded with zeros. A blob of
-/// all zeros is a removed record (SendspinServer::unpair()). A blob of another size or with a
-/// value outside these holds no record, so records saved in an earlier layout are dropped at
-/// start, each logged. The blob holds the long-term PSK: store it as a secret.
-inline constexpr size_t CLIENT_RECORD_SIZE = 32 + 1 + 1 + 32 + 1 + RECORD_NAME_BYTES + 1 +
+/// @brief The layout version a client record's first byte holds
+inline constexpr uint8_t CLIENT_RECORD_VERSION = 1;
+/// @brief A client record, in this order: CLIENT_RECORD_VERSION (one byte); the client's X25519
+/// public key, the key its `client_id` encodes (32 bytes); one byte of approval (0 none, 1
+/// ApprovalScope::PLAYBACK, 2 ApprovalScope::PLAYBACK_AND_SOURCE); one byte that is 1 when a
+/// long-term PSK follows and 0 when the next 32 bytes are zeros; the long-term PSK (32 bytes); the
+/// name's length, then the name padded with zeros to RECORD_NAME_BYTES; the identifier count, then
+/// RECORD_IDENTIFIERS fields each of a length byte and RECORD_IDENTIFIER_BYTES bytes padded with
+/// zeros. A blob of all zeros is a removed record (SendspinServer::unpair()). A blob of another
+/// size or version, or with a value outside these, holds no record, so records saved in another
+/// layout are dropped at start, each logged. The blob holds the long-term PSK: store it as a
+/// secret.
+inline constexpr size_t CLIENT_RECORD_SIZE = 1 + 32 + 1 + 1 + 32 + 1 + RECORD_NAME_BYTES + 1 +
                                              RECORD_IDENTIFIERS * (1 + RECORD_IDENTIFIER_BYTES);
 /// @brief The most client records the server keeps
 inline constexpr size_t MAX_CLIENT_RECORDS = 1024;

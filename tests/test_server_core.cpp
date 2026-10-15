@@ -19,7 +19,9 @@
 /// ServerCore's targets_ and prune_targets() and HandshakeBackoff::next_dial_us_ (see
 /// tests/CMakeLists.txt). Shutdown closes an input whose attachment has not run. A pipeline
 /// failure, forced by swapping a group's encoder, ends the stream on its format and leaves a drain
-/// to complete.
+/// to complete. A member whose leaving or stopping its group overflows its control FIFO, its cap
+/// lowered through Session::queues_, closes inside that step, and so does a client's second
+/// connection inside the host's move of its first.
 
 #include "clock.h"
 #include "crypto/keys.h"
@@ -27,7 +29,9 @@
 #include "frame_encoder.h"
 #include "host_view.h"
 #include "raw_client.h"
+#include "sched/constants.h"
 #include "server_core.h"
+#include "server_core_client.h"
 #include "test_ports.h"
 #include "test_recorder.h"
 #include "transport.h"
@@ -35,6 +39,7 @@
 #include <noise/protocol.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <future>
@@ -43,6 +48,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -585,6 +591,291 @@ TEST(ServerCorePipelines, MovesAPlayerOffAFailedFormatAndStillCompletesADrain) {
     core_thread.join();
     dispatcher->finish();
     dispatcher->join();
+}
+
+sendspin::server::CoreSettings approving_settings() {
+    sendspin::server::CoreSettings settings;
+    settings.approve_all_clients = true;
+    return settings;
+}
+
+/// A ServerCore approving every client on its own core thread, shut down when destroyed
+struct RunningCore {
+    RunningCore() : thread([this] { this->loop.run(); }) {}
+
+    ~RunningCore() {
+        this->loop.post([this] { this->core.shutdown(0); });
+        this->thread.join();
+        this->dispatcher->finish();
+        this->dispatcher->join();
+    }
+
+    RunningCore(const RunningCore&) = delete;
+    RunningCore& operator=(const RunningCore&) = delete;
+
+    /// Dials client, which takes the connection with hello and state
+    void dial(sendspin::server::test::RawClient& client, const std::string& hello,
+              const std::string& state) {
+        const std::string url = client.url();
+        this->loop.post(
+            [this, url] { this->core.connect_url(url, *sendspin::server::parse_ws_url(url)); });
+        ASSERT_NO_FATAL_FAILURE(client.activate(hello));
+        client.send_json(state);
+    }
+
+    /// Dials client, which takes the connection with hello and state; the host hears it connected
+    void connect(sendspin::server::test::RawClient& client, const std::string& hello,
+                 const std::string& state = sendspin::server::test::client_state_json(true)) {
+        ASSERT_NO_FATAL_FAILURE(this->dial(client, hello, state));
+        this->recorder.wait_for("connected " + client.noise.identity().peer_id());
+    }
+
+    /// Runs fn on the core thread and waits for it
+    template <typename Fn>
+    auto on_core(Fn fn) {
+        std::promise<decltype(fn())> done;
+        this->loop.post([&] {
+            if constexpr (std::is_void_v<decltype(fn())>) {
+                fn();
+                done.set_value();
+            } else {
+                done.set_value(fn());
+            }
+        });
+        return done.get_future().get();
+    }
+
+    /// The group as the groups() snapshot shows it
+    sendspin::server::GroupInfo group(sendspin::server::GroupId id) const {
+        for (const sendspin::server::GroupInfo& info : this->groups.read()) {
+            if (info.id == id) {
+                return info;
+            }
+        }
+        return {};
+    }
+
+    sendspin::server::GroupInfo server_group() const {
+        return this->group(this->core.default_group());
+    }
+
+    /// The connection dialed to client; core thread only
+    sendspin::server::ServerCore::Client* client_of(
+        const sendspin::server::test::RawClient& client) {
+        for (const auto& [id, connection] : this->core.clients_) {
+            if (connection->url == client.url()) {
+                return connection.get();
+            }
+        }
+        return nullptr;
+    }
+
+    /// White-box: once client's connection has no write or wait outstanding and nothing to send,
+    /// so that its session's end closes it at once, caps its control FIFO at the bytes it holds,
+    /// so the next message queued overflows it
+    void fill_control(const sendspin::server::test::RawClient& client) {
+        while (!this->on_core([&] {
+            sendspin::server::SessionDriver& driver = *this->client_of(client)->driver;
+            if (driver.writing_ || driver.waiting_ || driver.session().has_message()) {
+                return false;
+            }
+            sendspin::server::SendQueues& queues = driver.session().queues_;
+            queues.caps_.control_bytes = queues.control_bytes_;
+            return true;
+        })) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    sendspin::server::EventLoop loop;
+    sendspin::server::AudioWorkers workers{1};
+    // Outlives the dispatcher, whose thread calls it until joined
+    sendspin::server::test::Recorder recorder;
+    std::shared_ptr<sendspin::server::Dispatcher> dispatcher =
+        std::make_shared<sendspin::server::Dispatcher>();
+    const sendspin::server::Identity identity = *sendspin::server::Identity::generate();
+    const sendspin::server::CoreSettings settings = approving_settings();
+    sendspin::server::ClientSnapshot snapshot;
+    sendspin::server::GroupSnapshot groups;
+    sendspin::server::InputRegistry inputs;
+    std::atomic<uint64_t> group_ids{1};
+    sendspin::server::ServerCore core{loop,     workers,  *dispatcher, &recorder, identity,
+                                      settings, snapshot, groups,      inputs,    group_ids};
+    std::thread thread;
+};
+
+// messaging.md "Server behavior when a client becomes unavailable", "client/leave": a member of a
+// shared group that turns unavailable or leaves moves into a group of its own, and the solo
+// group's join messages can pass its control FIFO's cap. The pump closes the connection inside
+// the move, which clears its group; the core thread goes on and the other member is untouched.
+// Control: with room in the FIFO the member stays connected.
+TEST(ServerCoreGroups, ClosesAMemberWhoseMoveOverflowsItsQueue) {
+    using sendspin::server::test::RawClient;
+    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
+    struct Row {
+        const char* name;
+        const char* message;
+        bool full;
+    };
+    const Row rows[] = {
+        {"Control: client/state unavailable with room",
+         R"({"type":"client/state","payload":{"available":false}})", false},
+        {"client/state unavailable", R"({"type":"client/state","payload":{"available":false}})",
+         true},
+        {"client/leave", R"({"type":"client/leave","payload":{}})", true},
+    };
+    const std::string player = sendspin::server::test::player_hello_json(
+        "Player", R"([{"codec":"pcm","sample_rate":48000,"channels":2,"bit_depth":16}])", 200000);
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        RunningCore c;
+        RawClient leaving;
+        RawClient staying;
+        ASSERT_NO_FATAL_FAILURE(c.connect(leaving, player));
+        ASSERT_NO_FATAL_FAILURE(c.connect(staying, player));
+        ASSERT_EQ(c.server_group().client_ids.size(), 2U);
+        if (row.full) {
+            c.fill_control(leaving);
+        }
+        leaving.send_json(row.message);
+        if (row.full) {
+            leaving.read_until_closed();
+            const std::vector<sendspin::server::ClientDisconnect> disconnects =
+                c.recorder.wait_for_disconnects(1);
+            EXPECT_EQ(disconnects.front().reason,
+                      sendspin::server::DisconnectReason::CLOSED_BY_SERVER);
+        } else {
+            // The solo group's group/update follows the one of the first activation
+            EXPECT_FALSE(leaving.receive_until("group/update").empty());
+            leaving.send_json(sendspin::server::test::client_time_json(1));
+            EXPECT_FALSE(leaving.receive_until("server/time").empty());
+        }
+        staying.send_json(sendspin::server::test::client_time_json(1));
+        EXPECT_FALSE(staying.receive_until("server/time").empty());
+        EXPECT_EQ(c.server_group().client_ids,
+                  std::vector<std::string>{staying.noise.identity().peer_id()});
+    }
+}
+
+// messaging.md "Server behavior when a client becomes unavailable": the only member of a playing
+// group that turns unavailable stops its playback, and the stop's group/update can pass its
+// control FIFO's cap. The pump closes the connection inside the stop, which clears its group, and
+// the core thread goes on. Control: with room in the FIFO the member gets the stopped
+// group/update.
+TEST(ServerCoreGroups, ClosesALoneMemberWhoseStopOverflowsItsQueue) {
+    using sendspin::server::test::RawClient;
+    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
+    for (const bool full : {false, true}) {
+        SCOPED_TRACE(full ? "full" : "Control: with room");
+        RunningCore c;
+        // No player, so the server's group plays with no stream to it
+        RawClient client;
+        ASSERT_NO_FATAL_FAILURE(c.connect(client, sendspin::server::test::client_hello_json()));
+        const sendspin::server::GroupId group = c.core.default_group();
+        ASSERT_EQ(c.server_group().client_ids.size(), 1U);
+        constexpr uint32_t RATE = 48000;
+        const auto view = std::make_shared<sendspin::server::HostView>(
+            group, sendspin::server::InputId{3},
+            sendspin::server::InputOptions{
+                sendspin::server::InputFormat{RATE, 2, sendspin::server::SampleFormat::S16}},
+            sendspin::server::GroupParams{250000, 0, 0}, c.dispatcher, &c.recorder);
+        ASSERT_TRUE(c.inputs.add(view));
+        c.loop.post([&] { c.core.attach_input(view); });
+        // Past the write-ahead a group with no player takes, so the run starts; the last writes
+        // wait for room as the run plays
+        constexpr uint64_t FRAMES =
+            (sendspin::server::sched::timing_defaults::WRITE_AHEAD_MIN_US + 200'000) * RATE /
+            1'000'000;
+        const std::vector<uint8_t> pcm(FRAMES * 4, 0);
+        for (uint64_t written = 0; written < FRAMES;) {
+            written += view->write(pcm.data(), FRAMES - written).frames;
+            if (written < FRAMES) {
+                view->wait_writable(INT64_MAX);
+            }
+        }
+        for (;;) {
+            const std::string update = client.receive_until("group/update");
+            ASSERT_FALSE(update.empty());
+            if (update.find(R"("playback_state":"playing")") != std::string::npos) {
+                break;
+            }
+        }
+        if (full) {
+            c.fill_control(client);
+        }
+        client.send_json(R"({"type":"client/state","payload":{"available":false}})");
+        if (full) {
+            client.read_until_closed();
+            const std::vector<sendspin::server::ClientDisconnect> disconnects =
+                c.recorder.wait_for_disconnects(1);
+            EXPECT_EQ(disconnects.front().reason,
+                      sendspin::server::DisconnectReason::CLOSED_BY_SERVER);
+            // The core thread still runs its handlers, and the group stopped
+            c.on_core([] {});
+            EXPECT_EQ(c.server_group().playback_state, sendspin::server::PlaybackState::STOPPED);
+            EXPECT_TRUE(c.server_group().client_ids.empty());
+        } else {
+            for (;;) {
+                const std::string update = client.receive_until("group/update");
+                ASSERT_FALSE(update.empty());
+                if (update.find(R"("playback_state":"stopped")") != std::string::npos) {
+                    break;
+                }
+            }
+        }
+        view->release();
+    }
+}
+
+// A host's move judges each connection of a client in turn (move_action()). Moving the first out
+// of the server's group sends the controller state it changes to the members left, and when the
+// second connection's control FIFO cannot take it, that connection closes inside the first one's
+// move; the move goes on without it. Control: with room both connections move.
+TEST(ServerCoreGroups, MovesPastAConnectionAnEarlierMoveClosed) {
+    using sendspin::server::Identity;
+    using sendspin::server::test::RawClient;
+    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
+    const std::string hello =
+        R"({"type":"client/hello","payload":{"name":"Two","supported_roles":["player@v1",)"
+        R"("controller@v1"],"player@v1_support":{"supported_formats":[{"codec":"pcm",)"
+        R"("sample_rate":48000,"channels":2,"bit_depth":16}],"buffer_capacity":200000},)"
+        R"("supported_pair_methods":{"pairing_psk":{}},"unpaired_access":{"enabled":true}}})";
+    const auto state = [](uint32_t volume) {
+        return sendspin::server::test::client_state_json(
+            true, R"({"output_delay_ms":0,"required_lead_time_ms":0,"min_buffer_ms":0,)"
+                  R"("supported_commands":["volume"],"volume":)" +
+                      std::to_string(volume) + "}");
+    };
+    for (const bool full : {false, true}) {
+        SCOPED_TRACE(full ? "full" : "Control: with room");
+        RunningCore c;
+        const Identity identity = *Identity::generate();
+        RawClient first(sendspin::server::CipherSuite::CHACHAPOLY_SHA256,
+                        *Identity::from_private_bytes(identity.private_bytes));
+        RawClient second(sendspin::server::CipherSuite::CHACHAPOLY_SHA256,
+                         *Identity::from_private_bytes(identity.private_bytes));
+        const std::string id = identity.peer_id();
+        ASSERT_NO_FATAL_FAILURE(c.connect(first, hello, state(30)));
+        // A second connection of a client already reported is not reported again
+        ASSERT_NO_FATAL_FAILURE(c.dial(second, hello, state(70)));
+        second.send_json(sendspin::server::test::client_time_json(1));
+        ASSERT_FALSE(second.receive_until("server/time").empty());
+        ASSERT_EQ(c.server_group().client_ids, (std::vector<std::string>{id, id}));
+        if (full) {
+            c.fill_control(second);
+        }
+        const sendspin::server::GroupId moved{c.group_ids.fetch_add(1)};
+        c.on_core([&] { c.core.create_group(moved, "Moved", id); });
+        if (full) {
+            second.read_until_closed();
+            EXPECT_EQ(c.group(moved).client_ids, std::vector<std::string>{id});
+        } else {
+            EXPECT_EQ(c.group(moved).client_ids, (std::vector<std::string>{id, id}));
+        }
+        EXPECT_TRUE(c.server_group().client_ids.empty());
+        first.send_json(sendspin::server::test::client_time_json(1));
+        EXPECT_FALSE(first.receive_until("server/time").empty());
+    }
 }
 
 }  // namespace

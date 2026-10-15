@@ -20,6 +20,7 @@
 #include "artwork_stream.h"
 #include "colors.h"
 #include "image_codec.h"
+#include "peer.h"
 #include "raw_client.h"
 #include "test_ports.h"
 #include "test_recorder.h"
@@ -56,7 +57,9 @@ using sendspin::server::RgbColor;
 using sendspin::server::SendspinServer;
 using sendspin::server::ServerConfig;
 using sendspin::server::StartResult;
+using sendspin::server::test::AlwaysReady;
 using sendspin::server::test::Bytes;
+using sendspin::server::test::client_at;
 using sendspin::server::test::MemoryProvider;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
@@ -497,13 +500,6 @@ TEST(ServerArtworkWire, EndsTheStreamBeforeTheActivationThatRemovesIt) {
 // In-process sendspin-cpp clients
 // ==============================================================================
 
-class AlwaysReady : public sendspin::SendspinNetworkProvider {
-public:
-    bool is_network_ready() override {
-        return true;
-    }
-};
-
 /// What a sendspin-cpp client's artwork and color roles report: images on its decode thread,
 /// the rest on its main loop, the test's thread
 class Events : public sendspin::ArtworkRoleListener, public sendspin::ColorRoleListener {
@@ -553,7 +549,9 @@ private:
 /// PNG channel of 40 by 20) and the color role, listening for the server to dial
 class Peer {
 public:
-    Peer() : port_(sendspin::server::test::free_port()), client_(make_config(this->port_)) {
+    Peer()
+        : port_(sendspin::server::test::free_port()),
+          client_(sendspin::server::test::peer_config("Frame", this->port_)) {
         sendspin::ArtworkRoleConfig config;
         sendspin::ImageSlotPreference album;
         album.source = sendspin::SendspinImageSource::ALBUM;
@@ -581,16 +579,13 @@ public:
     Peer& operator=(const Peer&) = delete;
 
     std::string url() const {
-        return "ws://127.0.0.1:" + std::to_string(this->port_) + "/sendspin";
+        return sendspin::server::test::peer_url(this->port_);
     }
 
     /// Runs the client's main loop on this thread until done() holds, with no timeout
     template <typename Done>
     void run_until(Done done) {
-        while (!done()) {
-            this->client_.loop();
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
+        sendspin::server::test::run_until(this->client_, done);
     }
 
     sendspin::SendspinClient& client() {
@@ -600,27 +595,10 @@ public:
     Events events;
 
 private:
-    static sendspin::SendspinClientConfig make_config(uint16_t port) {
-        sendspin::SendspinClientConfig config;
-        config.name = "Frame";
-        config.server_port = port;
-        config.time_burst_interval_ms = 50;
-        return config;
-    }
-
     uint16_t port_;
     AlwaysReady network_;
     sendspin::SendspinClient client_;
 };
-
-std::string client_at(const SendspinServer& server, const std::string& url) {
-    for (const sendspin::server::ClientInfo& client : server.clients()) {
-        if (client.url == url) {
-            return client.client_id;
-        }
-    }
-    return {};
-}
 
 constexpr std::array<uint8_t, 3> RED{255, 0, 0};
 constexpr std::array<uint8_t, 3> BLUE{0, 0, 255};

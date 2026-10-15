@@ -15,6 +15,7 @@
 /// @file test_trust_policy.cpp
 /// @brief The PSK a handshake references and the activity sets a matched PSK allows
 
+#include "trust_fixtures.h"
 #include "trust_policy.h"
 #include <gtest/gtest.h>
 
@@ -27,12 +28,7 @@ namespace {
 using sendspin::server::Activities;
 using sendspin::server::Psk;
 using sendspin::server::PskCategory;
-
-Psk psk_of(uint8_t byte) {
-    Psk psk{};
-    psk.fill(byte);
-    return psk;
-}
+using sendspin::server::test::psk_of;
 
 // A long-term PSK on record, then an operator-started pairing PSK, then the Sentinel (connection.md
 // "Pre-Shared Key": the Sentinel whenever no other PSK applies)

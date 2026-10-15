@@ -142,7 +142,8 @@ struct ClientInfo {
     /// The client's base64url public key (spec connection.md "Identities"); empty for one found
     /// by browsing that the server has not connected to
     std::string client_id;
-    /// The name from its client/hello, or its TXT `name` before the first connection
+    /// The name from its client/hello, cut to config_limits::MAX_NAME_BYTES between UTF-8
+    /// characters, or its TXT `name` before the first connection
     std::string name;
     /// The URL the server dials; empty for a client that connected to the server
     std::string url;
@@ -251,8 +252,9 @@ enum class ErrorKind : uint8_t {
     /// on_client_connected()), such as `concurrent_attempt` when it keeps another server's
     /// connection; goodbye_reason says why
     GOODBYE_BEFORE_ACTIVATION,
-    /// A connection ended before the client was connected, other than by a client/goodbye or
-    /// by the host (disconnect(), cancel_connect_url())
+    /// A connection ended before the client was connected, other than by a client/goodbye, by
+    /// the host (disconnect(), cancel_connect_url()) or by the server's refusal of an accepted
+    /// connection past a cap on activated ones, which the log reports
     HANDSHAKE_FAILED,
     /// The pipeline producing format for a group failed (an encoder or the resampler refused
     /// its input), so the format is not streamed in that group until its playback next stops;
@@ -270,10 +272,10 @@ enum class ErrorKind : uint8_t {
     PERSISTENCE_FAILED,
     /// A source's input stream could not be taken (SendspinServer::route_source()): its format is
     /// one the server does not decode, its FLAC header one the decoder cannot read, the group's
-    /// input refused it, its buffers could not be allocated, or a chunk was larger than the server
-    /// holds. client_id names the source, format its stream's format. The server asks the source to
-    /// stop, and does not ask it to stream again until it is routed again, reports itself available
-    /// again after an unavailable report, gets its role again, or connects again.
+    /// input refused it, or its buffers could not be allocated. client_id names the source, format
+    /// its stream's format. The server asks the source to stop, and does not ask it to stream again
+    /// until it is routed again, reports itself available again after an unavailable report, gets
+    /// its role again, or connects again.
     SOURCE_FAILED,
 };
 

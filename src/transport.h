@@ -117,7 +117,7 @@ struct TransportSettings {
     /// Close after this long without any inbound frame, with keep-alive pings sent at half of
     /// it; 0 for no idle timeout
     int64_t idle_timeout_us{DEFAULT_IDLE_TIMEOUT_US};
-    /// Limit for a dial's TCP connect; positive
+    /// Limit for a dial's TCP connect to each address in turn; positive
     int64_t connect_timeout_us{DEFAULT_CONNECT_TIMEOUT_US};
     /// Close when a wait for room or a write stays outstanding this long; positive
     int64_t write_stall_us{DEFAULT_WRITE_STALL_US};
