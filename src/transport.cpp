@@ -1804,7 +1804,13 @@ public:
                 return;
             }
             self->pending_.store(false);
-            self->on_wake_();
+            // Held here while it runs, since a run may drop its own Wakeup, whose cancel()
+            // clears on_wake_
+            std::function<void()> on_wake = std::move(self->on_wake_);
+            on_wake();
+            if (!self->cancelled_) {
+                self->on_wake_ = std::move(on_wake);
+            }
         }));
     }
 
