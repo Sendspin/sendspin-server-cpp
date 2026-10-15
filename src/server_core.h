@@ -227,6 +227,9 @@ public:
         bool existed{false};
         /// set_approval() ran meanwhile, so putting the change back keeps the approval it set
         bool approval_set{false};
+        /// A save of the record was made meanwhile, so the record in memory is saved again before
+        /// the change is durable
+        bool saved_meanwhile{false};
     };
 
     /// @brief A completed pairing's record (pairing.md "Pairing Records"): sets client_id's
@@ -234,10 +237,12 @@ public:
     /// record and calls done on the core thread with whether it is durable and the change's
     /// UnsavedRecord. Until then handshakes reference the PSK of the record as it was, and a
     /// failed save puts the change back (put_back()), so nothing uses the new PSK before it is
-    /// persisted (pairing.md "server/pair-finalize"). After done, every connection of the client
-    /// is activated again under its record. A second store for a client while one is in flight
-    /// gets done(false) at once. done is dropped once the core stops, and shutdown() puts the
-    /// change back on disk.
+    /// persisted (pairing.md "server/pair-finalize"). A save of the record made meanwhile leaves
+    /// the change out (save_record()), so the change is durable only once a save of it lands with
+    /// none made meanwhile (save_change()). After done, every connection of the client is
+    /// activated again under its record. A second store for a client while one is in flight gets
+    /// done(false) at once. done is dropped once the core stops, and shutdown() puts the change
+    /// back on disk.
     void store_long_term_psk(const std::string& client_id, const Psk& psk,
                              std::function<void(bool, const UnsavedRecord&)> done);
 
@@ -605,13 +610,29 @@ private:
     /// @brief Re-handshakes every activated connection of client_id to psk (connection.md
     /// "Re-handshake")
     void rekey(const std::string& client_id, const HandshakePsk& psk);
-    /// @brief Saves client_id's record through the provider on the dispatch thread, reporting a
-    /// failure with on_error(); then, unless the core stopped, calls done on the core thread with
-    /// whether it is durable. A failed save without done is written again (FailedWrites). Without
-    /// a provider nothing is saved and done gets true. The save may finish after the core is
-    /// destroyed: it reaches the core only through loop_, which outlives the dispatch thread, and
-    /// a handler posted after the loop ended never runs.
-    void save_record(const std::string& client_id, std::function<void(bool)> done = nullptr);
+    /// @brief Saves client_id's record in memory, as the other overload describes, without done.
+    /// While a store_long_term_psk() change is being saved, the record saved is without_change()'s,
+    /// and none when that is nullopt.
+    void save_record(const std::string& client_id);
+    /// @brief Saves record (nullptr: none, which fails) as client_id's through the provider on the
+    /// dispatch thread, reporting a failure with on_error(); then, unless the core stopped, calls
+    /// done on the core thread with whether it is durable. A failed save without done is written
+    /// again (FailedWrites). Without a provider nothing is saved and done gets true. The save may
+    /// finish after the core is destroyed: it reaches the core only through loop_, which outlives
+    /// the dispatch thread, and a handler posted after the loop ended never runs.
+    void save_record(const std::string& client_id, const ClientRecord* record,
+                     std::function<void(bool)> done);
+    /// @brief current, client_id's record in memory, as put_back() leaves it: the long-term PSK
+    /// and, unless set_approval() ran meanwhile, the approval of unsaved's record before, with
+    /// current's other fields; nullopt when the change created the record and no approval was set
+    static std::optional<ClientRecord> without_change(const ClientRecord* current,
+                                                      const UnsavedRecord& unsaved);
+
+    /// @brief Saves the record in memory, which holds client_id's store_long_term_psk() change,
+    /// again when a save made meanwhile left the change out, then ends the change as
+    /// store_long_term_psk() describes
+    void save_change(const std::string& client_id,
+                     std::function<void(bool, const UnsavedRecord&)> done);
     /// @brief Saves an all-zero blob, a free slot, in slot, once client_id's record is removed
     void erase_record(const std::string& client_id, size_t slot);
     /// @brief A record's blob, wiped when the last holder releases it

@@ -613,15 +613,36 @@ TEST(ServerCoreTrust, KeysASendspinCppSessionWithItsPairingPsk) {
     }
 }
 
-/// A provider whose saves wait for release(), and fail when told to
-class HeldProvider : public MemoryProvider {
+/// A provider whose first saves succeed or fail as scripted; every later save succeeds
+class ScriptedProvider : public MemoryProvider {
 public:
+    explicit ScriptedProvider(std::vector<bool> accepted = {}) : accepted_(std::move(accepted)) {}
+
+    bool save_blob(const std::string& key, const uint8_t* data, size_t len) override {
+        const auto index = static_cast<size_t>(this->saves);
+        if (index < this->accepted_.size() && !this->accepted_[index]) {
+            ++this->saves;
+            return false;
+        }
+        return MemoryProvider::save_blob(key, data, len);
+    }
+
+private:
+    std::vector<bool> accepted_;
+};
+
+/// A provider whose saves wait for release(), then succeed or fail as scripted, and fail when told
+/// to
+class HeldProvider : public ScriptedProvider {
+public:
+    using ScriptedProvider::ScriptedProvider;
+
     bool save_blob(const std::string& key, const uint8_t* data, size_t len) override {
         std::unique_lock<std::mutex> lock(this->mutex_);
         this->changed_.wait(lock, [this] { return this->released_ > 0; });
         --this->released_;
         lock.unlock();
-        return MemoryProvider::save_blob(key, data, len);
+        return ScriptedProvider::save_blob(key, data, len);
     }
 
     /// Lets count saves through
@@ -743,8 +764,8 @@ TEST(ServerCoreTrust, HoldsOneLongTermPskChangePerClient) {
         ASSERT_NO_FATAL_FAILURE(client.activate(player_hello("New")));
         core.on_core(
             [&] { core.core->set_approval(id, sendspin::server::ApprovalScope::PLAYBACK); });
-        // The pairing's, the name's, the approval's, and for a failure the restoring save and its
-        // retry at shutdown
+        // The pairing's, the name's, the approval's, then the pairing's again for a durable save,
+        // or the restoring save and its retry at shutdown for a failure
         provider.release(row.refuse_save ? 5 : 4);
         EXPECT_EQ(done.get_future().get(), !row.refuse_save);
         const ClientRecord record = core.on_core([&] { return *core.core->records_.find(id); });
@@ -797,24 +818,6 @@ TEST(ServerCoreTrust, FinishesASaveTheCoreDidNotOutlive) {
         }
     }
 }
-
-/// A provider whose first saves succeed or fail as scripted; every later save succeeds
-class ScriptedProvider : public MemoryProvider {
-public:
-    explicit ScriptedProvider(std::vector<bool> accepted) : accepted_(std::move(accepted)) {}
-
-    bool save_blob(const std::string& key, const uint8_t* data, size_t len) override {
-        const auto index = static_cast<size_t>(this->saves);
-        if (index < this->accepted_.size() && !this->accepted_[index]) {
-            ++this->saves;
-            return false;
-        }
-        return MemoryProvider::save_blob(key, data, len);
-    }
-
-private:
-    std::vector<bool> accepted_;
-};
 
 /// A provider whose saves wait for release(): the first lands but its commit is refused, and the
 /// second is refused
@@ -980,6 +983,138 @@ TEST(ServerCoreTrust, RetriesAPutBackMadeAtShutdown) {
     const ClientRecord* loaded = restored.find(id);
     ASSERT_NE(loaded, nullptr);
     EXPECT_EQ(*loaded, approved);
+}
+
+// A record saved while a long-term PSK's save is in flight leaves that PSK out, so a refused PSK
+// save never reaches disk through a save queued behind it (pairing.md "server/pair-finalize"),
+// even when the put-back's write is refused too. Meanwhile the client connects under a new name,
+// which saves its record, the operator approves it, or both. The change is durable only once a
+// save of it lands with none made meanwhile, so a refused save of it again puts it back. Control:
+// a PSK save that lands is saved again behind them, and durable.
+TEST(ServerCoreTrust, KeepsAnUnconfirmedLongTermPskOffDisk) {
+    ASSERT_EQ(noise_init_framework(), NOISE_ERROR_NONE);
+    using sendspin::server::ApprovalScope;
+    using sendspin::server::ServerCore;
+    // Each row's connection is the same client
+    const Identity identity = *Identity::generate();
+    const std::string a = identity.peer_id();
+    const std::string b = Identity::generate()->peer_id();
+    const Psk psk = psk_of(0xF0);
+    ClientRecord named_a{a, std::nullopt};
+    named_a.name = "Old";
+    ClientRecord paired_b{b, std::nullopt};
+    paired_b.long_term_psk = psk_of(0xF1);
+    const auto renamed = [&](std::optional<ApprovalScope> approval, std::optional<Psk> long_term) {
+        ClientRecord record{a, approval};
+        record.name = "New";
+        record.long_term_psk = long_term;
+        return record;
+    };
+    ClientRecord approved_a = named_a;
+    approved_a.approval = ApprovalScope::PLAYBACK;
+    struct Row {
+        const char* name;
+        /// Saved in slots 0, 1 and so on before the start
+        std::vector<ClientRecord> stored;
+        /// The client connects under the name "New" while the PSK is being saved
+        bool connect;
+        std::function<void(ServerCore&)> meanwhile;
+        /// The outcomes of the first saves
+        std::vector<bool> accepted;
+        /// What the next start loads
+        std::vector<ClientRecord> restored;
+        /// The change's outcome
+        bool durable;
+    };
+    const auto approve = [&](ServerCore& core) { core.set_approval(a, ApprovalScope::PLAYBACK); };
+    const Row rows[] = {
+        {"Control: the PSK saved, a name and an approval behind it",
+         {named_a},
+         true,
+         approve,
+         {},
+         {renamed(ApprovalScope::PLAYBACK, psk)},
+         true},
+        {"Control: the PSK saved for a new record, a name behind it",
+         {},
+         true,
+         nullptr,
+         {},
+         {renamed(std::nullopt, psk)},
+         true},
+        // The PSK's, the name's, the approval's, the put-back's and its retry at shutdown
+        {"the PSK's save refused, a name's and an approval's saved, the put-back's refused",
+         {named_a},
+         true,
+         approve,
+         {false, true, true, false, false},
+         {renamed(ApprovalScope::PLAYBACK, std::nullopt)},
+         false},
+        // Nothing is saved meanwhile for a record the change created, so the erase that puts it
+        // back is the second save; a name saved second would leave the erase and its retry refused
+        {"the PSK's save for a new record refused, a name meanwhile",
+         {},
+         true,
+         nullptr,
+         {false, true, false, false},
+         {},
+         false},
+        // The PSK's, the approval's, the PSK's again, refused, and the put-back's
+        {"the PSK's saved, an approval's behind it, the PSK's again refused",
+         {named_a},
+         false,
+         approve,
+         {true, true, false},
+         {approved_a},
+         false},
+        // The approval's save, refused, goes again ahead of b's erase
+        {"the PSK's and an approval's saves refused, the approval's written again",
+         {named_a, paired_b},
+         false,
+         [&](ServerCore& core) {
+             approve(core);
+             core.unpair(b);
+         },
+         {false, false, true, true, false, false},
+         {approved_a},
+         false},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        HeldProvider provider(row.accepted);
+        for (size_t slot = 0; slot < row.stored.size(); ++slot) {
+            provider.blobs[persistence_keys::client_record_key(slot)] =
+                record_blob(row.stored[slot]);
+        }
+        {
+            Core core(load_records(provider), &provider);
+            std::promise<bool> done;
+            core.on_core([&] {
+                core.core->store_long_term_psk(
+                    a, psk, [&](bool saved, const auto& /*unsaved*/) { done.set_value(saved); });
+            });
+            RawClient client(sendspin::server::CipherSuite::CHACHAPOLY_SHA256,
+                             *Identity::from_private_bytes(identity.private_bytes));
+            if (row.connect) {
+                core.dial(client.url());
+                ASSERT_NO_FATAL_FAILURE(client.activate(player_hello("New")));
+            }
+            if (row.meanwhile) {
+                core.on_core([&] { row.meanwhile(*core.core); });
+            }
+            constexpr int EVERY_SAVE = 8;
+            provider.release(EVERY_SAVE);
+            // The outcome before the core stops
+            EXPECT_EQ(done.get_future().get(), row.durable);
+        }
+        const sendspin::server::ClientRecords restored = load_records(provider);
+        EXPECT_EQ(restored.size(), row.restored.size());
+        for (const ClientRecord& expected : row.restored) {
+            const ClientRecord* loaded = restored.find(expected.client_id);
+            ASSERT_NE(loaded, nullptr);
+            EXPECT_EQ(*loaded, expected);
+        }
+    }
 }
 
 // An attempt whose client stops answering mid-round (here after server/pair-auth) ends as
