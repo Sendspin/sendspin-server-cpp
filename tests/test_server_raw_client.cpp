@@ -15,14 +15,17 @@
 /// @file test_server_raw_client.cpp
 /// @brief SendspinServer end to end against the raw test client: the handshake in both suites,
 /// activation and time sync, and what the host is told when a client breaks the rules, says
-/// goodbye or goes away at each step, including the handshake backoff.
+/// goodbye or goes away at each step, including the goodbye's reason and the handshake backoff;
+/// and the trace of completed writes (ServerConfig::trace_writes).
 
 #include "fragmentation.h"
 #include "messages.h"
 #include "raw_client.h"
+#include "raw_roles.h"
 #include "session.h"
 #include "test_recorder.h"
 #include "transport.h"
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <boost/asio/error.hpp>
 #include <boost/asio/io_context.hpp>
@@ -34,8 +37,12 @@
 
 #include <sendspin/server/server.h>
 
+#include <algorithm>
+#include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -44,6 +51,7 @@
 namespace {
 
 using sendspin::server::CipherSuite;
+using sendspin::server::ClientDisconnect;
 using sendspin::server::DisconnectReason;
 using sendspin::server::ErrorKind;
 using sendspin::server::GoodbyeReason;
@@ -54,12 +62,17 @@ using sendspin::server::test::Bytes;
 using sendspin::server::test::bytes_of;
 using sendspin::server::test::client_goodbye_json;
 using sendspin::server::test::client_hello_json;
+using sendspin::server::test::client_id_of;
 using sendspin::server::test::client_time_json;
+using sendspin::server::test::connect;
+using sendspin::server::test::hello;
 using sendspin::server::test::LocalServer;
+using sendspin::server::test::next;
 using sendspin::server::test::NoiseResponder;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::ReceivedMessage;
 using sendspin::server::test::text_of;
+namespace wire = sendspin::server::test::wire;
 
 ServerConfig test_config() {
     ServerConfig config = sendspin::server::test::local_config();
@@ -533,6 +546,35 @@ TEST(ServerRawClient, ReportsAGoodbyeFollowedByAnImmediateClose) {
     }
 }
 
+// messaging.md "client/goodbye": the reason reaches the host with the disconnect; one this
+// server does not recognize is reported as none. Control: a drop without a goodbye.
+TEST(ServerDisconnect, ReportsTheGoodbyeReason) {
+    LocalServer s;
+    ASSERT_EQ(s.start(), StartResult::OK);
+    RawClient client;
+    const std::string id = client_id_of(client);
+    const std::string reasons[] = {"another_server", "moving", ""};
+    for (size_t i = 0; i < std::size(reasons); ++i) {
+        SCOPED_TRACE(reasons[i]);
+        ASSERT_NO_FATAL_FAILURE(connect(s.server, client, hello("Leaving", {}, true)));
+        next(client, "group/update");
+        if (reasons[i].empty()) {
+            client.drop();
+        } else {
+            client.send_json(sendspin::server::test::client_goodbye_json(reasons[i]));
+        }
+        s.recorder.wait_for_disconnects(i + 1);
+    }
+    const std::vector<ClientDisconnect> disconnects = s.recorder.disconnects();
+    ASSERT_EQ(disconnects.size(), 3U);
+    EXPECT_EQ(disconnects[0].reason, DisconnectReason::GOODBYE);
+    EXPECT_EQ(disconnects[0].goodbye_reason, GoodbyeReason::ANOTHER_SERVER);
+    EXPECT_EQ(disconnects[1].reason, DisconnectReason::GOODBYE);
+    EXPECT_FALSE(disconnects[1].goodbye_reason);
+    EXPECT_EQ(disconnects[2].reason, DisconnectReason::CONNECTION_LOST);
+    EXPECT_FALSE(disconnects[2].goodbye_reason);
+}
+
 // ==============================================================================
 // A client that breaks the rules once active
 // ==============================================================================
@@ -662,4 +704,91 @@ TEST(ServerRawClient, DefersTheNextDialAfterAFailedHandshake) {
     }
 }
 
+// ==============================================================================
+// Message trace (ServerConfig::trace_writes)
+// ==============================================================================
+
+// ServerConfig::trace_writes: each completed write is traced after the messages it carried, and
+// a server/time's comes before a client/time the client sent once it had read that reply, which is
+// what lets a host place what it received against what was on the wire; without the option the
+// trace has no such entry
+TEST(ServerTrace, TracesCompletedWritesOnlyWhenAsked) {
+    struct Seen {
+        bool written;
+        bool inbound;
+        std::string type;
+        bool empty;
+    };
+    for (const bool trace_writes : {false, true}) {
+        SCOPED_TRACE(trace_writes ? "trace_writes" : "Control: trace_writes off");
+        std::mutex mutex;
+        std::condition_variable changed;
+        std::vector<Seen> seen;
+        LocalServer s;
+        ServerConfig config = sendspin::server::test::local_config();
+        config.approve_all_clients = true;
+        config.trace_writes = trace_writes;
+        config.trace = [&](const sendspin::server::TracedMessage& message) {
+            std::string message_type;
+            if (!message.plaintext.empty() &&
+                (!message.binary || message.plaintext.front() == wire::JSON_ID)) {
+                const size_t offset = message.binary ? 1 : 0;
+                JsonDocument doc;
+                if (deserializeJson(doc, message.plaintext.data() + offset,
+                                    message.plaintext.size() - offset) ==
+                    DeserializationError::Ok) {
+                    message_type = doc["type"].as<std::string>();
+                }
+            }
+            {
+                const std::lock_guard<std::mutex> lock(mutex);
+                seen.push_back({message.written,
+                                message.direction == sendspin::server::TraceDirection::INBOUND,
+                                message_type, message.plaintext.empty()});
+            }
+            changed.notify_all();
+        };
+        ASSERT_EQ(s.start(config), StartResult::OK);
+        RawClient client;
+        ASSERT_NO_FATAL_FAILURE(connect(s.server, client, hello("Timer", {"metadata@v1"}, true)));
+        next(client, "group/update");
+        client.send_json(sendspin::server::test::client_time_json(1));
+        next(client, "server/time");
+        client.send_json(sendspin::server::test::client_time_json(2));
+
+        // Waits with no timeout for the second request; a regression hangs into the suite watchdog
+        std::unique_lock<std::mutex> lock(mutex);
+        changed.wait(lock, [&] {
+            return std::count_if(seen.begin(), seen.end(), [](const Seen& entry) {
+                       return entry.inbound && entry.type == "client/time";
+                   }) == 2;
+        });
+        const auto second_request =
+            std::find_if(
+                seen.rbegin(), seen.rend(),
+                [](const Seen& entry) { return entry.inbound && entry.type == "client/time"; })
+                .base() -
+            1;
+        const auto reply = std::find_if(seen.begin(), seen.end(), [](const Seen& entry) {
+            return !entry.inbound && entry.type == "server/time";
+        });
+        ASSERT_LT(reply, second_request);
+        const auto reply_written =
+            std::find_if(reply + 1, seen.end(), [](const Seen& entry) { return entry.written; });
+        const size_t writes = static_cast<size_t>(std::count_if(
+            seen.begin(), seen.end(), [](const Seen& entry) { return entry.written; }));
+        if (!trace_writes) {
+            EXPECT_EQ(writes, 0U);
+            continue;
+        }
+        // A time reply ends its write: no outbound message is taken between the reply and its
+        // write
+        ASSERT_NE(reply_written, seen.end());
+        EXPECT_TRUE(std::none_of(reply + 1, reply_written,
+                                 [](const Seen& entry) { return !entry.inbound; }));
+        EXPECT_LT(reply_written, second_request);
+        EXPECT_FALSE(reply_written->inbound);
+        EXPECT_TRUE(reply_written->empty);
+    }
+}
 }  // namespace
