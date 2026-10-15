@@ -44,13 +44,14 @@ inline void secure_zero(void* p, size_t n) {
     }
 }
 
-/// @brief Zeros a byte vector's contents and the first `bytes` bytes of its storage, spare capacity
-/// included, with secure_zero(), so what longer contents left there is wiped too; its size is
+/// @brief Zeros the first `bytes` bytes of a byte vector's storage, up to its capacity, with
+/// secure_zero(), so what longer contents left in its spare capacity is wiped too; its size is
 /// unchanged
 inline void secure_zero_storage(std::vector<uint8_t>& storage, size_t bytes) {
     const size_t size = storage.size();
-    storage.resize(std::max(size, std::min(bytes, storage.capacity())));
-    secure_zero(storage.data(), storage.size());
+    const size_t reach = std::min(bytes, storage.capacity());
+    storage.resize(std::max(size, reach));
+    secure_zero(storage.data(), reach);
     storage.resize(size);
 }
 
