@@ -1226,6 +1226,55 @@ TEST_P(SessionTest, WipesTheSecretOfAPairingMessageWhetherOrNotItPassesValidatio
     }
 }
 
+// A client/pair-finalize whose tag fails leaves no PSK in the decrypted message's buffer: AES-GCM
+// decrypts in place before its tag check (ChaChaPoly checks first), and the buffer is wiped
+TEST_P(SessionTest, WipesAPairingMessageWhoseTagFails) {
+    const std::string psk = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
+    Harness h(GetParam());
+    ASSERT_NO_FATAL_FAILURE(h.activate());
+    Bytes message = h.client.encrypt_json(
+        R"({"type":"client/pair-finalize","payload":{"long_term_psk":")" + psk + R"("}})");
+    message.back() ^= 0x01;
+    h.send(message);
+    EXPECT_EQ(h.session.end(), SessionEnd::DECRYPT_FAILED);
+    EXPECT_FALSE(holds_to_capacity(h.session.scratch_, psk));
+}
+
+// A session that ends while a pairing message's first fragment is pending leaves its PSK in
+// neither buffer, whether the host closes it or the next message fails to decrypt. The scan finds
+// the PSK before the end: the Control.
+TEST_P(SessionTest, WipesAPendingPairingFragmentAtTheEnd) {
+    using sendspin::server::FRAGMENT_FLAG_FIRST;
+    const std::string psk = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY";
+    struct Case {
+        const char* name;
+        std::function<void(Harness&)> end_session;
+        SessionEnd end;
+    };
+    const std::vector<Case> cases{
+        {"closed by the host", [](Harness& h) { h.session.close_by_host(); },
+         SessionEnd::CLOSED_BY_HOST},
+        {"a message that fails to decrypt", [](Harness& h) { h.send(Bytes(32, 0)); },
+         SessionEnd::DECRYPT_FAILED},
+    };
+    for (const Case& c : cases) {
+        SCOPED_TRACE(c.name);
+        Harness h(GetParam());
+        ASSERT_NO_FATAL_FAILURE(h.activate());
+        Bytes first{sendspin::server::MESSAGE_ID_JSON};
+        const Bytes head =
+            bytes_of(R"({"type":"client/pair-finalize","payload":{"long_term_psk":")" + psk);
+        first.insert(first.end(), head.begin(), head.end());
+        h.send(h.fragment(FRAGMENT_FLAG_FIRST, first));
+        EXPECT_TRUE(holds_to_capacity(h.session.scratch_, psk));
+        EXPECT_TRUE(holds_to_capacity(h.session.reassembler_.buffer_, psk));
+        c.end_session(h);
+        EXPECT_EQ(h.session.end(), c.end);
+        EXPECT_FALSE(holds_to_capacity(h.session.scratch_, psk));
+        EXPECT_FALSE(holds_to_capacity(h.session.reassembler_.buffer_, psk));
+    }
+}
+
 // A wipe reaches the reassembly buffer's storage past a shorter message, where a longer one
 // written since the last wipe left its bytes. Before the wipe the scan finds them: the Control.
 TEST(Reassembler, WipesTheStoragePastTheMessage) {

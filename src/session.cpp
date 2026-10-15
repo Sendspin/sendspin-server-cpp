@@ -57,6 +57,10 @@ Session::Session(const Identity& identity, const SessionSettings& settings, Sess
       queues_(settings.queue_caps),
       credentials_(credentials) {}
 
+Session::~Session() {
+    this->wipe_scratch();
+}
+
 void Session::start(int64_t now_us) {
     this->deadline_us_ = now_us + this->settings_.step_timeout_us;
 }
@@ -205,6 +209,9 @@ void Session::on_transport_message(MessageKind kind, std::span<const uint8_t> pa
         this->finish(SessionEnd::CLEARTEXT_IN_TRANSPORT);
         return;
     }
+    // Emptied first so a growth copies nothing it would overwrite
+    this->scratch_.clear();
+    secure_reserve(this->scratch_, payload.size(), this->scratch_written_);
     this->scratch_.assign(payload.begin(), payload.end());
     this->scratch_written_ = std::max(this->scratch_written_, this->scratch_.size());
     if (!this->ciphers_ || !this->ciphers_->decrypt(this->scratch_)) {
@@ -233,12 +240,9 @@ void Session::on_transport_message(MessageKind kind, std::span<const uint8_t> pa
             }
             return;
         case Reassembler::Outcome::MALFORMED:
-            // The reassembler wiped its buffer; the fragment here may carry part of a secret too
-            this->wipe_scratch();
             this->finish(SessionEnd::MALFORMED_FRAGMENTS);
             return;
         case Reassembler::Outcome::TOO_LARGE:
-            this->wipe_scratch();
             this->finish(SessionEnd::MESSAGE_TOO_LARGE);
             return;
     }
@@ -1000,6 +1004,10 @@ void Session::finish(SessionEnd end) {
     }
     this->end_ = end;
     this->phase_ = SessionPhase::CLOSED;
+    // A pairing message's plaintext may be left: a fragment pending, or a message AES-GCM decrypted
+    // in place before its tag check failed
+    this->wipe_scratch();
+    this->reassembler_.wipe();
     this->initiator_.reset();
     this->rekeys_.clear();
     // A re-handshake that completed has no frozen activation left to write

@@ -131,6 +131,12 @@ public:
     /// session
     Session(const Identity& identity, const SessionSettings& settings,
             SessionTrace* trace = nullptr, CredentialSource* credentials = nullptr);
+    /// @brief Wipes the decrypted message's buffer
+    ~Session();
+    Session(const Session&) = delete;
+    Session& operator=(const Session&) = delete;
+    Session(Session&&) = delete;
+    Session& operator=(Session&&) = delete;
 
     /// @brief Starts the AWAIT_CLIENT_INIT timeout once the transport is connected. Called once,
     /// before anything else.
