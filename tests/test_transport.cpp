@@ -18,6 +18,7 @@
 
 #include "clock.h"
 #include "profile.h"
+#include "test_ports.h"
 #include "transport.h"
 #include "transport_asio.h"
 #include <arpa/inet.h>
@@ -2109,13 +2110,14 @@ TEST_F(TransportTest, EachAddressOfADialGetsItsOwnConnectTimeout) {
 
 TEST_F(TransportTest, ARefusedAddressMovesTheDialToTheNextOfAnotherFamily) {
     // Nothing listens on 127.0.0.1 at the IPv6 listener's port
+    const sendspin::server::test::UnlistenedPort unlistened;
     Listener listener(this->loop, this->settings, [this](Connection connection) {
         this->accepted.push_back(std::move(connection));
     });
-    ASSERT_TRUE(listener.listen("::1", 0));
+    ASSERT_TRUE(listener.listen("::1", unlistened.port()));
     DialTarget target;
     target.host = "127.0.0.1";
-    target.port = listener.port();
+    target.port = unlistened.port();
     target.path = "/sendspin";
     target.addresses = {"127.0.0.1", "::1"};
     const std::optional<Connection> connection = this->dial_and_wait(target);

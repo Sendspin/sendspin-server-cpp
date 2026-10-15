@@ -112,8 +112,9 @@ void connect_fail_and_dial(SendspinServer& server, Recorder& recorder) {
     failing.drop();
     recorder.wait_for(error_entry(ErrorKind::HANDSHAKE_FAILED));
 
+    const sendspin::server::test::UnlistenedPort unlistened;
     const std::string unreachable =
-        "ws://127.0.0.1:" + std::to_string(sendspin::server::test::free_port()) + "/sendspin";
+        "ws://127.0.0.1:" + std::to_string(unlistened.port()) + "/sendspin";
     ASSERT_TRUE(server.connect_url(unreachable));
     EXPECT_EQ(recorder.wait_for_error(unreachable).kind, ErrorKind::DIAL_FAILED);
 }
