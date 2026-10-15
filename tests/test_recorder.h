@@ -13,10 +13,12 @@
 // limitations under the License.
 
 /// @file test_recorder.h
-/// @brief A persistence provider and a recording listener for tests that run SendspinServer
+/// @brief A persistence provider, a recording listener and a server started with them, for tests
+/// that run SendspinServer
 
 #pragma once
 
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 
@@ -251,7 +253,8 @@ public:
     /// For ServerConfig::trace
     void trace(const TracedMessage& message) {
         std::string type = "binary";
-        if (!message.plaintext.empty() && (!message.binary || message.plaintext.front() == 0)) {
+        if (!message.plaintext.empty() &&
+            (!message.binary || message.plaintext.front() == wire::JSON_ID)) {
             const size_t offset = message.binary ? 1 : 0;
             JsonDocument doc;
             if (deserializeJson(doc, message.plaintext.data() + offset,
@@ -353,6 +356,21 @@ private:
     std::vector<std::pair<DrainId, DrainOutcome>> drains_;
     std::vector<ClientDisconnect> disconnects_;
     std::vector<std::pair<TransportCommand, CommandArgs>> commands_;
+};
+
+/// A SendspinServer reporting to a recorder, with an in-memory provider, started on local_config()
+/// or a config built on it. A fixture whose config's callbacks reach its own members holds its own
+/// server, declared after them: stop() returns before the callbacks end, and only the server's
+/// destructor waits for them, after a derived fixture's members are gone.
+class LocalServer {
+public:
+    StartResult start(const ServerConfig& config = local_config()) {
+        return this->server.start(config, &this->provider, &this->recorder);
+    }
+
+    MemoryProvider provider;
+    Recorder recorder;
+    SendspinServer server;
 };
 
 }  // namespace sendspin::server::test

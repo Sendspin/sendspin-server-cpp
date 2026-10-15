@@ -25,6 +25,7 @@
 #include "fragmentation.h"
 #include "image_codec.h"
 #include "messages.h"
+#include "wire_messages.h"
 #include <gtest/gtest.h>
 #include <stb_image.h>
 #include <stb_image_write.h>
@@ -61,6 +62,7 @@ using sendspin::server::EncodedImage;
 using sendspin::server::ImageFormat;
 using sendspin::server::Placement;
 using sendspin::server::SourceImage;
+namespace wire = sendspin::server::test::wire;
 
 // ==============================================================================
 // Letterbox
@@ -749,7 +751,7 @@ public:
 
     std::string describe(const sendspin::server::OutboundPlaintext& message) const {
         const std::vector<uint8_t>& bytes = message.bytes;
-        if (bytes[0] == sendspin::server::MESSAGE_ID_JSON) {
+        if (bytes[0] == wire::JSON_ID) {
             const std::string json(bytes.begin() + 1, bytes.end());
             if (json.find("stream/end") != std::string::npos) {
                 return "end";
@@ -757,19 +759,13 @@ public:
             const size_t channels = json.find("\"channels\":");
             return "start " + json.substr(channels + 11, json.size() - channels - 11 - 3);
         }
-        const int channel = bytes[0] - sendspin::server::MESSAGE_ID_ARTWORK;
-        if (bytes[1] == sendspin::server::ARTWORK_FLAG_CANCEL) {
+        const int channel = bytes[0] - wire::FIRST_ARTWORK_ID;
+        if (bytes[wire::ARTWORK_FLAGS_AT] == wire::ARTWORK_CANCEL) {
             return "cancel " + std::to_string(channel);
         }
-        if (bytes[1] == sendspin::server::ARTWORK_FLAG_ANNOUNCE) {
-            uint64_t ts = 0;
-            uint32_t size = 0;
-            for (size_t i = 2; i < 10; ++i) {
-                ts = (ts << 8) | bytes[i];
-            }
-            for (size_t i = 10; i < 14; ++i) {
-                size = (size << 8) | bytes[i];
-            }
+        if (bytes[wire::ARTWORK_FLAGS_AT] == wire::ARTWORK_ANNOUNCE) {
+            const int64_t ts = wire::timestamp_at(bytes, wire::ARTWORK_TIMESTAMP_AT);
+            const auto size = wire::field_at<uint32_t>(bytes, wire::ARTWORK_TOTAL_SIZE_AT);
             return "announce " + std::to_string(channel) + " @" + std::to_string(ts) + " " +
                    std::to_string(size);
         }

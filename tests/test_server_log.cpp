@@ -47,7 +47,7 @@ using sendspin::server::SendspinServer;
 using sendspin::server::ServerConfig;
 using sendspin::server::StartResult;
 using sendspin::server::test::client_goodbye_json;
-using sendspin::server::test::MemoryProvider;
+using sendspin::server::test::LocalServer;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
 
@@ -141,11 +141,9 @@ TEST(ServerLog, FiltersByLevel) {
         ServerConfig config = sendspin::server::test::local_config();
         config.log = log.sink();
         config.log_level = row.level;
-        MemoryProvider provider;
-        Recorder recorder;
-        SendspinServer server;
-        ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-        ASSERT_NO_FATAL_FAILURE(connect_fail_and_dial(server, recorder));
+        LocalServer s;
+        ASSERT_EQ(s.start(config), StartResult::OK);
+        ASSERT_NO_FATAL_FAILURE(connect_fail_and_dial(s.server, s.recorder));
         EXPECT_EQ(log.count(LogLevel::ERROR), 0U);
         EXPECT_EQ(log.count(LogLevel::WARN), row.warnings);
         EXPECT_EQ(log.count(LogLevel::INFO), row.infos);
@@ -181,18 +179,16 @@ TEST(ServerLog, LogsNoKeyMaterial) {
     config.log = log.sink();
     config.log_level = LogLevel::INFO;
     config.approve_all_clients = true;
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
+    LocalServer s;
+    ASSERT_EQ(s.start(config), StartResult::OK);
 
     const std::string hello = sendspin::server::test::player_hello_json(
         "Player", R"([{"codec":"pcm","sample_rate":48000,"channels":2,"bit_depth":16}])", 200000);
     RawClient accepted;
     RawClient dialed;
-    ASSERT_EQ(accepted.dial(server.listen_port()), 101U);
+    ASSERT_EQ(accepted.dial(s.server.listen_port()), 101U);
     ASSERT_NO_FATAL_FAILURE(accepted.complete_handshake());
-    ASSERT_TRUE(server.connect_url(dialed.url()));
+    ASSERT_TRUE(s.server.connect_url(dialed.url()));
     ASSERT_NO_FATAL_FAILURE(dialed.handshake());
     for (RawClient* client : {&accepted, &dialed}) {
         client->send_json(hello);
@@ -202,16 +198,16 @@ TEST(ServerLog, LogsNoKeyMaterial) {
         client->send_json(sendspin::server::test::client_time_json(1));
         EXPECT_NE(client->receive_until("server/time"), "");
         client->send_json(client_goodbye_json("shutdown"));
-        recorder.wait_for(disconnected(client->noise.identity().peer_id()));
+        s.recorder.wait_for(disconnected(client->noise.identity().peer_id()));
     }
 
     const std::vector<uint8_t>& server_key =
-        provider.blobs.at(sendspin::server::persistence_keys::SERVER_KEY);
+        s.provider.blobs.at(sendspin::server::persistence_keys::SERVER_KEY);
     std::array<uint8_t, sendspin::server::X25519_KEY_SIZE> server_private{};
     std::copy(server_key.begin(), server_key.end(), server_private.begin());
     const std::optional<Identity> server_identity = Identity::from_private_bytes(server_private);
     ASSERT_TRUE(server_identity);
-    std::vector<std::string> secrets{server.server_id()};
+    std::vector<std::string> secrets{s.server.server_id()};
     const auto add = [&secrets](const uint8_t* data, size_t len) {
         const std::vector<std::string> forms = encodings(data, len);
         secrets.insert(secrets.end(), forms.begin(), forms.end());

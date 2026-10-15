@@ -24,6 +24,7 @@
 #include "raw_client.h"
 #include "session.h"
 #include "trust_fixtures.h"
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 #include <noise/protocol.h>
@@ -55,6 +56,7 @@ using sendspin::server::test::client_time_json;
 using sendspin::server::test::NoiseResponder;
 using sendspin::server::test::psk_of;
 using sendspin::server::test::text_of;
+namespace wire = sendspin::server::test::wire;
 
 constexpr int64_t START_US = 1000;
 constexpr int64_t TIMEOUT_US = 5000;
@@ -148,8 +150,7 @@ public:
     std::string decrypt_json(const OutboundMessage& message) {
         EXPECT_EQ(message.kind, MessageKind::BINARY);
         const std::optional<Bytes> plaintext = this->client.decrypt(message.bytes);
-        if (!plaintext || plaintext->empty() ||
-            plaintext->front() != sendspin::server::MESSAGE_ID_JSON) {
+        if (!plaintext || plaintext->empty() || plaintext->front() != wire::JSON_ID) {
             ADD_FAILURE() << "not an encrypted JSON message";
             return {};
         }
@@ -216,7 +217,7 @@ TEST_P(SessionTest, CompletesTheHandshakeAndTheHelloExchange) {
     ASSERT_EQ(sent[0].kind, MessageKind::BINARY);
     const std::optional<Bytes> hello = h.client.decrypt(sent[0].bytes);
     ASSERT_TRUE(hello);
-    ASSERT_EQ(hello->front(), sendspin::server::MESSAGE_ID_JSON);
+    ASSERT_EQ(hello->front(), wire::JSON_ID);
     EXPECT_EQ(std::string(hello->begin() + 1, hello->end()),
               sendspin::server::build_server_hello({"Test server", {}, {}}));
 
@@ -818,7 +819,7 @@ private:
     void record(bool outbound, MessageKind kind, std::span<const uint8_t> plaintext,
                 int64_t stamp_us) {
         if (kind == MessageKind::BINARY) {
-            EXPECT_EQ(plaintext.front(), sendspin::server::MESSAGE_ID_JSON);
+            EXPECT_EQ(plaintext.front(), wire::JSON_ID);
             plaintext = plaintext.subspan(1);
         }
         this->entries.push_back({outbound, kind, {plaintext.begin(), plaintext.end()}, stamp_us});

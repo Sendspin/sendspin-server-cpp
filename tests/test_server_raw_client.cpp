@@ -47,7 +47,6 @@ using sendspin::server::CipherSuite;
 using sendspin::server::DisconnectReason;
 using sendspin::server::ErrorKind;
 using sendspin::server::GoodbyeReason;
-using sendspin::server::SendspinServer;
 using sendspin::server::ServerConfig;
 using sendspin::server::ServerError;
 using sendspin::server::StartResult;
@@ -56,11 +55,10 @@ using sendspin::server::test::bytes_of;
 using sendspin::server::test::client_goodbye_json;
 using sendspin::server::test::client_hello_json;
 using sendspin::server::test::client_time_json;
-using sendspin::server::test::MemoryProvider;
+using sendspin::server::test::LocalServer;
 using sendspin::server::test::NoiseResponder;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::ReceivedMessage;
-using sendspin::server::test::Recorder;
 using sendspin::server::test::text_of;
 
 ServerConfig test_config() {
@@ -90,15 +88,11 @@ std::string disconnected(const std::string& client_id, DisconnectReason reason) 
 }
 
 /// A started server with a recording listener
-class RunningServer {
+class RunningServer : public LocalServer {
 public:
     explicit RunningServer(const ServerConfig& config = test_config()) {
-        EXPECT_EQ(this->server.start(config, &this->provider, &this->recorder), StartResult::OK);
+        EXPECT_EQ(this->start(config), StartResult::OK);
     }
-
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
 };
 
 CipherSuite other_suite(CipherSuite suite) {

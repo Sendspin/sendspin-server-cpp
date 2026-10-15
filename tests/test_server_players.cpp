@@ -25,6 +25,7 @@
 #include "sched/constants.h"
 #include "test_ports.h"
 #include "test_recorder.h"
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 
@@ -83,6 +84,7 @@ using sendspin::server::test::Signal;
 using sendspin::server::test::Sink;
 using Bytes = std::vector<uint8_t>;
 using Codec = sendspin::SendspinCodecFormat;
+namespace wire = sendspin::server::test::wire;
 
 constexpr uint32_t RATE = 48000;
 constexpr uint32_t CELL = RATE / 50;
@@ -226,7 +228,8 @@ public:
     /// On the dispatch thread
     void on_message(const TracedMessage& message) {
         const bool chunk = message.direction == TraceDirection::OUTBOUND && message.binary &&
-                           message.plaintext.size() > 13 && message.plaintext[0] == 4;
+                           message.plaintext.size() > wire::AUDIO_CHUNK_HEADER &&
+                           message.plaintext[0] == wire::AUDIO_CHUNK_ID;
         if (!chunk) {
             this->recorder_.trace(message);
         }
@@ -235,7 +238,7 @@ public:
             const size_t offset = message.binary ? 1 : 0;
             JsonDocument doc;
             if (message.plaintext.size() > offset &&
-                (!message.binary || message.plaintext.front() == 0) &&
+                (!message.binary || message.plaintext.front() == wire::JSON_ID) &&
                 deserializeJson(doc, message.plaintext.data() + offset,
                                 message.plaintext.size() - offset) == DeserializationError::Ok &&
                 doc["type"] == "client/state") {
@@ -249,7 +252,7 @@ public:
             return;
         }
         const std::lock_guard<std::mutex> lock(this->mutex);
-        if (message.plaintext[0] == 0) {
+        if (message.plaintext[0] == wire::JSON_ID) {
             JsonDocument doc;
             if (deserializeJson(doc, message.plaintext.data() + 1, message.plaintext.size() - 1) !=
                 DeserializationError::Ok) {
@@ -302,11 +305,9 @@ public:
         info.clears = this->clears_[message.client_id];
         info.trigger_us = this->triggers_[message.client_id];
         info.rate = this->rates_[message.client_id];
-        for (size_t i = 1; i < 9; ++i) {
-            info.ts = (info.ts << 8) | message.plaintext[i];
-        }
-        const std::span<const uint8_t> payload(message.plaintext.data() + 13,
-                                               message.plaintext.size() - 13);
+        info.ts = wire::timestamp_at(message.plaintext);
+        const std::span<const uint8_t> payload =
+            wire::payload_after(message.plaintext, wire::AUDIO_CHUNK_HEADER);
         const auto reader = this->readers_.find(message.client_id);
         if (reader == this->readers_.end()) {
             info.pcm.assign(payload.begin(), payload.end());

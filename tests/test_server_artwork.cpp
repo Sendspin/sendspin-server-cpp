@@ -24,6 +24,7 @@
 #include "raw_client.h"
 #include "test_ports.h"
 #include "test_recorder.h"
+#include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 #include <stb_image_write.h>
@@ -60,9 +61,11 @@ using sendspin::server::StartResult;
 using sendspin::server::test::AlwaysReady;
 using sendspin::server::test::Bytes;
 using sendspin::server::test::client_at;
+using sendspin::server::test::LocalServer;
 using sendspin::server::test::MemoryProvider;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
+namespace wire = sendspin::server::test::wire;
 
 // ==============================================================================
 // Test images
@@ -127,7 +130,7 @@ struct Message {
     Bytes plaintext;
 
     bool json() const {
-        return this->plaintext[0] == 0;
+        return this->plaintext[0] == wire::JSON_ID;
     }
     std::string text() const {
         return {this->plaintext.begin() + 1, this->plaintext.end()};
@@ -138,30 +141,22 @@ struct Message {
         return doc["type"].as<std::string>();
     }
     int channel() const {
-        return this->plaintext[0] - 8;
+        return this->plaintext[0] - wire::FIRST_ARTWORK_ID;
     }
     bool announce() const {
-        return !this->json() && this->plaintext[1] == 2;
+        return !this->json() && this->plaintext[wire::ARTWORK_FLAGS_AT] == wire::ARTWORK_ANNOUNCE;
     }
     bool cancel() const {
-        return !this->json() && this->plaintext[1] == 1;
+        return !this->json() && this->plaintext[wire::ARTWORK_FLAGS_AT] == wire::ARTWORK_CANCEL;
     }
     bool part() const {
-        return !this->json() && this->plaintext[1] == 0;
+        return !this->json() && this->plaintext[wire::ARTWORK_FLAGS_AT] == wire::ARTWORK_PART;
     }
     int64_t timestamp() const {
-        uint64_t ts = 0;
-        for (size_t i = 2; i < 10; ++i) {
-            ts = (ts << 8) | this->plaintext[i];
-        }
-        return static_cast<int64_t>(ts);
+        return wire::timestamp_at(this->plaintext, wire::ARTWORK_TIMESTAMP_AT);
     }
     uint32_t total_size() const {
-        uint32_t size = 0;
-        for (size_t i = 10; i < 14; ++i) {
-            size = (size << 8) | this->plaintext[i];
-        }
-        return size;
+        return wire::field_at<uint32_t>(this->plaintext, wire::ARTWORK_TOTAL_SIZE_AT);
     }
 };
 
@@ -224,8 +219,8 @@ public:
             this->recorder.trace(message);
             // Outbound artwork parts, for their stamps
             if (message.direction == sendspin::server::TraceDirection::OUTBOUND && message.binary &&
-                message.plaintext.size() > 2 && message.plaintext[0] == 8 &&
-                message.plaintext[1] == 0) {
+                message.plaintext.size() > 2 && message.plaintext[0] == wire::FIRST_ARTWORK_ID &&
+                message.plaintext[wire::ARTWORK_FLAGS_AT] == wire::ARTWORK_PART) {
                 const std::lock_guard<std::mutex> lock(this->mutex);
                 this->part_stamps.push_back(message.stamp_us);
             }
@@ -611,22 +606,20 @@ constexpr std::array<uint8_t, 3> BLACK{0, 0, 0};
 // channel; unavailability ends the stream, which clears every channel, and availability brings the
 // current image back; a move shows the other group's images
 TEST(ServerArtworkInProcess, ImagesReachASendspinCppClient) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
+    LocalServer s;
     ServerConfig config = sendspin::server::test::local_config();
     config.approve_all_clients = true;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-    const GroupId group = *server.default_group();
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    const GroupId group = *s.server.default_group();
     Peer peer;
-    ASSERT_TRUE(server.connect_url(peer.url()));
+    ASSERT_TRUE(s.server.connect_url(peer.url()));
     Events& events = peer.events;
 
     // Wide red art: 64 by 32 in the middle of the album channel, black above and below
     ASSERT_TRUE(
-        server.set_artwork(group, ArtworkSource::ALBUM, png(200, 100, RED), server.now_us()));
+        s.server.set_artwork(group, ArtworkSource::ALBUM, png(200, 100, RED), s.server.now_us()));
     ASSERT_TRUE(
-        server.set_artwork(group, ArtworkSource::ARTIST, png(10, 10, BLUE), server.now_us()));
+        s.server.set_artwork(group, ArtworkSource::ARTIST, png(10, 10, BLUE), s.server.now_us()));
     peer.run_until([&] { return events.shows(0, 64, 64, RED) && events.shows(1, 40, 20, BLUE); });
     EXPECT_TRUE(near(pixel(*events.shown[0], 32, 4), BLACK));
     EXPECT_TRUE(near(pixel(*events.shown[0], 32, 59), BLACK));
@@ -636,17 +629,17 @@ TEST(ServerArtworkInProcess, ImagesReachASendspinCppClient) {
 
     // A track change
     ASSERT_TRUE(
-        server.set_artwork(group, ArtworkSource::ALBUM, png(50, 50, GREEN), server.now_us()));
+        s.server.set_artwork(group, ArtworkSource::ALBUM, png(50, 50, GREEN), s.server.now_us()));
     peer.run_until([&] { return events.shows(0, 64, 64, GREEN); });
     // Cleared, as a host does when playback stops
     const int clears = events.clears[0];
-    ASSERT_TRUE(server.set_artwork(group, ArtworkSource::ALBUM, {}, server.now_us()));
+    ASSERT_TRUE(s.server.set_artwork(group, ArtworkSource::ALBUM, {}, s.server.now_us()));
     peer.run_until([&] { return events.clears[0] > clears && !events.shown[0]; });
     EXPECT_TRUE(events.shows(1, 40, 20, BLUE));
 
     // Unavailable: the stream ends and every channel clears; available again: the images return
     ASSERT_TRUE(
-        server.set_artwork(group, ArtworkSource::ALBUM, png(50, 50, GREEN), server.now_us()));
+        s.server.set_artwork(group, ArtworkSource::ALBUM, png(50, 50, GREEN), s.server.now_us()));
     peer.run_until([&] { return events.shows(0, 64, 64, GREEN); });
     const int displays = events.displays[0];
     peer.client().set_available(false);
@@ -658,39 +651,37 @@ TEST(ServerArtworkInProcess, ImagesReachASendspinCppClient) {
     });
 
     // A move into a group with no images clears the channels; its images then show
-    const std::string id = client_at(server, peer.url());
-    const std::optional<GroupId> other = server.create_group("Other", id);
+    const std::string id = client_at(s.server, peer.url());
+    const std::optional<GroupId> other = s.server.create_group("Other", id);
     ASSERT_TRUE(other);
     peer.run_until([&] { return !events.shown[0] && !events.shown[1]; });
-    recorder.wait_for("group " + std::to_string(other->value) + " stopped");
+    s.recorder.wait_for("group " + std::to_string(other->value) + " stopped");
     ASSERT_TRUE(
-        server.set_artwork(*other, ArtworkSource::ALBUM, png(20, 20, YELLOW), server.now_us()));
+        s.server.set_artwork(*other, ArtworkSource::ALBUM, png(20, 20, YELLOW), s.server.now_us()));
     peer.run_until([&] { return events.shows(0, 64, 64, YELLOW); });
     // And back: the first group's images again
-    ASSERT_TRUE(server.move_client(id, group));
+    ASSERT_TRUE(s.server.move_client(id, group));
     peer.run_until([&] { return events.shows(0, 64, 64, GREEN) && events.shows(1, 40, 20, BLUE); });
 }
 
 // spec roles/color/v1.md with a sendspin-cpp client: the album image's palette, then the host's
 // colors scheduled ahead, which the client applies at their timestamp, and their contrast
 TEST(ServerArtworkInProcess, ColorsReachASendspinCppClientOnTheTimeline) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
+    LocalServer s;
     ServerConfig config = sendspin::server::test::local_config();
     config.approve_all_clients = true;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-    const GroupId group = *server.default_group();
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    const GroupId group = *s.server.default_group();
     Peer peer;
-    ASSERT_TRUE(server.connect_url(peer.url()));
+    ASSERT_TRUE(s.server.connect_url(peer.url()));
     Events& events = peer.events;
     // Joined with no colors: an empty state
     peer.run_until([&] { return !events.colors.empty(); });
     EXPECT_FALSE(events.colors.back().primary);
 
     // An album image's palette: its dominant color, the 5-bit bucket centre of pure red
-    const int64_t art_at = server.now_us();
-    ASSERT_TRUE(server.set_artwork(group, ArtworkSource::ALBUM, png(32, 32, RED), art_at));
+    const int64_t art_at = s.server.now_us();
+    ASSERT_TRUE(s.server.set_artwork(group, ArtworkSource::ALBUM, png(32, 32, RED), art_at));
     peer.run_until([&] { return events.colors.back().primary.has_value(); });
     EXPECT_EQ(events.colors.back().timestamp, art_at);
     EXPECT_EQ(*events.colors.back().primary, (sendspin::RgbColor{252, 4, 4}));
@@ -702,8 +693,8 @@ TEST(ServerArtworkInProcess, ColorsReachASendspinCppClientOnTheTimeline) {
     colors.primary = RgbColor{10, 20, 30};
     colors.on_light = RgbColor{255, 255, 255};
     constexpr int64_t AHEAD_US = 300000;
-    const int64_t at = server.now_us() + AHEAD_US;
-    ASSERT_TRUE(server.set_colors(group, colors, at));
+    const int64_t at = s.server.now_us() + AHEAD_US;
+    ASSERT_TRUE(s.server.set_colors(group, colors, at));
     const size_t before = events.colors.size();
     peer.run_until([&] { return events.colors.size() > before; });
     const sendspin::ServerColorStateObject& applied = events.colors.back();
@@ -720,18 +711,16 @@ TEST(ServerArtworkInProcess, ColorsReachASendspinCppClientOnTheTimeline) {
 // messaging.md "client/leave": a client that leaves its solo group stops it and its streams end,
 // the artwork stream with them; the group's next run starts them again, the images returning
 TEST(ServerArtworkInProcess, ImagesReturnWhenTheGroupALeaverStoppedPlaysAgain) {
-    MemoryProvider provider;
-    Recorder recorder;
-    SendspinServer server;
+    LocalServer s;
     ServerConfig config = sendspin::server::test::local_config();
     config.approve_all_clients = true;
-    ASSERT_EQ(server.start(config, &provider, &recorder), StartResult::OK);
-    const GroupId group = *server.default_group();
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    const GroupId group = *s.server.default_group();
     Peer peer;
-    ASSERT_TRUE(server.connect_url(peer.url()));
+    ASSERT_TRUE(s.server.connect_url(peer.url()));
     Events& events = peer.events;
     ASSERT_TRUE(
-        server.set_artwork(group, ArtworkSource::ALBUM, png(50, 50, GREEN), server.now_us()));
+        s.server.set_artwork(group, ArtworkSource::ALBUM, png(50, 50, GREEN), s.server.now_us()));
     peer.run_until([&] { return events.shows(0, 64, 64, GREEN); });
 
     peer.client().leave();
@@ -742,7 +731,7 @@ TEST(ServerArtworkInProcess, ImagesReturnWhenTheGroupALeaverStoppedPlaysAgain) {
     sendspin::server::InputOptions options;
     options.format = {48000, 2, sendspin::server::SampleFormat::S16};
     const std::shared_ptr<sendspin::server::GroupInput> input =
-        server.open_input(group, options).input;
+        s.server.open_input(group, options).input;
     ASSERT_TRUE(input);
     constexpr size_t FRAMES = 960;
     const std::vector<uint8_t> silence(FRAMES * 4, 0);
