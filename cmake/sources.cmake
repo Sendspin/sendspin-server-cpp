@@ -88,7 +88,8 @@ set(SENDSPIN_SERVER_SOURCES
     src/visualizer.cpp
     src/visualizer_analysis.cpp
     src/visualizer_stream.cpp
-    # parse_ws_url(), which every transport shares, and the address text it and browsing check
+    # parse_ws_url() and close_reason_for_errno(), which every transport shares, and the address
+    # text the URL parse and browsing check
     src/transport_url.cpp
     src/url_text.cpp
     # WebSocket framing, one write's messages as frames back to back and a dial's opening

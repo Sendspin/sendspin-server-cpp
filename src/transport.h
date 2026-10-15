@@ -55,6 +55,10 @@ enum class CloseReason : uint8_t {
     FAILED,  ///< Anything else
 };
 
+/// @brief The close reason for a socket call that failed with errno error: the peer's reset,
+/// abort or close of the TCP connection is PEER_CLOSED, any other error FAILED
+CloseReason close_reason_for_errno(int error);
+
 /// @brief WebSocket close codes the server sends (RFC 6455 section 7.4.1)
 namespace close_code {
 constexpr uint16_t NORMAL = 1000;

@@ -147,6 +147,11 @@ private:
     size_t frame_bytes_{0};
 };
 
+/// @brief Whether a received frame's opcode, FIN bit and length are allowed with no extension
+/// negotiated: a known opcode (RFC 6455 section 5.2), and a control frame final and of at most
+/// WS_CONTROL_PAYLOAD_MAX bytes (section 5.5)
+bool ws_frame_allowed(uint8_t opcode, bool fin, uint64_t payload_bytes);
+
 /// @brief A frame header as received
 struct WsFrameHeader {
     bool fin{false};

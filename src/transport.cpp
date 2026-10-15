@@ -140,13 +140,15 @@ CloseReason reason_for(const error_code& ec) {
     if (ec == beast::error::timeout) {
         return CloseReason::TIMED_OUT;
     }
-    if (ec == websocket::error::closed || ec == asio::error::eof ||
-        ec == asio::error::connection_reset || ec == asio::error::connection_aborted ||
-        ec == asio::error::broken_pipe) {
+    if (ec == websocket::error::closed || ec == asio::error::eof) {
         return CloseReason::PEER_CLOSED;
     }
     if (ec == websocket::error::message_too_big || ec == websocket::condition::protocol_violation) {
         return CloseReason::PROTOCOL_VIOLATION;
+    }
+    // A socket call's errno, as the ESP-IDF transport maps its own
+    if (ec.category() == asio::error::get_system_category()) {
+        return close_reason_for_errno(ec.value());
     }
     return CloseReason::FAILED;
 }

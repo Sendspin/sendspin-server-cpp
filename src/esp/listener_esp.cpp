@@ -26,6 +26,7 @@
 #include "sdkconfig.h"
 #include "thread_esp.h"
 #include "transport.h"
+#include "ws_frame.h"
 #include "ws_link.h"
 
 #include <algorithm>
@@ -104,6 +105,12 @@ public:
         if (httpd_ws_recv_frame(request, &frame, 0) != ESP_OK) {
             return ESP_FAIL;
         }
+        // httpd checks neither the opcode nor a control frame's FIN bit and length. The RSV bits
+        // and whether a length takes its fewest bytes, which it does not expose, go unchecked.
+        if (!ws_frame_allowed(static_cast<uint8_t>(frame.type), frame.final, frame.len)) {
+            this->fail_protocol();
+            return ESP_FAIL;
+        }
         switch (frame.type) {
             case HTTPD_WS_TYPE_TEXT:
             case HTTPD_WS_TYPE_BINARY:
@@ -130,10 +137,8 @@ public:
             case HTTPD_WS_TYPE_PING:
             case HTTPD_WS_TYPE_PONG:
             case HTTPD_WS_TYPE_CLOSE: {
+                // At most WS_CONTROL_PAYLOAD_MAX bytes (ws_frame_allowed())
                 std::array<uint8_t, WS_CONTROL_PAYLOAD_MAX> payload{};
-                if (frame.len > payload.size()) {
-                    return ESP_FAIL;
-                }
                 if (frame.len > 0) {
                     frame.payload = payload.data();
                     if (httpd_ws_recv_frame(request, &frame, frame.len) != ESP_OK) {
@@ -151,6 +156,7 @@ public:
                 return ESP_OK;
             }
             default:
+                // Refused by ws_frame_allowed()
                 return ESP_FAIL;
         }
     }

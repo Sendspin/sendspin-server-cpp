@@ -67,6 +67,7 @@ namespace websocket = beast::websocket;
 using tcp = asio::ip::tcp;
 using boost::system::error_code;
 
+using sendspin::server::close_reason_for_errno;
 using sendspin::server::CloseReason;
 using sendspin::server::Connection;
 using sendspin::server::ConnectionHandler;
@@ -570,6 +571,34 @@ TEST(TransportUrl, ParsesWebSocketUrls) {
             EXPECT_EQ(target->path, row.path);
             EXPECT_TRUE(target->addresses.empty());
         }
+    }
+}
+
+// ==============================================================================
+// Socket errors
+// ==============================================================================
+
+// A socket call's errno as both transports report it: the host's for an Asio system error
+// (PeerResetIsReportedAsPeerClosed), the ESP-IDF transport's for its sends, waits and reads
+TEST(TransportErrno, MapsASocketErrorToItsCloseReason) {
+    struct Row {
+        const char* name;
+        int error;
+        CloseReason reason;
+    };
+    const Row rows[] = {
+        {"connection reset", ECONNRESET, CloseReason::PEER_CLOSED},
+        {"connection aborted", ECONNABORTED, CloseReason::PEER_CLOSED},
+        {"broken pipe", EPIPE, CloseReason::PEER_CLOSED},
+        {"not connected", ENOTCONN, CloseReason::PEER_CLOSED},
+        {"Control: timed out", ETIMEDOUT, CloseReason::FAILED},
+        {"Control: host unreachable", EHOSTUNREACH, CloseReason::FAILED},
+        {"Control: bad descriptor", EBADF, CloseReason::FAILED},
+        {"Control: no error", 0, CloseReason::FAILED},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        EXPECT_EQ(close_reason_for_errno(row.error), row.reason);
     }
 }
 
@@ -1832,6 +1861,31 @@ TEST_F(TransportTest, PeerCloseIsReportedOnceAndEndsTheConnection) {
     EXPECT_EQ(handler.closes, std::vector<CloseReason>{CloseReason::PEER_CLOSED});
     EXPECT_FALSE(connection.is_open());
     EXPECT_FALSE(connection.wait_writable());
+}
+
+// A reset's ECONNRESET reaches reason_for() as an Asio system error, which
+// close_reason_for_errno() maps
+TEST_F(TransportTest, PeerResetIsReportedAsPeerClosed) {
+    auto listener = this->listen();
+    const uint16_t port = listener->port();
+    Peer peer(this->io, [&] {
+        asio::io_context peer_io;
+        PeerSocket ws(peer_io);
+        connect_peer(ws, port);
+        // Linger 0: the close sends RST, not FIN
+        tcp::socket& socket = beast::get_lowest_layer(ws);
+        socket.set_option(asio::socket_base::linger(true, 0));
+        socket.close();
+    });
+    this->run_until([&] { return !this->accepted.empty(); });
+    Connection& connection = this->accepted.front();
+    TestHandler handler(connection);
+    connection.start(handler);
+    this->run_until([&] { return peer.done() && !handler.closes.empty(); });
+    while (this->io.poll() > 0) {}
+
+    ASSERT_EQ(peer.error(), "");
+    EXPECT_EQ(handler.closes, std::vector<CloseReason>{CloseReason::PEER_CLOSED});
 }
 
 TEST_F(TransportTest, CloseInsideOnMessageStopsEveryLaterEvent) {
