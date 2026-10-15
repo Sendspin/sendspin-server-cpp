@@ -13,8 +13,8 @@
 // limitations under the License.
 
 /// @file server_core_client.h
-/// @brief ServerCore::Client, one connection as the core thread keeps it; shared by
-/// server_core.cpp and server_core_pairing.cpp
+/// @brief ServerCore::Client, one connection as the core thread keeps it, and the scans of a
+/// client_id's connections and targets; shared by the server_core sources
 
 #pragma once
 
@@ -154,5 +154,23 @@ public:
     std::optional<GroupId> previous_group;
     GroupId solo_group;
 };
+
+template <class F>
+void ServerCore::for_each_known(const std::string& client_id, F&& fn) {
+    for (auto& [key, target] : this->targets_) {
+        if (target.known && target.known->client_id == client_id) {
+            fn(target);
+        }
+    }
+}
+
+template <class F>
+void ServerCore::for_each_connection(const std::string& client_id, F&& fn) {
+    for (const auto& [id, client] : this->clients_) {
+        if (client->active && client->info.client_id == client_id) {
+            fn(*client);
+        }
+    }
+}
 
 }  // namespace sendspin::server

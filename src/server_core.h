@@ -393,6 +393,14 @@ private:
     /// @brief Erases a target whose client is gone from the network or was never reached
     void erase_if_idle(const std::string& key);
     Target* find_known(const std::string& client_id);
+    /// @brief Calls fn with each target that reached client_id (server_core_client.h)
+    template <class F>
+    void for_each_known(const std::string& client_id, F&& fn);
+    /// @brief The first activated connection of client_id, or nullptr
+    const Client* find_connection(const std::string& client_id) const;
+    /// @brief Calls fn with each activated connection of client_id (server_core_client.h)
+    template <class F>
+    void for_each_connection(const std::string& client_id, F&& fn);
     /// @brief Whether a connection of client_id is activated
     bool connected(const std::string& client_id) const;
     /// @brief Whether a connection of client_id is reported connected

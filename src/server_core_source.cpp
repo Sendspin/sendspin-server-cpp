@@ -90,27 +90,26 @@ void ServerCore::refresh_source(const std::string& client_id, const Client* call
     const auto found = this->routes_.find(client_id);
     Route* route = found != this->routes_.end() ? found->second.get() : nullptr;
     Client* chosen = nullptr;
-    for (const auto& [id, client] : this->clients_) {
-        if (client->active && !client->closed && client->info.client_id == client_id &&
-            client->driver->session().source().role_written() &&
-            (chosen == nullptr || client->reported)) {
-            chosen = client.get();
+    this->for_each_connection(client_id, [&chosen](Client& client) {
+        if (!client.closed && client.driver->session().source().role_written() &&
+            (chosen == nullptr || client.reported)) {
+            chosen = &client;
         }
-    }
+    });
     if (route != nullptr && route->connection != (chosen != nullptr ? chosen->id : 0)) {
         this->unbind(*route);
         route->connection = chosen != nullptr ? chosen->id : 0;
     }
-    for (const auto& [id, client] : this->clients_) {
-        if (!client->active || client->closed || client->info.client_id != client_id) {
-            continue;
+    this->for_each_connection(client_id, [route, chosen, caller](Client& client) {
+        if (client.closed) {
+            return;
         }
-        SourceFeed* feed = route != nullptr && client.get() == chosen ? route->feed.get() : nullptr;
-        client->driver->session().set_source_route(feed, client->id);
-        if (client.get() != caller) {
-            client->pump();
+        SourceFeed* feed = route != nullptr && &client == chosen ? route->feed.get() : nullptr;
+        client.driver->session().set_source_route(feed, client.id);
+        if (&client != caller) {
+            client.pump();
         }
-    }
+    });
 }
 
 void ServerCore::on_source_event(Client& client, const SourceEvent& event) {
