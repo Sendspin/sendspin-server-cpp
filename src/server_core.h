@@ -582,9 +582,10 @@ private:
     void rekey(const std::string& client_id, const HandshakePsk& psk);
     /// @brief Saves client_id's record through the provider on the dispatch thread, reporting a
     /// failure with on_error(); then, unless the core stopped, calls done on the core thread with
-    /// whether it is durable. Without a provider nothing is saved and done gets true. The save
-    /// may finish after the core is destroyed: it reaches the core only through loop_, which
-    /// outlives the dispatch thread, and a handler posted after the loop ended never runs.
+    /// whether it is durable. A failed save without done is written again (FailedWrites). Without
+    /// a provider nothing is saved and done gets true. The save may finish after the core is
+    /// destroyed: it reaches the core only through loop_, which outlives the dispatch thread, and
+    /// a handler posted after the loop ended never runs.
     void save_record(const std::string& client_id, std::function<void(bool)> done = nullptr);
     /// @brief Saves an all-zero blob, a free slot, in slot, once client_id's record is removed
     void erase_record(const std::string& client_id, size_t slot);
@@ -600,6 +601,15 @@ private:
     /// @brief Saves blob in slot on the dispatch thread, as save_record() describes
     void write_record(const std::string& client_id, size_t slot, std::shared_ptr<RecordBlob> blob,
                       std::function<void(bool)> done);
+    /// @brief The record writes the provider failed whose callers wait for no outcome, by slot,
+    /// so a removed long-term PSK or approval is not restored at the next start: each is written
+    /// again before every later record write and at shutdown until it lands, and a later write to
+    /// its slot replaces it; one still failing at shutdown is lost. One entry per slot, so at most
+    /// persistence_keys::MAX_CLIENT_RECORDS. Touched only on the dispatch thread.
+    using FailedWrites = std::map<size_t, std::shared_ptr<RecordBlob>>;
+    /// @brief Writes each of failed's blobs again, dropping each that lands; on the dispatch thread
+    static void retry_writes(PersistenceProvider& provider, FailedWrites& failed,
+                             const Logger& log);
     /// @brief The client the log names for client_id's record: its name and address when
     /// connected; empty when errors are not logged
     std::string record_owner(const std::string& client_id) const;
@@ -673,6 +683,8 @@ private:
     std::map<GroupId, std::unique_ptr<Group>> groups_;
     std::map<std::string, Held, std::less<>> held_;
     PersistenceProvider* provider_;
+    /// Shared with the posted writes, which may run after the core is gone
+    std::shared_ptr<FailedWrites> failed_writes_{std::make_shared<FailedWrites>()};
     ClientRecords records_;
     /// By client_id, at most one each
     std::map<std::string, UnsavedRecord, std::less<>> unsaved_records_;

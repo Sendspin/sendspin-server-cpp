@@ -48,6 +48,7 @@ The design standards that code in this repository is held to. This document is n
 - **Held in wiping types, wiped after use.** A private key or PSK lives in a type that wipes it when destroyed (`Identity`, `HandshakePsk`, `ClientRecord`, the ephemeral key a `NoiseInitiator` keeps), and a buffer that held one (a blob loaded or encoded for the provider) is wiped with `secure_zero()` once used. A secret is never formatted into a string.
 - **Pairing secrets the same way.** A pairing code or token from the host, the CPace run and the values it unwraps are held in wiping types (`PairingAttempt`, `PairingPskToken`, the code's buffer on its way to core), and the buffers a pairing message was parsed from are wiped once it is parsed. The message trace never sees one: `redact_pairing_secrets()` replaces each secret field a client sends before the plaintext is traced.
 - **Persisted before use.** A credential the server will reference in later handshakes (a long-term PSK) is referenced only once the provider reports it durable; until then the record as it was applies (`ServerCore::store_long_term_psk()`).
+- **Removed at once, written until durable.** A removed long-term PSK or approval (an unpairing, a revocation) stops applying at once, and a record write no caller waits on that the provider fails is written again until it lands or the server stops (`ServerCore::FailedWrites`), so a restart does not restore it once the provider recovers before the stop.
 
 ## Logging
 
