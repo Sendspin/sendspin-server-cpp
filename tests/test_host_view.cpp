@@ -20,6 +20,7 @@
 #include "clock.h"
 #include "dispatcher.h"
 #include "host_view.h"
+#include "job_view.h"
 #include "test_recorder.h"
 #include <gtest/gtest.h>
 
@@ -50,6 +51,7 @@ using sendspin::server::InputState;
 using sendspin::server::now_us;
 using sendspin::server::SampleFormat;
 using sendspin::server::WriteResult;
+using sendspin::server::test::job_view_of;
 using sendspin::server::test::Recorder;
 using Bytes = std::vector<uint8_t>;
 
@@ -197,7 +199,7 @@ TEST_F(HostViewTest, AdmitsAStalledLiveInputAsIfRebased) {
     HostView& view = this->make_live();
     ASSERT_EQ(this->write(RATE / 50).frames, RATE / 50);
     // The pipelines' k*, the next frame, with L_p of a 20 ms frame and the 20 ms jitter
-    view.publish_shift_index(view.job_view().run.epoch, 1, 40000);
+    view.publish_shift_index(job_view_of(view).run.epoch, 1, 40000);
     std::this_thread::sleep_for(std::chrono::microseconds(LEAD_US + 50000));
     const WriteResult result = this->write(RATE);
     EXPECT_EQ(result.frames, uint64_t{RATE} * 220 / 1000);
@@ -277,7 +279,7 @@ TEST_F(HostViewTest, PlaysALiveInputFastWhileItOwesLatency) {
         // Admission admits the whole write, so all it lacks is what the slew took out; the
         // positions staged are what it reports taken
         EXPECT_EQ(result.state, InputState::OPEN);
-        const sendspin::server::JobView job = view.job_view();
+        const sendspin::server::JobView job = job_view_of(view);
         EXPECT_EQ(job.head, row.anchor_frames + result.frames);
         const auto missing = static_cast<int64_t>(WRITE - result.frames);
         const int64_t least_lead = std::max(LEAD_US - row.fall_us, row.min_lead_us);
@@ -346,12 +348,12 @@ TEST_F(HostViewTest, StartsTheSlewOverInANewFormat) {
     view.set_group_params({LEAD_US - 200000, 0, SLEW_AHEAD_US});
     view.lowering_ = {now_us(), std::numeric_limits<int64_t>::max(), 0, 1000000};
     ASSERT_LT(view.write(before.data(), RATE).frames, RATE);
-    const uint64_t segment = view.job_view().head;
+    const uint64_t segment = job_view_of(view).head;
     ASSERT_TRUE(view.set_format({RATE, 2, SampleFormat::F32}));
     const WriteResult result = view.write(after.data(), RATE);
     ASSERT_EQ(result.state, InputState::OPEN);
     ASSERT_LT(result.frames, RATE);
-    const sendspin::server::JobView job = view.job_view();
+    const sendspin::server::JobView job = job_view_of(view);
     ASSERT_EQ(job.head, segment + result.frames);
     Bytes staged;
     ASSERT_TRUE(view.read(job.run.epoch, segment, result.frames, staged));
@@ -449,7 +451,7 @@ TEST_F(HostViewTest, EndsASlewedWriteACallOverran) {
         view.set_group_params({LEAD_US - 200000, 0, SLEW_AHEAD_US});
         const HostView::SlewedWrite slewed = view.begin_slewed(RATE, 300, InputState::OPEN);
         row.call(view);
-        const sendspin::server::JobView before = view.job_view();
+        const sendspin::server::JobView before = job_view_of(view);
         const WriteResult between = view.write(pcm.data(), RATE);
         EXPECT_EQ(between.frames, 0U);
         EXPECT_EQ(between.state,
@@ -457,7 +459,7 @@ TEST_F(HostViewTest, EndsASlewedWriteACallOverran) {
         const WriteResult result = view.write_slewed(pcm.data(), slewed);
         EXPECT_EQ(result.frames, 0U);
         EXPECT_EQ(result.state, row.state);
-        const sendspin::server::JobView after = view.job_view();
+        const sendspin::server::JobView after = job_view_of(view);
         EXPECT_EQ(after.head, before.head);
         EXPECT_EQ(after.group_lead_eff_us, before.group_lead_eff_us);
     }
@@ -471,7 +473,7 @@ TEST_F(HostViewTest, EndsASlewedWriteACallOverran) {
     ASSERT_EQ(view.write_slewed(pcm.data(), slewed).frames, 0U);
     ASSERT_EQ(view.write(anchor.data(), ANCHOR).frames, ANCHOR);
     EXPECT_EQ(view.write(pcm.data(), RATE).frames, RATE);
-    EXPECT_EQ(view.job_view().head, ANCHOR + RATE);
+    EXPECT_EQ(job_view_of(view).head, ANCHOR + RATE);
 }
 
 // One live input slewing under a writer while another thread flushes, pauses and resumes, sets
@@ -538,9 +540,9 @@ TEST_F(HostViewTest, AnchorsALiveInputAtItsLeastLead) {
     const int64_t after = now_us();
     EXPECT_GE(view.time_of(0), before + LEAST_US);
     EXPECT_LE(view.time_of(0), after + LEAST_US);
-    EXPECT_EQ(view.job_view().group_lead_eff_us, LEAST_US);
+    EXPECT_EQ(job_view_of(view).group_lead_eff_us, LEAST_US);
     view.set_group_params({LEAST_US + 200000, 0, SLEW_AHEAD_US});
-    EXPECT_EQ(view.job_view().group_lead_eff_us, LEAST_US + 200000);
+    EXPECT_EQ(job_view_of(view).group_lead_eff_us, LEAST_US + 200000);
 }
 
 // What a live epoch owes ends with it, and so does its slew: the epoch a flush, or a pause and
@@ -566,10 +568,10 @@ TEST_F(HostViewTest, EndsALiveInputsSlewWithItsEpoch) {
             ASSERT_EQ(this->write(ANCHOR).frames, ANCHOR);
             view.resume();
         }
-        const uint64_t from = view.job_view().head;
+        const uint64_t from = job_view_of(view).head;
         const Bytes pcm = tone_pcm(ANCHOR, RATE);
         ASSERT_EQ(view.write(pcm.data(), RATE).frames, RATE);
-        const sendspin::server::JobView job = view.job_view();
+        const sendspin::server::JobView job = job_view_of(view);
         EXPECT_EQ(job.head, from + RATE);
         EXPECT_EQ(job.group_lead_eff_us, LEAD_US - 200000);
         Bytes staged;
@@ -586,7 +588,7 @@ TEST_F(HostViewTest, FoldsTheShiftsBelowTheReleasedRing) {
     constexpr int64_t SHIFTS = sendspin::server::MAX_ANCHOR_SHIFTS + 100;
     HostView& view = this->make({LEAD_US, 0, 30000000}, {8000, 1, SampleFormat::S16});
     ASSERT_EQ(this->write(CELL_FRAMES).frames, CELL_FRAMES);
-    const sendspin::server::sched::EpochId epoch = view.job_view().run.epoch;
+    const sendspin::server::sched::EpochId epoch = job_view_of(view).run.epoch;
     const uint64_t far = CELL_FRAMES * 2 * SHIFTS;
     const int64_t far_before = view.time_of(far);
     for (int64_t index = 0; index < SHIFTS; ++index) {
@@ -605,7 +607,7 @@ TEST_F(HostViewTest, FoldsTheShiftsBelowTheReleasedRing) {
 TEST_F(HostViewTest, RefusesAShiftPastTheCapWithNothingReleased) {
     HostView& view = this->make({LEAD_US, 0, 30000000}, {8000, 1, SampleFormat::S16});
     ASSERT_EQ(this->write(160).frames, 160U);
-    const sendspin::server::sched::EpochId epoch = view.job_view().run.epoch;
+    const sendspin::server::sched::EpochId epoch = job_view_of(view).run.epoch;
     const auto cap = static_cast<int64_t>(sendspin::server::MAX_ANCHOR_SHIFTS);
     for (int64_t index = 0; index < cap; ++index) {
         ASSERT_TRUE(view.add_shift(epoch, index, 1)) << index;
@@ -637,7 +639,7 @@ TEST_F(HostViewTest, ChangesFormatWithinARunAsANewSegment) {
     EXPECT_GE(result.frames, static_cast<size_t>((before - playing + 500000) * 44100 / 1000000));
     EXPECT_LE(result.frames, static_cast<size_t>((after - playing + 500000) * 44100 / 1000000) + 1);
 
-    const sendspin::server::JobView job = view.job_view();
+    const sendspin::server::JobView job = job_view_of(view);
     ASSERT_EQ(job.segments.size(), 2U);
     EXPECT_EQ(job.segments[1].position, RATE / 2);
     EXPECT_EQ(job.segments[1].format, (InputFormat{44100, 1, SampleFormat::S24}));
@@ -654,8 +656,8 @@ TEST_F(HostViewTest, ChangesFormatWithinARunAsANewSegment) {
     // Nothing written since: the format changes in place, with no third segment
     EXPECT_TRUE(view.set_format({48000, 2, SampleFormat::S16}));
     EXPECT_TRUE(view.set_format({96000, 2, SampleFormat::F32}));
-    EXPECT_EQ(view.job_view().segments.size(), 3U);
-    EXPECT_EQ(view.job_view().anchor.segments.back().rate, 96000U);
+    EXPECT_EQ(job_view_of(view).segments.size(), 3U);
+    EXPECT_EQ(job_view_of(view).anchor.segments.back().rate, 96000U);
     view.drain();
     EXPECT_FALSE(view.set_format({48000, 2, SampleFormat::S16}));
 }
@@ -677,14 +679,14 @@ TEST_F(HostViewTest, ChangesFormatWhilePausedAndBetweenRuns) {
     const int64_t anchored = view.time_of(0);
     EXPECT_EQ(view.time_of(RATE / 2) - anchored, 500000);
     EXPECT_EQ(view.time_of((RATE / 2) + 44100) - anchored, 1500000);
-    EXPECT_EQ(view.job_view().anchor.segments.size(), 2U);
+    EXPECT_EQ(job_view_of(view).anchor.segments.size(), 2U);
 
     view.stop();
     EXPECT_TRUE(view.set_format({44100, 2, SampleFormat::S16}));
     EXPECT_FALSE(view.set_format({0, 2, SampleFormat::S16}));
     // Positions restart at 0 after the stop, in one segment
     EXPECT_LE(view.latency_us(), LEAD_US);
-    EXPECT_EQ(view.job_view().segments.size(), 1U);
+    EXPECT_EQ(job_view_of(view).segments.size(), 1U);
     EXPECT_EQ(this->write(1).state, InputState::OPEN);
 }
 
@@ -703,7 +705,7 @@ TEST_F(HostViewTest, GrowsTheRingForALargerFormatKeepingWhatItHolds) {
     const Bytes wide(size_t{RATE} * 8, 0x33);
     const WriteResult result = view.write(wide.data(), RATE);
     EXPECT_GE(result.frames, 24000U);
-    const sendspin::server::sched::EpochId epoch = view.job_view().run.epoch;
+    const sendspin::server::sched::EpochId epoch = job_view_of(view).run.epoch;
     Bytes out;
     EXPECT_TRUE(view.read(epoch, 0, 4000, out));
     EXPECT_EQ(out, first);
@@ -724,7 +726,7 @@ TEST_F(HostViewTest, GrowsTheRingKeepingWhatWrapsInIt) {
         pcm[i] = static_cast<uint8_t>((i * 7919) >> 5);
     }
     ASSERT_EQ(view.write(pcm.data(), ring - 6000).frames, ring - 6000);
-    const sendspin::server::sched::EpochId epoch = view.job_view().run.epoch;
+    const sendspin::server::sched::EpochId epoch = job_view_of(view).run.epoch;
     view.release_before(epoch, ring - 16000);
     ASSERT_EQ(view.write(pcm.data() + ((ring - 6000) * 2), 10000).frames, 10000U);
     ASSERT_TRUE(view.set_format({RATE, 2, SampleFormat::F32}));
@@ -745,10 +747,10 @@ TEST_F(HostViewTest, RefusesASegmentPastTheStagedCap) {
     ASSERT_EQ(view.write(pcm.data(), 1).frames, 1U);
     EXPECT_FALSE(view.set_format({RATE, 1, SampleFormat::S16}));
     // Control: core releases what played, which ends the first segments
-    view.release_before(view.job_view().run.epoch, 4);
+    view.release_before(job_view_of(view).run.epoch, 4);
     EXPECT_TRUE(view.set_format({RATE, 1, SampleFormat::S16}));
     // Those from position 4 on, and the new one, in the staging list and the playing anchor alike
-    const sendspin::server::JobView job = view.job_view();
+    const sendspin::server::JobView job = job_view_of(view);
     EXPECT_EQ(job.segments.size(), sendspin::server::MAX_STAGED_SEGMENTS - 3);
     EXPECT_EQ(job.anchor.segments.size(), sendspin::server::MAX_STAGED_SEGMENTS - 3);
 }
@@ -777,7 +779,7 @@ TEST_F(HostViewTest, AnswersAShortWriteWhenACellFits) {
 TEST_F(HostViewTest, ResolvesEachDrainOnceWhoeverComesFirst) {
     HostView& view = this->make();
     ASSERT_GT(this->write(RATE).frames, 0U);
-    const sendspin::server::sched::EpochId epoch = view.job_view().run.epoch;
+    const sendspin::server::sched::EpochId epoch = job_view_of(view).run.epoch;
     view.drain();
     EXPECT_EQ(this->write(1).state, InputState::DRAINING);
     view.flush();
@@ -785,7 +787,7 @@ TEST_F(HostViewTest, ResolvesEachDrainOnceWhoeverComesFirst) {
     this->recorder.wait_for(Recorder::drained(InputId{2}, DrainOutcome::FLUSHED));
 
     ASSERT_GT(this->write(RATE).frames, 0U);
-    const sendspin::server::sched::EpochId flushed = view.job_view().run.epoch;
+    const sendspin::server::sched::EpochId flushed = job_view_of(view).run.epoch;
     view.drain();
     EXPECT_FALSE(view.complete_drain(epoch));
     EXPECT_TRUE(view.complete_drain(flushed));
@@ -807,7 +809,7 @@ TEST_F(HostViewTest, ResolvesEachDrainOnceWhoeverComesFirst) {
 TEST_F(HostViewTest, AnswersEveryDrainCallItsResolutionJoins) {
     HostView& view = this->make();
     ASSERT_GT(this->write(RATE).frames, 0U);
-    const sendspin::server::sched::EpochId epoch = view.job_view().run.epoch;
+    const sendspin::server::sched::EpochId epoch = job_view_of(view).run.epoch;
     std::vector<sendspin::server::DrainId> ids;
     for (int i = 0; i < 3; ++i) {
         ids.push_back(view.drain());
@@ -915,6 +917,19 @@ TEST_F(HostViewTest, DeliversWhatAHostCallQueuedWhenTheInputCloses) {
     this->dispatcher->finish();
     this->dispatcher->join();
     EXPECT_EQ(this->recorder.count(Recorder::drained(InputId{2}, DrainOutcome::PLAYED)), 1U);
+}
+
+// A delivery swaps the outbox with the list it delivers from, so once both have grown a callback
+// queued under the mutex allocates nothing
+TEST_F(HostViewTest, KeepsTheOutboxCapacityAcrossDeliveries) {
+    HostView& view = this->make();
+    for (int i = 0; i < 2; ++i) {
+        view.outbox_.push_back({false, {}, DrainOutcome::PLAYED});
+        view.deliver_outbox();
+    }
+    EXPECT_EQ(view.outbox_.size(), 0U);
+    EXPECT_GT(view.outbox_.capacity(), 0U);
+    EXPECT_EQ(this->recorder.count(Recorder::drained(InputId{2}, DrainOutcome::PLAYED)), 2U);
 }
 
 }  // namespace

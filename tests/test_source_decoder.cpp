@@ -22,6 +22,7 @@
 #include "dispatcher.h"
 #include "frame_encoder.h"
 #include "host_view.h"
+#include "job_view.h"
 #include "source_decoder.h"
 #include <gtest/gtest.h>
 #include <micro_flac/flac_encoder.h>
@@ -46,6 +47,7 @@ using sendspin::server::SourceDecoder;
 using sendspin::server::SourceFault;
 using sendspin::server::SourceFeed;
 using sendspin::server::SourceItem;
+using sendspin::server::test::job_view_of;
 using Bytes = std::vector<uint8_t>;
 
 // ==============================================================================
@@ -492,7 +494,7 @@ TEST(SourceDecoder, WritesEachChunkWholeIntoALiveInput) {
         }
         while (decoder.run()) {}
         EXPECT_TRUE(feed->take_faults().empty());
-        EXPECT_EQ(view->job_view().head, row.frames);
+        EXPECT_EQ(job_view_of(*view).head, row.frames);
         dispatcher->finish();
         dispatcher->join();
     }

@@ -24,6 +24,7 @@
 #include "frame_encoder.h"
 #include "group_audio.h"
 #include "host_view.h"
+#include "job_view.h"
 #include "opus_reader.h"
 #include "resampler_reference.h"
 #include "sched/leads.h"
@@ -65,6 +66,7 @@ using sendspin::server::InputId;
 using sendspin::server::InstanceFinal;
 using sendspin::server::now_us;
 using sendspin::server::SampleFormat;
+using sendspin::server::test::job_view_of;
 using sendspin::server::test::ReferenceResampler;
 namespace sched = sendspin::server::sched;
 using Bytes = std::vector<uint8_t>;
@@ -833,7 +835,7 @@ TEST(GroupAudioPipelines, StartsAnInstanceMidEpochInALaterSegment) {
     const Tone second(48000, 2, 48000, 48000);
     ASSERT_EQ(p.view->write(first.pcm.data(), 44100).frames, 44100U);
     // Requests from cell 0, and from later cells of the epoch the write anchored
-    const sched::EpochId epoch = p.view->job_view().run.epoch;
+    const sched::EpochId epoch = job_view_of(*p.view).run.epoch;
     p.slot->publish({{run48, {}, pcm48, 0},
                      {mid48, epoch, pcm48, 60},
                      {run44, {}, pcm44, 0},
@@ -1037,7 +1039,7 @@ void run_segments_seed(uint64_t seed) {
     }
     // Shifts at increasing random cells, and the last instance requested from a random cell, of
     // the epoch the first write anchored
-    const sendspin::server::JobView view = p.view->job_view();
+    const sendspin::server::JobView view = job_view_of(*p.view);
     const int64_t last_cell =
         sched::cell_at(view.anchor, sched::unshifted_time(view.anchor, head - 1));
     int64_t shift_at = 0;
@@ -2107,7 +2109,7 @@ TEST_F(GroupAudioTest, RestartsALateAnalysisAtTheCellPlayingNow) {
     this->write(30 * CELL, 0);
     const int64_t start = now_us();
     while (this->audio.run_job(start)) {}
-    const sched::Anchor anchor = this->view->job_view().anchor;
+    const sched::Anchor anchor = job_view_of(*this->view).anchor;
     this->slot->publish({{INSTANCE, {}, {sched::Codec::PCM, RATE, 1, 24}, 0}},
                         {{ANALYSIS, {}, {sendspin::server::visualizer_type::LOUDNESS, 50, {}}, 0}});
     const int64_t late = anchor.t0_us + (20 * sched::CELL_US) + 5000;
@@ -2134,11 +2136,11 @@ TEST_F(GroupAudioTest, HoldsTheInputOfAnAnalysisWaitingThroughAStall) {
     this->write(CELL + (CELL / 2), 0);
     const int64_t start = now_us();
     while (this->audio.run_job(start)) {}
-    const sched::Anchor anchor = this->view->job_view().anchor;
+    const sched::Anchor anchor = job_view_of(*this->view).anchor;
     // Cell 0 analyzed, cell 1's input half staged; the clock a quarter into cell 1
     const int64_t late = anchor.t0_us + sched::CELL_US + (sched::CELL_US / 4);
     while (this->audio.run_job(late)) {}
-    EXPECT_LE(this->view->job_view().retain_from, sched::cell_position(anchor, 1));
+    EXPECT_LE(job_view_of(*this->view).retain_from, sched::cell_position(anchor, 1));
     // Control: the rest of the input comes, the rebase shifts cell 1, and it is analyzed
     this->write(CELL, 0);
     while (this->audio.run_job(late)) {}
@@ -2156,7 +2158,7 @@ TEST_F(GroupAudioTest, KeepsALateAnalysisBehindAnUndecidedRebase) {
     this->write(2 * CELL, 0);
     const int64_t start = now_us();
     while (this->audio.run_job(start)) {}
-    const sched::Anchor anchor = this->view->job_view().anchor;
+    const sched::Anchor anchor = job_view_of(*this->view).anchor;
     this->slot->publish({{INSTANCE, {}, {sched::Codec::PCM, RATE, 1, 24}, 0}},
                         {{ANALYSIS, {}, {sendspin::server::visualizer_type::LOUDNESS, 50, {}}, 0}});
     const int64_t late = anchor.t0_us + (5 * sched::CELL_US);
@@ -2185,7 +2187,7 @@ TEST_F(GroupAudioTest, BuildsOneAnalysisPerJobAndHoldsTheOthersInput) {
     this->write(30 * CELL, 0);
     const int64_t start = now_us();
     while (this->audio.run_job(start)) {}
-    const sched::Anchor anchor = this->view->job_view().anchor;
+    const sched::Anchor anchor = job_view_of(*this->view).anchor;
     this->slot->publish({{INSTANCE, {}, {sched::Codec::PCM, RATE, 1, 24}, 0}},
                         {{ANALYSIS, {}, {type::LOUDNESS, 50, {}}, 0},
                          {second, {}, {type::LOUDNESS, 25, {}}, 0},
@@ -2195,10 +2197,10 @@ TEST_F(GroupAudioTest, BuildsOneAnalysisPerJobAndHoldsTheOthersInput) {
         sched::cell_position(anchor, 20) - sendspin::server::analysis_window(RATE);
     // The first analysis builds; the other two wait
     EXPECT_TRUE(this->audio.run_job(late));
-    EXPECT_LE(this->view->job_view().retain_from, held);
+    EXPECT_LE(job_view_of(*this->view).retain_from, held);
     while (this->audio.run_job(late)) {}
     // Control: every analysis started, and the ring let go of the window before cell 20
-    EXPECT_GT(this->view->job_view().retain_from, held);
+    EXPECT_GT(job_view_of(*this->view).retain_from, held);
     this->loop.impl().io().restart();
     this->loop.impl().io().poll();
     std::map<sched::InstanceId, std::vector<sched::Frame>> frames =

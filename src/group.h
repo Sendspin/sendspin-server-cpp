@@ -289,6 +289,8 @@ private:
     GroupHooks hooks_;
     sched::SchedTiming timing_;
     std::vector<Member> members_;
+    /// pump_members()'s list, kept so a frame's pump allocates nothing once it has grown
+    std::vector<GroupMember*> pumped_;
 
     std::shared_ptr<HostView> input_;
     std::optional<InputFormat> input_format_;
