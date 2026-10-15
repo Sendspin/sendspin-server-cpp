@@ -43,7 +43,7 @@ class ServerCore::Client : public SessionObserver,
                            public ExternalNew {
 public:
     /// @brief How far the connection got; each phase before CLOSED implies the ones before it
-    enum class Phase {
+    enum class Phase : uint8_t {
         /// Not yet activated
         HANDSHAKE,
         /// The client is activated
