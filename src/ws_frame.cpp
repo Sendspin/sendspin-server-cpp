@@ -14,6 +14,7 @@
 
 #include "ws_frame.h"
 
+#include "byte_order.h"
 #include "transport.h"
 
 #include <algorithm>
@@ -120,7 +121,7 @@ std::optional<uint16_t> ws_close_payload_fault(std::span<const uint8_t> payload)
     if (payload.size() < CLOSE_CODE_BYTES || payload.size() > WS_CONTROL_PAYLOAD_MAX) {
         return close_code::PROTOCOL_ERROR;
     }
-    const auto code = static_cast<uint16_t>((payload[0] << 8U) | payload[1]);
+    const auto code = read_be<uint16_t>(payload.data());
     const bool sendable =
         std::any_of(SENDABLE_CLOSE_CODES.begin(), SENDABLE_CLOSE_CODES.end(),
                     [code](const CloseCodes& c) { return code >= c.low && code <= c.high; });
@@ -146,15 +147,11 @@ size_t ws_frame_header(uint8_t opcode, size_t len, std::array<uint8_t, WS_FRAME_
         header[1] = mask_bit | static_cast<uint8_t>(len);
     } else if (len <= LEN_16_MAX) {
         header[1] = mask_bit | LEN_16;
-        header[2] = static_cast<uint8_t>(len >> 8U);
-        header[3] = static_cast<uint8_t>(len);
+        put_be(header.data() + 2, static_cast<uint16_t>(len));
         at = 4;
     } else {
         header[1] = mask_bit | LEN_64;
-        const auto len64 = static_cast<uint64_t>(len);
-        for (size_t i = 0; i < LEN_64_BYTES; ++i) {
-            header[2 + i] = static_cast<uint8_t>(len64 >> (8U * (LEN_64_BYTES - 1 - i)));
-        }
+        put_be(header.data() + 2, static_cast<uint64_t>(len));
         at = 2 + LEN_64_BYTES;
     }
     if (mask) {
@@ -355,14 +352,12 @@ WsHeaderParse ws_parse_frame_header(std::span<const uint8_t> bytes, bool peer_ma
     }
     // Section 5.2: a length in the minimal number of bytes
     if (len7 == LEN_16) {
-        header.payload_bytes = (uint64_t{bytes[2]} << 8U) | bytes[3];
+        header.payload_bytes = read_be<uint16_t>(bytes.data() + 2);
         if (header.payload_bytes <= LEN_7_MAX) {
             return invalid();
         }
     } else if (len7 == LEN_64) {
-        for (size_t i = 0; i < LEN_64_BYTES; ++i) {
-            header.payload_bytes = (header.payload_bytes << 8U) | bytes[2 + i];
-        }
+        header.payload_bytes = read_be<uint64_t>(bytes.data() + 2);
         if ((header.payload_bytes & LEN_64_TOP_BIT) != 0 || header.payload_bytes <= LEN_16_MAX) {
             return invalid();
         }
