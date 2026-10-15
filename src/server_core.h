@@ -290,9 +290,10 @@ public:
     void set_colors(GroupId group, const Colors& colors, int64_t at_us);
     void cancel_scheduled_colors(GroupId group);
 
-    /// @brief Closes every input, resolving pending drains as stopped, closes every connection,
-    /// reports connected clients as stopped, ends the dispatch thread after the events already
-    /// posted, and ends the loop
+    /// @brief Reports every started source, then every connected client and pairing, as stopped,
+    /// with nothing from post_event() after them; closes every input, resolving pending drains as
+    /// stopped, and every connection; ends the dispatch thread after the events already posted,
+    /// and ends the loop
     void shutdown(int64_t grace_us);
 
 private:

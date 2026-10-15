@@ -324,7 +324,8 @@ public:
                       ServerListener* listener);
 
     /// @brief Closes every connection and stops the server's threads. Each connected client is
-    /// reported with DisconnectReason::SERVER_STOPPED, after the events that came before the stop.
+    /// reported with DisconnectReason::SERVER_STOPPED, after the events that came before the stop
+    /// and after its source's open stream is reported stopped.
     void stop();
 
     /// @brief The clock of every timestamp the server sends, in microseconds: monotonic, and

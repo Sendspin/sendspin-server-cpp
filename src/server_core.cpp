@@ -1730,6 +1730,13 @@ std::string ServerCore::describe(const Client& client) const {
 
 void ServerCore::shutdown(int64_t grace_us) {
     this->snapshot_.publish({});
+    // A started source stops before its client is reported, as when its connection closes
+    for (const auto& [client_id, route] : this->routes_) {
+        const auto bound = this->clients_.find(route->connection);
+        if (route->started && bound != this->clients_.end()) {
+            this->report_source(*route, *bound->second, false);
+        }
+    }
     for (const auto& [id, client] : this->clients_) {
         if (client->reported) {
             this->post_event([info = client->info](ServerListener& listener) {
@@ -1740,13 +1747,15 @@ void ServerCore::shutdown(int64_t grace_us) {
     for (const auto& [client_id, pairing] : this->pairings_) {
         this->post_pairing_result(pairing.info, PairingResult::SERVER_STOPPED);
     }
+    // post_event() posts nothing after these reports, whatever closing the inputs below would
+    // report
+    this->stopping_ = true;
     // Pending drains resolve as stopped before the dispatch thread finishes, an input whose
     // attachment is still to run included
     this->inputs_.close_all();
     for (const auto& [id, group] : this->groups_) {
         group->close_input();
     }
-    this->stopping_ = true;
     // The decoders' jobs stop; one running finishes on its thread into a closed input
     this->routes_.clear();
     // The job running finishes on the worker's thread, which the destructor joins once the loop

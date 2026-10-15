@@ -41,8 +41,8 @@ Every library lock is a leaf: each is held only to copy or update its own state,
 
 ## Run lifecycle
 
-- `start()` initializes noise-c, starts the dispatch thread, loads or creates the server key and loads the client records there, builds the `ServerCore`, binds `ServerConfig::listen_port` (which starts the network thread), starts the discovery provider when the server advertises or browses, and starts the core thread. A built-in discovery provider that cannot start is reported as `ErrorKind::DISCOVERY_UNAVAILABLE` and the server runs without it.
-- `stop()` posts the provider's `stop()` and `ServerCore::shutdown()` to core and never waits, so a listener may call it. Shutdown reports every connected client as stopped, closes the listener, every connection and dial and every input (so pending drains report `STOPPED`), ends the `Dispatcher` after the events already posted, and ends the loop.
+- `start()` initializes noise-c, starts the dispatch thread, loads or creates the server key and loads the client records there, builds the `ServerCore`, binds `ServerConfig::listen_port` (which starts the network thread), starts the discovery provider when the server advertises or browses, and starts the core thread, stopping the provider again when that thread cannot start. A built-in discovery provider that cannot start is reported as `ErrorKind::DISCOVERY_UNAVAILABLE` and the server runs without it.
+- `stop()` posts the provider's `stop()` and `ServerCore::shutdown()` to core and never waits, so a listener may call it. Shutdown reports every started source, then every connected client and pairing, as stopped (`post_event()` reports nothing after them), closes the listener, every connection and dial and every input (so pending drains report `STOPPED`), ends the `Dispatcher` after the events already posted, and ends the loop.
 - The destructor, and the next `start()`, join the threads of every run `stop()` ended: the core thread, then the group audio threads, then the dispatch thread.
 
 ## A connection
