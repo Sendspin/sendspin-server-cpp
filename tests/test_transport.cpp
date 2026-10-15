@@ -33,6 +33,7 @@
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #if defined(__linux__)
 #include <linux/sockios.h>
@@ -41,6 +42,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -323,6 +325,26 @@ void connect_peer(PeerSocket& ws, uint16_t port, const std::string& path = "/sen
     }
     ws.next_layer().connect({LOOPBACK, port});
     ws.handshake("127.0.0.1", path);
+}
+
+// Whether socket, connecting to endpoint without blocking, completes its TCP handshake within
+// wait_ms
+bool connects_within(tcp::socket& socket, const tcp::endpoint& endpoint, int wait_ms) {
+    socket.open(endpoint.protocol());
+    socket.non_blocking(true);
+    // Asio's own connect waits for the outcome even on a non-blocking socket
+    if (::connect(socket.native_handle(), endpoint.data(), endpoint.size()) == 0) {
+        return true;
+    }
+    if (errno != EINPROGRESS) {
+        return false;
+    }
+    pollfd entry{socket.native_handle(), POLLOUT, 0};
+    int error = 0;
+    socklen_t length = sizeof(error);
+    return poll(&entry, 1, wait_ms) == 1 &&
+           getsockopt(socket.native_handle(), SOL_SOCKET, SO_ERROR, &error, &length) == 0 &&
+           error == 0;
 }
 
 // A synchronous server peer: accepts one connection and returns the upgrade request
@@ -2039,6 +2061,67 @@ TEST_F(TransportTest, DialFailuresAreReportedWithTheirReason) {
     EXPECT_EQ(this->dial_failure, CloseReason::TIMED_OUT);
     this->run_until([&] { return peer.done(); });
     ASSERT_EQ(peer.error(), "");
+}
+
+TEST_F(TransportTest, EachAddressOfADialGetsItsOwnConnectTimeout) {
+    // A listener whose accept queue is full and never drains drops a new connect's SYN, so the
+    // connect gets no answer. Each probe that completes fills the queue further (macOS takes a
+    // backlog of 0 as the system's maximum); half a second tells a loaded machine's slow loopback
+    // connect from a dropped one.
+    asio::io_context peer_io;
+    tcp::acceptor silent(peer_io);
+    silent.open(tcp::v4());
+    silent.bind({LOOPBACK, 0});
+    silent.listen(1);
+    const tcp::endpoint silent_endpoint = silent.local_endpoint();
+    std::vector<std::unique_ptr<tcp::socket>> probes;
+    bool full = false;
+    while (!full && probes.size() < 64) {
+        probes.push_back(std::make_unique<tcp::socket>(peer_io));
+        full = !connects_within(*probes.back(), silent_endpoint, 500);
+    }
+    ASSERT_TRUE(full);
+
+    // The listener that answers, on the same port over IPv6. The connect timeout also bounds the
+    // connect that must succeed, so it leaves a loaded machine a second.
+    this->settings.connect_timeout_us = 1000000;
+    Listener listener(this->loop, this->settings, [this](Connection connection) {
+        this->accepted.push_back(std::move(connection));
+    });
+    ASSERT_TRUE(listener.listen("::1", silent_endpoint.port()));
+    DialTarget target;
+    target.host = "127.0.0.1";
+    target.port = silent_endpoint.port();
+    target.path = "/sendspin";
+
+    // Control: the silent address alone times out in its connect
+    target.addresses = {"127.0.0.1"};
+    EXPECT_FALSE(this->dial_and_wait(target).has_value());
+    EXPECT_EQ(this->dial_failure, CloseReason::TIMED_OUT);
+
+    // Its timeout leaves the next address a connect of its own
+    target.addresses = {"127.0.0.1", "::1"};
+    const std::optional<Connection> connection = this->dial_and_wait(target);
+    ASSERT_TRUE(connection.has_value());
+    EXPECT_EQ(connection->remote_endpoint().rfind("[::1]:", 0), 0U)
+        << connection->remote_endpoint();
+}
+
+TEST_F(TransportTest, ARefusedAddressMovesTheDialToTheNextOfAnotherFamily) {
+    // Nothing listens on 127.0.0.1 at the IPv6 listener's port
+    Listener listener(this->loop, this->settings, [this](Connection connection) {
+        this->accepted.push_back(std::move(connection));
+    });
+    ASSERT_TRUE(listener.listen("::1", 0));
+    DialTarget target;
+    target.host = "127.0.0.1";
+    target.port = listener.port();
+    target.path = "/sendspin";
+    target.addresses = {"127.0.0.1", "::1"};
+    const std::optional<Connection> connection = this->dial_and_wait(target);
+    ASSERT_TRUE(connection.has_value());
+    EXPECT_EQ(connection->remote_endpoint().rfind("[::1]:", 0), 0U)
+        << connection->remote_endpoint();
 }
 
 TEST_F(TransportTest, DroppingAPendingDialClosesItWithoutACallback) {

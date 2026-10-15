@@ -1474,7 +1474,7 @@ public:
                     endpoints.emplace_back(ip, this->target_.port);
                 }
             }
-            // An empty list fails asynchronously in the connect
+            // An empty list fails in connect_next()
             this->connect(std::move(endpoints));
             return;
         }
@@ -1510,20 +1510,35 @@ public:
 private:
     void connect(std::vector<tcp::endpoint> endpoints) {
         this->endpoints_ = std::move(endpoints);
-        beast::tcp_stream& stream = beast::get_lowest_layer(this->connection_->ws());
-        stream.expires_after(microseconds(this->settings_.connect_timeout_us));
-        stream.async_connect(
-            this->endpoints_,
-            [self = this->shared_from_this()](
-                const error_code& ec, const tcp::endpoint& /*endpoint*/) { self->on_connect(ec); });
+        this->connect_next(0, CloseReason::FAILED);
     }
 
-    void on_connect(const error_code& ec) {
+    /// The endpoint at index, within a connect_timeout_us of its own, as the ESP-IDF dial does: a
+    /// silent address does not use up the time of the ones after it. Past the last endpoint the
+    /// dial fails with the last attempt's failure.
+    void connect_next(size_t index, CloseReason failure) {
+        if (index >= this->endpoints_.size()) {
+            this->finish_failed(failure);
+            return;
+        }
+        beast::tcp_stream& stream = beast::get_lowest_layer(this->connection_->ws());
+        // A socket whose connect failed does not connect again, and the next endpoint may be of
+        // the other address family
+        error_code ignored;
+        stream.socket().close(ignored);
+        stream.expires_after(microseconds(this->settings_.connect_timeout_us));
+        stream.async_connect(this->endpoints_[index],
+                             [self = this->shared_from_this(), index](const error_code& ec) {
+                                 self->on_connect(index, ec);
+                             });
+    }
+
+    void on_connect(size_t index, const error_code& ec) {
         if (this->done_) {
             return;
         }
         if (ec) {
-            this->finish_failed(reason_for(ec));
+            this->connect_next(index + 1, reason_for(ec));
             return;
         }
         // The WebSocket stream's own timeouts take over from here
