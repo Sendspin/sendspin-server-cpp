@@ -86,6 +86,13 @@ std::optional<uint32_t> read_positive_u32(JsonVariantConst value) {
     return value.as<uint32_t>();
 }
 
+std::optional<bool> read_bool(JsonVariantConst value) {
+    if (!value.is<bool>()) {
+        return std::nullopt;
+    }
+    return value.as<bool>();
+}
+
 bool read_optional_string(JsonVariantConst value, std::optional<std::string>& out) {
     if (value.isNull()) {
         return true;
@@ -123,6 +130,32 @@ std::optional<uint8_t> read_flags(JsonVariantConst value, const std::array<FlagN
     return flags;
 }
 
+/// An enum's wire names, one entry per value, read both to parse and to build
+template <typename E, size_t N>
+using WireNames = std::array<std::pair<std::string_view, E>, N>;
+
+/// The value a wire name spells, or nullopt for a name the table does not list
+template <typename E, size_t N>
+std::optional<E> from_wire(const WireNames<E, N>& names, std::string_view text) {
+    for (const auto& [name, value] : names) {
+        if (name == text) {
+            return value;
+        }
+    }
+    return std::nullopt;
+}
+
+/// The wire name of a value, or empty for one the table does not list
+template <typename E, size_t N>
+std::string_view wire_name(const WireNames<E, N>& names, E value) {
+    for (const auto& [name, listed] : names) {
+        if (listed == value) {
+            return name;
+        }
+    }
+    return {};
+}
+
 constexpr std::array<FlagName, 3> LOCATION_NAMES{{
     {"device", pair_location::DEVICE},
     {"leaflet", pair_location::LEAFLET},
@@ -145,7 +178,7 @@ constexpr std::array<std::string_view, 7> KNOWN_ROLES{
     "artwork@v1", "visualizer@v1", "color@v1",
 };
 
-constexpr std::array<std::pair<std::string_view, GoodbyeReason>, 8> GOODBYE_REASONS{{
+constexpr WireNames<GoodbyeReason, 8> GOODBYE_REASONS{{
     {"another_server", GoodbyeReason::ANOTHER_SERVER},
     {"shutdown", GoodbyeReason::SHUTDOWN},
     {"restart", GoodbyeReason::RESTART},
@@ -196,24 +229,26 @@ std::string serialize(const JsonDocument& doc) {
 // client/hello parts
 // ==============================================================================
 
-std::optional<Codec> codec_from_wire(std::string_view name) {
-    if (name == "opus") {
-        return Codec::OPUS;
-    }
-    if (name == "flac") {
-        return Codec::FLAC;
-    }
-    if (name == "pcm") {
-        return Codec::PCM;
-    }
-    return std::nullopt;
-}
+constexpr WireNames<Codec, 3> CODEC_NAMES{{
+    {"opus", Codec::OPUS},
+    {"flac", Codec::FLAC},
+    {"pcm", Codec::PCM},
+}};
 
 std::optional<uint32_t> read_u32(JsonVariantConst value) {
     if (!value.is<uint32_t>()) {
         return std::nullopt;
     }
     return value.as<uint32_t>();
+}
+
+/// A volume within 0 to MAX_VOLUME
+std::optional<uint32_t> read_volume(JsonVariantConst value) {
+    const std::optional<uint32_t> volume = read_u32(value);
+    if (!volume || *volume > MAX_VOLUME) {
+        return std::nullopt;
+    }
+    return volume;
 }
 
 /// One format entry: a recognized codec with positive channels and rate and an integer bit depth.
@@ -227,7 +262,7 @@ std::optional<std::optional<AudioFormat>> parse_format(JsonVariantConst entry) {
         !bit_depth) {
         return std::nullopt;
     }
-    const std::optional<Codec> known = codec_from_wire(codec.as<const char*>());
+    const std::optional<Codec> known = from_wire(CODEC_NAMES, codec.as<const char*>());
     if (!known) {
         return std::optional<AudioFormat>{};
     }
@@ -267,7 +302,7 @@ std::optional<SourceSupport> parse_source_support(JsonVariantConst object) {
         return support;
     }
     const JsonVariantConst line_sense = features["line_sense"];
-    if (!features.is<JsonObjectConst>() || (!line_sense.isNull() && !line_sense.is<bool>())) {
+    if (!features.is<JsonObjectConst>() || (!line_sense.isNull() && !read_bool(line_sense))) {
         return std::nullopt;
     }
     support.line_sense = line_sense.as<bool>();
@@ -346,14 +381,14 @@ std::optional<ClientHello> parse_client_hello(JsonObjectConst payload, int64_t r
     const JsonVariantConst name = payload["name"];
     const JsonVariantConst roles = payload["supported_roles"];
     const JsonVariantConst methods = payload["supported_pair_methods"];
-    const JsonVariantConst unpaired = payload["unpaired_access"]["enabled"];
+    const std::optional<bool> unpaired = read_bool(payload["unpaired_access"]["enabled"]);
     if (!name.is<const char*>() || !roles.is<JsonArrayConst>() || !methods.is<JsonObjectConst>() ||
-        !payload["unpaired_access"].is<JsonObjectConst>() || !unpaired.is<bool>()) {
+        !payload["unpaired_access"].is<JsonObjectConst>() || !unpaired) {
         return std::nullopt;
     }
     ClientHello hello;
     hello.name = name.as<std::string>();
-    hello.unpaired_access_enabled = unpaired.as<bool>();
+    hello.unpaired_access_enabled = *unpaired;
     hello.rx_us = rx_us;
     for (const JsonVariantConst role : roles.as<JsonArrayConst>()) {
         if (!role.is<const char*>()) {
@@ -393,12 +428,7 @@ std::optional<ClientGoodbye> parse_client_goodbye(JsonObjectConst payload, int64
     }
     ClientGoodbye goodbye;
     goodbye.rx_us = rx_us;
-    const std::string_view text = reason.as<const char*>();
-    for (const auto& [name, value] : GOODBYE_REASONS) {
-        if (name == text) {
-            goodbye.reason = value;
-        }
-    }
+    goodbye.reason = from_wire(GOODBYE_REASONS, reason.as<const char*>());
     return goodbye;
 }
 
@@ -441,18 +471,17 @@ std::optional<PlayerState> parse_player_state(JsonVariantConst object) {
 
     const JsonVariantConst volume = object["volume"];
     if (!volume.isNull()) {
-        const std::optional<uint32_t> value = read_u32(volume);
-        if (!value || *value > MAX_VOLUME) {
+        state.volume = read_volume(volume);
+        if (!state.volume) {
             return std::nullopt;
         }
-        state.volume = value;
     }
     const JsonVariantConst muted = object["muted"];
     if (!muted.isNull()) {
-        if (!muted.is<bool>()) {
+        state.muted = read_bool(muted);
+        if (!state.muted) {
             return std::nullopt;
         }
-        state.muted = muted.as<bool>();
     }
     // Required with the matching command
     if (((state.supported_commands & player_command::VOLUME) != 0 && !state.volume) ||
@@ -468,6 +497,16 @@ std::optional<PlayerState> parse_player_state(JsonVariantConst object) {
     }
     return state;
 }
+
+constexpr WireNames<ArtworkSource, 2> ARTWORK_SOURCE_NAMES{{
+    {"album", ArtworkSource::ALBUM},
+    {"artist", ArtworkSource::ARTIST},
+}};
+
+constexpr WireNames<ImageFormat, 2> IMAGE_FORMAT_NAMES{{
+    {"jpeg", ImageFormat::JPEG},
+    {"png", ImageFormat::PNG},
+}};
 
 // roles/artwork/v1.md "client/state artwork object": 1 to 4 channels, each `none` or a source with
 // its format and size. A source or format outside artwork@v1's values fails it, as does a size
@@ -500,11 +539,8 @@ std::optional<std::vector<ArtworkChannel>> parse_artwork_state(JsonVariantConst 
             channels.push_back(channel);
             continue;
         }
-        if (source == "album") {
-            channel.source = ArtworkSource::ALBUM;
-        } else if (source == "artist") {
-            channel.source = ArtworkSource::ARTIST;
-        } else {
+        channel.source = from_wire(ARTWORK_SOURCE_NAMES, source);
+        if (!channel.source) {
             return std::nullopt;
         }
         const std::optional<uint32_t> w = read_positive_u32(width);
@@ -512,14 +548,12 @@ std::optional<std::vector<ArtworkChannel>> parse_artwork_state(JsonVariantConst 
         if (!format.is<const char*>() || !w || !h) {
             return std::nullopt;
         }
-        const std::string_view name = format.as<const char*>();
-        if (name == "jpeg") {
-            channel.format = ImageFormat::JPEG;
-        } else if (name == "png") {
-            channel.format = ImageFormat::PNG;
-        } else {
+        const std::optional<ImageFormat> image_format =
+            from_wire(IMAGE_FORMAT_NAMES, format.as<const char*>());
+        if (!image_format) {
             return std::nullopt;
         }
+        channel.format = *image_format;
         channel.width = *w;
         channel.height = *h;
         channels.push_back(channel);
@@ -533,6 +567,12 @@ constexpr std::array<FlagName, 5> VISUALIZER_TYPE_NAMES{{
     {"f_peak", visualizer_type::F_PEAK},
     {"spectrum", visualizer_type::SPECTRUM},
     {"peak", visualizer_type::PEAK},
+}};
+
+constexpr WireNames<SpectrumScale, 3> SPECTRUM_SCALE_NAMES{{
+    {"mel", SpectrumScale::MEL},
+    {"log", SpectrumScale::LOG},
+    {"lin", SpectrumScale::LIN},
 }};
 
 /// An integer of any size: a field the spec types as an integer, whose value may still lie outside
@@ -567,19 +607,11 @@ std::optional<VisualizerRequest> parse_visualizer_state(JsonVariantConst object)
         const std::optional<uint32_t> bins = read_u32(spectrum["n_disp_bins"]);
         const std::optional<uint32_t> f_min = read_u32(spectrum["f_min"]);
         const std::optional<uint32_t> f_max = read_u32(spectrum["f_max"]);
-        const std::string_view scale = spectrum["scale"].as<const char*>();
-        SpectrumConfig config;
-        bool known = true;
-        if (scale == "mel") {
-            config.scale = SpectrumScale::MEL;
-        } else if (scale == "log") {
-            config.scale = SpectrumScale::LOG;
-        } else if (scale == "lin") {
-            config.scale = SpectrumScale::LIN;
-        } else {
-            known = false;
-        }
-        if (known && bins && f_min && f_max) {
+        const std::optional<SpectrumScale> scale =
+            from_wire(SPECTRUM_SCALE_NAMES, spectrum["scale"].as<const char*>());
+        if (scale && bins && f_min && f_max) {
+            SpectrumConfig config;
+            config.scale = *scale;
             config.n_disp_bins = *bins;
             config.f_min = *f_min;
             config.f_max = *f_max;
@@ -620,12 +652,12 @@ std::optional<SourceState> parse_source_state(JsonVariantConst object) {
 
 // messaging.md "client/state": `available` and the full state of each role object included
 std::optional<ClientState> parse_client_state(JsonObjectConst payload, int64_t rx_us) {
-    const JsonVariantConst available = payload["available"];
-    if (!available.is<bool>()) {
+    const std::optional<bool> available = read_bool(payload["available"]);
+    if (!available) {
         return std::nullopt;
     }
     ClientState state;
-    state.available = available.as<bool>();
+    state.available = *available;
     state.rx_us = rx_us;
     if (!payload["player"].isNull()) {
         state.player = parse_player_state(payload["player"]);
@@ -699,7 +731,7 @@ std::optional<ClientStreamStart> parse_client_stream_start(JsonObjectConst paylo
     if (!source.is<JsonObjectConst>() || !codec.is<const char*>()) {
         return std::nullopt;
     }
-    const std::optional<Codec> known = codec_from_wire(codec.as<const char*>());
+    const std::optional<Codec> known = from_wire(CODEC_NAMES, codec.as<const char*>());
     const std::optional<uint32_t> channels = read_positive_u32(source["channels"]);
     const std::optional<uint32_t> sample_rate = read_positive_u32(source["sample_rate"]);
     if (!known || !channels || !sample_rate) {
@@ -764,16 +796,11 @@ std::optional<ControllerRequest> parse_controller_request(JsonVariantConst objec
     }
     switch (*request.command) {
         case ControllerCommand::VOLUME:
-            request.volume = read_u32(object["volume"]);
-            if (request.volume && *request.volume > MAX_VOLUME) {
-                request.volume.reset();
-            }
+            request.volume = read_volume(object["volume"]);
             request.malformed = !request.volume;
             break;
         case ControllerCommand::MUTE:
-            if (object["mute"].is<bool>()) {
-                request.mute = object["mute"].as<bool>();
-            }
+            request.mute = read_bool(object["mute"]);
             request.malformed = !request.mute;
             break;
         case ControllerCommand::SEEK:
@@ -843,7 +870,7 @@ void add_optional(JsonObject object, const char* key, const std::optional<RgbCol
 // Pairing
 // ==============================================================================
 
-constexpr std::array<std::pair<std::string_view, PairAbortReason>, 5> ABORT_REASONS{{
+constexpr WireNames<PairAbortReason, 5> ABORT_REASONS{{
     {"attempt_timeout", PairAbortReason::ATTEMPT_TIMEOUT},
     {"concurrent_attempt", PairAbortReason::CONCURRENT_ATTEMPT},
     {"method_not_supported", PairAbortReason::METHOD_NOT_SUPPORTED},
@@ -981,12 +1008,7 @@ std::optional<ClientPairing> parse_client_pairing(PairingMessageKind kind, JsonO
             if (!reason.is<const char*>()) {
                 return std::nullopt;
             }
-            const std::string_view text = reason.as<const char*>();
-            for (const auto& [name, value] : ABORT_REASONS) {
-                if (name == text) {
-                    message.abort_reason = value;
-                }
-            }
+            message.abort_reason = from_wire(ABORT_REASONS, reason.as<const char*>());
             return message;
         }
     }
@@ -1035,12 +1057,7 @@ constexpr std::array<std::string_view, 19> CLOSING_TYPES{
 }  // namespace
 
 std::string_view to_wire(GoodbyeReason reason) {
-    for (const auto& [name, value] : GOODBYE_REASONS) {
-        if (value == reason) {
-            return name;
-        }
-    }
-    return {};
+    return wire_name(GOODBYE_REASONS, reason);
 }
 
 // ==============================================================================
@@ -1048,15 +1065,7 @@ std::string_view to_wire(GoodbyeReason reason) {
 // ==============================================================================
 
 std::string_view to_wire(Codec codec) {
-    switch (codec) {
-        case Codec::OPUS:
-            return "opus";
-        case Codec::FLAC:
-            return "flac";
-        case Codec::PCM:
-            break;
-    }
-    return "pcm";
+    return wire_name(CODEC_NAMES, codec);
 }
 
 std::string_view to_wire(ControllerCommand command) {
@@ -1469,9 +1478,7 @@ std::string build_stream_start(int64_t transmitted_us, const StreamStart& start)
         if (config.spectrum) {
             JsonObject spectrum = visualizer["spectrum"].to<JsonObject>();
             spectrum["n_disp_bins"] = config.spectrum->n_disp_bins;
-            spectrum["scale"] = config.spectrum->scale == SpectrumScale::MEL   ? "mel"
-                                : config.spectrum->scale == SpectrumScale::LOG ? "log"
-                                                                               : "lin";
+            spectrum["scale"] = wire_name(SPECTRUM_SCALE_NAMES, config.spectrum->scale);
             spectrum["f_min"] = config.spectrum->f_min;
             spectrum["f_max"] = config.spectrum->f_max;
         }
@@ -1492,8 +1499,8 @@ std::string build_stream_start_artwork(int64_t transmitted_us,
             entry["source"] = "none";
             continue;
         }
-        entry["source"] = *channel.source == ArtworkSource::ALBUM ? "album" : "artist";
-        entry["format"] = channel.format == ImageFormat::JPEG ? "jpeg" : "png";
+        entry["source"] = wire_name(ARTWORK_SOURCE_NAMES, *channel.source);
+        entry["format"] = wire_name(IMAGE_FORMAT_NAMES, channel.format);
         entry["width"] = channel.width;
         entry["height"] = channel.height;
     }
@@ -1563,10 +1570,8 @@ std::string build_server_pair_finalize() {
 std::string build_pair_abort(PairAbortReason reason) {
     JsonDocument doc;
     doc["type"] = "pair/abort";
-    for (const auto& [name, value] : ABORT_REASONS) {
-        if (value == reason) {
-            doc["payload"]["reason"] = name;
-        }
+    if (const std::string_view name = wire_name(ABORT_REASONS, reason); !name.empty()) {
+        doc["payload"]["reason"] = name;
     }
     return serialize(doc);
 }
