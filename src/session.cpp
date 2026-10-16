@@ -400,14 +400,19 @@ void Session::on_client_state(const ClientState& state) {
         this->finish(SessionEnd::PROTOCOL_ERROR);
         return;
     }
+    // A report of `available: true` that is the first or follows `false` is a join for the
+    // client's stream roles
+    const bool turned_available = state.available && !this->available_;
+    this->available_ = state.available;
     this->artwork_.on_client_state(state);
     this->source_role_.on_client_state(state);
     // Queued by queue_state_marker(), behind what the owner queues in reaction (a group/update
-    // before the stream/end it leads to). The most recent kind-setting event wins, and both roles'
-    // events are JOIN.
+    // before the stream/end it leads to). The most recent kind-setting event wins, and every event
+    // here is a JOIN.
     const std::optional<sched::TriggerKind> player = this->player_.on_client_state(state);
     const std::optional<sched::TriggerKind> visualizer = this->visualizer_.on_client_state(state);
-    this->state_marker_kind_ = player ? player : visualizer;
+    this->state_marker_kind_ =
+        turned_available ? sched::TriggerKind::JOIN : (player ? player : visualizer);
     this->state_changed_ = true;
 }
 

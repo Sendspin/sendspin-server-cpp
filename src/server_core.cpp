@@ -710,7 +710,7 @@ void ServerCore::on_client_state(Client& client) {
     if (client.group == nullptr) {
         return;
     }
-    const bool available = client.driver->session().player().available();
+    const bool available = client.driver->session().available();
     // messaging.md "Server behavior when a client becomes unavailable": the first client/state is
     // an initial value, not a transition
     const bool turned_unavailable = client.available.value_or(false) && !available;

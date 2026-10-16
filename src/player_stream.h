@@ -65,8 +65,7 @@ public:
     std::optional<sched::TriggerKind> on_activation_written(bool player_active);
 
     /// @brief A validated client/state
-    /// @return a trigger kind when it made the player eligible: a report of `available: true`
-    /// that is the first or follows `false`, or the role's first object since its activation
+    /// @return a trigger kind when it carried the role's first object since its activation
     std::optional<sched::TriggerKind> on_client_state(const ClientState& state);
 
     /// @brief Records the kind of the latest kind-setting event
@@ -151,11 +150,6 @@ public:
     /// received since the activation; the format is checked by the caller
     bool eligible() const {
         return this->role_written_ && this->available_ && this->state_since_activation_;
-    }
-
-    /// @brief The latest client/state reported `available: true`
-    bool available() const {
-        return this->available_;
     }
 
     bool role_written() const {
@@ -245,7 +239,6 @@ private:
     bool role_written_{false};
     bool state_since_activation_{false};
     bool available_{false};
-    bool state_received_{false};
     sched::SchedTiming timing_;
 };
 

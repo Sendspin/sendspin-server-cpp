@@ -645,6 +645,34 @@ TEST(ServerVisualizer, StaysOnTimeAcrossALiveStallWithNoPlayer) {
               sendspin::server::sched::timing_defaults::GROUP_DEFAULT_US);
 }
 
+/// Stops the server, then checks client's first loudness message from the trace: at or past the
+/// group lead g after its stream/start, on the first cell there unless that cell had passed when
+/// the message was sent
+void expect_first_message_group_lead_past_start(VisualizerServer& s, const std::string& client,
+                                                int64_t g) {
+    // The trace runs on the dispatch thread, which reports the client's disconnect at the stop
+    // after every trace call before it
+    s.server.stop();
+    s.recorder.wait_for("disconnected " + client + " " +
+                        std::to_string(static_cast<int>(DisconnectReason::SERVER_STOPPED)));
+    std::optional<int64_t> started;
+    std::optional<VisualizerTrace::Sent> first;
+    for (const VisualizerTrace::Sent& sent : sent_to(s, client)) {
+        if (sent.start && !started) {
+            started = sent.stamp_us;
+        } else if (started && sent.id == wire::LOUDNESS_ID) {
+            first = sent;
+            break;
+        }
+    }
+    ASSERT_TRUE(started) << "no stream/start traced";
+    ASSERT_TRUE(first) << "no message traced after the start";
+    EXPECT_GE(first->ts - *started, g);
+    if (first->stamp_us < *started + g) {
+        EXPECT_LT(first->ts - *started, g + CELL_US);
+    }
+}
+
 // A visualizer that joins a playing group starts the group lead past its stream/start, as a joining
 // player starts its own lead past its trigger. The player here asks a 700 ms required lead, so `G`
 // is 710 ms with `M_pump`: the first message is at or past it.
@@ -661,28 +689,31 @@ TEST(ServerVisualizer, StartsAJoinerTheGroupLeadPastItsStart) {
     ASSERT_TRUE(joiner.read_until_type("visualizer"));
     input->stop();
     host.join();
-    // The trace runs on the dispatch thread, which reports the joiner's disconnect at the stop
-    // after every trace call before it
-    s.server.stop();
-    s.recorder.wait_for("disconnected " + joiner.id + " " +
-                        std::to_string(static_cast<int>(DisconnectReason::SERVER_STOPPED)));
-    std::optional<int64_t> started;
-    std::optional<VisualizerTrace::Sent> first;
-    for (const VisualizerTrace::Sent& sent : sent_to(s, joiner.id)) {
-        if (sent.start && !started) {
-            started = sent.stamp_us;
-        } else if (started && sent.id == wire::LOUDNESS_ID) {
-            first = sent;
-            break;
-        }
-    }
-    ASSERT_TRUE(started) << "no stream/start traced";
-    ASSERT_TRUE(first) << "no message traced after the start";
-    // The first cell at or past it, unless that cell had passed when the message was sent
-    EXPECT_GE(first->ts - *started, G);
-    if (first->stamp_us < *started + G) {
-        EXPECT_LT(first->ts - *started, G + CELL_US);
-    }
+    expect_first_message_group_lead_past_start(s, joiner.id, G);
+}
+
+// A visualizer-only client whose first client/state reports `available: false` stays in the
+// playing group it joined (spec messaging.md "Server behavior when a client becomes unavailable"
+// moves only a client that turns unavailable); its report of `available: true` is a join, which
+// starts its stream the group lead past its stream/start, `G` as above. The first state's own join
+// may still be pending when the second arrives, so SessionTest.MakesATurnToAvailableAJoin holds the
+// rule itself.
+TEST(ServerVisualizer, JoinsAPlayingGroupOnceItTurnsAvailable) {
+    constexpr int64_t G = 710000;
+    VisualizerServer s;
+    const std::string loudness = R"({"types":["loudness"],"rate_max":50})";
+    RawVisualizer both(s.server, "Both", 1000000, loudness, true);
+    const std::shared_ptr<GroupInput> input = s.open({&both});
+    ASSERT_TRUE(input);
+    std::thread host([&] { feed_tone(*input, 0, 3 * RATE, 0.5); });
+    ASSERT_TRUE(both.read_until_type("visualizer"));
+    RawVisualizer joiner(s.server, "Joiner", 100000, loudness, false, false);
+    s.recorder.wait_for("connected " + joiner.id);
+    joiner.send_state(true, loudness);
+    ASSERT_TRUE(joiner.read_until_type("visualizer"));
+    input->stop();
+    host.join();
+    expect_first_message_group_lead_past_start(s, joiner.id, G);
 }
 
 // A group's drain completes once no stream is active, a visualizer's included, so a visualizer
