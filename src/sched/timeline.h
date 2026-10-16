@@ -37,8 +37,8 @@ constexpr int64_t ceil_div(int64_t n, int64_t d) {
     return -floor_div(-n, d);
 }
 
-/// @brief `floor(n * mul / div)` for mul and div positive with `2 * div * mul` within int64: n is
-/// split at a multiple of div, so `n * mul` is never formed and only a result past int64 overflows
+/// @brief `floor(n * mul / div)` for mul and div positive with `(2 * mul + 1) * div` within int64:
+/// n is split at a multiple of div, so `n * mul` is never formed
 constexpr int64_t scaled_floor(int64_t n, int64_t mul, int64_t div) {
     const int64_t whole = floor_div(n, div);
     return (whole * mul) + (((n - (whole * div)) * mul) / div);
