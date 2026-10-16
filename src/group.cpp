@@ -115,6 +115,7 @@ Group::Group(EventLoop& loop, AudioWorkers& workers, GroupId id, std::string nam
       stall_timer_(loop),
       writable_timer_(loop),
       drain_timer_(loop),
+      payloads_timer_(loop),
       metadata_timer_(loop),
       color_timer_(loop),
       artwork_cache_(artwork),
@@ -667,6 +668,8 @@ void Group::deliver(GroupEvent& event) {
                 this->on_frame(value);
             } else if constexpr (std::is_same_v<T, InstanceFinal>) {
                 this->on_instance_final(value);
+            } else if constexpr (std::is_same_v<T, PayloadsFull>) {
+                this->on_payloads_full(value);
             } else {
                 this->on_pipeline_failed(value);
             }
@@ -689,6 +692,7 @@ void Group::on_epoch_started(EpochStarted& started) {
     for (auto& [instance, ring] : this->rings_) {
         ring.restart(this->epoch_, 0);
     }
+    this->prune_full();
     if (started.drain) {
         this->on_drain_started(*started.drain);
     }
@@ -722,6 +726,7 @@ void Group::on_epoch_cut(const EpochCut& cut) {
     for (auto& [instance, ring] : this->rings_) {
         ring.restart(this->epoch_, 0);
     }
+    this->prune_full();
     this->queue_markers(sched::TriggerKind::GROUP);
 }
 
@@ -810,6 +815,48 @@ void Group::on_instance_final(const InstanceFinal& final) {
     this->schedule_check();
 }
 
+void Group::on_payloads_full(const PayloadsFull& full) {
+    const auto held =
+        std::find_if(this->full_.begin(), this->full_.end(),
+                     [&](const PayloadsFull& f) { return f.instance == full.instance; });
+    if (held == this->full_.end()) {
+        this->full_.push_back(full);
+    }
+    this->prune_full();
+}
+
+void Group::prune_full() {
+    if (this->full_.empty()) {
+        return;
+    }
+    const int64_t now = now_us();
+    bool freed = false;
+    std::optional<int64_t> due;
+    std::erase_if(this->full_, [&](const PayloadsFull& full) {
+        const auto it = this->rings_.find(full.instance);
+        if (it == this->rings_.end()) {
+            return true;
+        }
+        sched::FrameRing& ring = it->second;
+        ring.prune(now);
+        if (ring.size() < full.slots) {
+            freed = true;
+            return true;
+        }
+        const int64_t ts = ring.at(ring.epoch(), ring.base())->ts_us;
+        due = due ? std::min(*due, ts) : ts;
+        return false;
+    });
+    if (freed && this->audio_) {
+        this->audio_->wake();
+    }
+    if (due) {
+        this->payloads_timer_.start(*due, this->guarded([this] { this->prune_full(); }));
+    } else {
+        this->payloads_timer_.cancel();
+    }
+}
+
 void Group::on_pipeline_failed(const PipelineFailed& failed) {
     // Matched by instance, whatever its epoch: ids are never reused, and a broken instance stays
     // broken
@@ -859,6 +906,7 @@ void Group::end_run(sched::EpochId epoch) {
     for (auto& [instance, ring] : this->rings_) {
         ring.restart({}, 0);
     }
+    this->prune_full();
     for (const Member& member : this->members_) {
         this->send_group_update(*member.member);
     }

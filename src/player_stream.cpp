@@ -306,9 +306,9 @@ PackedChunk PlayerStream::take_chunk(const StreamSource* source, size_t max_mess
     bytes.resize(sched::CHUNK_HEADER_BYTES + payload);
     size_t offset = sched::CHUNK_HEADER_BYTES;
     for (size_t i = 0; i < frames; ++i) {
-        const std::vector<uint8_t>& from =
+        const std::span<const uint8_t> from =
             ring->at(this->sent_.epoch, this->cursor_.next + (static_cast<int64_t>(i) * cells))
-                ->payload;
+                ->payload.bytes();
         std::memcpy(bytes.data() + offset, from.data(), from.size());
         offset += from.size();
     }

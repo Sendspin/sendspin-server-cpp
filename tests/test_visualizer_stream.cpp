@@ -18,6 +18,7 @@
 /// a configuration change in place.
 
 #include "fragmentation.h"
+#include "frame_payloads.h"
 #include "visualizer_stream.h"
 #include "wire_messages.h"
 #include <gtest/gtest.h>
@@ -129,7 +130,9 @@ private:
         frame.epoch = EPOCH;
         frame.index = cell;
         frame.ts_us = T0 + (cell * sched::CELL_US) + offset_us;
-        append_message(frame.payload, id, bytes, frame.ts_us);
+        std::vector<uint8_t> payload;
+        append_message(payload, id, bytes, frame.ts_us);
+        frame.payload = sendspin::server::test::payload_of(payload);
         EXPECT_TRUE(ring.append(std::move(frame), 0));
     }
 

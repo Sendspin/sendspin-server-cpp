@@ -19,6 +19,7 @@
 #include "sched/timeline.h"
 
 #include <algorithm>
+#include <span>
 #include <utility>
 
 namespace sendspin::server {
@@ -26,7 +27,7 @@ namespace sendspin::server {
 namespace {
 
 /// The big-endian timestamp of the message at offset
-int64_t message_ts(const std::vector<uint8_t>& payload, size_t offset) {
+int64_t message_ts(std::span<const uint8_t> payload, size_t offset) {
     return static_cast<int64_t>(read_be<uint64_t>(&payload[offset + 1]));
 }
 
@@ -122,12 +123,13 @@ bool VisualizerStream::prepare(StreamSource* source, uint32_t markers_queued, in
     const uint32_t bins = bins_of(this->cursor_config());
     for (const sched::Frame* cell = ring->at(this->sent_.epoch, this->cursor_.next);
          cell != nullptr; cell = ring->at(this->sent_.epoch, this->cursor_.next)) {
-        if (this->offset_ < cell->payload.size()) {
-            const int64_t ts = message_ts(cell->payload, this->offset_);
+        const std::span<const uint8_t> payload = cell->payload.bytes();
+        if (this->offset_ < payload.size()) {
+            const int64_t ts = message_ts(payload, this->offset_);
             if (ts > now_us && ts >= this->cursor_.min_ts) {
                 break;
             }
-            const uint8_t type = visualizer_type_of(cell->payload[this->offset_]);
+            const uint8_t type = visualizer_type_of(payload[this->offset_]);
             this->offset_ += visualizer_message_bytes(type, bins);
             continue;
         }
@@ -297,7 +299,8 @@ OutboundPlaintext VisualizerStream::take_message(const StreamSource* source) {
     if (!next) {
         return message;
     }
-    const auto from = next->cell->payload.begin() + static_cast<std::ptrdiff_t>(next->offset);
+    const auto from =
+        next->cell->payload.bytes().begin() + static_cast<std::ptrdiff_t>(next->offset);
     reserve_plaintext(message.bytes, next->bytes);
     message.bytes.assign(from, from + static_cast<std::ptrdiff_t>(next->bytes));
     // Counted until its own timestamp
@@ -336,10 +339,11 @@ std::optional<VisualizerStream::Message> VisualizerStream::message_at(const sche
         index == this->cursor_.next && ring.instance() == this->offset_ring_ ? this->offset_ : 0;
     for (const sched::Frame* cell = ring.at(this->sent_.epoch, index); cell != nullptr;
          cell = ring.at(this->sent_.epoch, ++index), offset = 0) {
-        if (offset < cell->payload.size()) {
-            const uint8_t type = visualizer_type_of(cell->payload[offset]);
+        const std::span<const uint8_t> payload = cell->payload.bytes();
+        if (offset < payload.size()) {
+            const uint8_t type = visualizer_type_of(payload[offset]);
             return Message{cell, offset, visualizer_message_bytes(type, bins),
-                           message_ts(cell->payload, offset)};
+                           message_ts(payload, offset)};
         }
     }
     return std::nullopt;

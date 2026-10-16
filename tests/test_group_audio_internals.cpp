@@ -15,14 +15,15 @@
 /// @file test_group_audio_internals.cpp
 /// @brief A group's pipelines on their own, reached inside: a resume from a paused position the
 /// test sets, a stretch cut or extended directly, the resamplers a job builds, an instance whose
-/// encoder is swapped for one that refuses, and the `L_p` a live rebase publishes. Compiled with
-/// -fno-access-control (tests/CMakeLists.txt).
+/// encoder is swapped for one that refuses, the `L_p` a live rebase publishes, and an instance and
+/// analysis given too few payload slots. Compiled with -fno-access-control (tests/CMakeLists.txt).
 
 #include "clock.h"
 #include "frame_encoder.h"
 #include "group_audio.h"
 #include "group_pipelines.h"
 #include "host_view.h"
+#include "payload_slots.h"
 #include "pipeline_stages.h"
 #include "sched/leads.h"
 #include <gtest/gtest.h>
@@ -33,6 +34,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <span>
 #include <variant>
 #include <vector>
 
@@ -276,6 +278,90 @@ TEST(GroupAudioLive, RebasesByTheResampledInstancesLookahead) {
         EXPECT_EQ(frame->ts_us, at) << instance.value;
     }
     EXPECT_EQ(p.view->rebase_latency_us_, RESAMPLED_LATENCY_US);
+}
+
+// An instance or analysis whose payload slots are all taken posts PayloadsFull once, however many
+// jobs try again, and produces nothing more until its frames are dropped, consuming no input
+// meanwhile: its frames then go on where they stopped, the same as from pipelines with room.
+// White-box: the instance's and the analysis's slots (GroupAudio::instances_, analyses_) replaced
+// with two each.
+TEST(GroupAudioPipelines, WaitsForPayloadSlotsWithoutLosingInput) {
+    using sendspin::server::PayloadsFull;
+    using sendspin::server::PayloadSlots;
+    namespace visualizer_type = sendspin::server::visualizer_type;
+    const InputFormat format{48000, 1, SampleFormat::S16};
+    const sched::InstanceId pcm{40};
+    const sched::InstanceId loudness{41};
+    constexpr size_t CELLS = 10;
+    const Tone tone(48000, 1, 960 * CELLS);
+    const auto start = [&](Pipelines& p) {
+        p.slot->publish({{pcm, {}, {sched::Codec::PCM, 48000, 1, 16}, 0}},
+                        {{loudness, {}, {visualizer_type::LOUDNESS, 50, {}}, 0}});
+        // Builds the instance and the analysis, which produce nothing with no input
+        EXPECT_TRUE(p.run().empty());
+    };
+    Pipelines roomy(format);
+    start(roomy);
+    Pipelines tight(format);
+    start(tight);
+    ASSERT_EQ(tight.audio.instances_.size(), 1U);
+    ASSERT_EQ(tight.audio.analyses_.size(), 1U);
+    tight.audio.instances_[0].payloads =
+        PayloadSlots::create(tight.audio.instances_[0].payloads->slot_bytes(), 2);
+    tight.audio.analyses_[0].payloads =
+        PayloadSlots::create(tight.audio.analyses_[0].payloads->slot_bytes(), 2);
+
+    ASSERT_EQ(roomy.view->write(tone.pcm.data(), 960 * CELLS).frames, 960 * CELLS);
+    ASSERT_EQ(tight.view->write(tone.pcm.data(), 960 * CELLS).frames, 960 * CELLS);
+    std::map<sched::InstanceId, std::vector<sched::Frame>> expected =
+        frames_by_instance(run_all(roomy));
+    ASSERT_EQ(expected[pcm].size(), CELLS);
+    ASSERT_EQ(expected[loudness].size(), CELLS);
+
+    // Each round's jobs hold the frames in the FIFO, a job more trying again with every slot
+    // taken, then the round drops them as it delivers them
+    const auto round = [&] {
+        while (tight.audio.run_job(now_us())) {}
+        EXPECT_FALSE(tight.audio.run_job(now_us()));
+        return tight.run();
+    };
+    std::map<sched::InstanceId, std::vector<sched::Frame>> got;
+    std::map<sched::InstanceId, int> waits;
+    for (std::vector<GroupEvent> events = round(); !events.empty(); events = round()) {
+        std::map<sched::InstanceId, int> full;
+        for (GroupEvent& event : events) {
+            if (const auto* waiting = std::get_if<PayloadsFull>(&event)) {
+                ++full[waiting->instance];
+            } else if (auto* ready = std::get_if<sendspin::server::FrameReady>(&event)) {
+                // Nothing after a wait in the same run
+                EXPECT_FALSE(full.contains(ready->instance));
+                got[ready->instance].push_back(std::move(ready->frame));
+            }
+        }
+        for (const auto& [instance, count] : full) {
+            EXPECT_EQ(count, 1) << instance.value;
+            waits[instance] += count;
+        }
+        ASSERT_LT(waits[pcm], static_cast<int>(CELLS));
+    }
+    EXPECT_GE(waits[pcm], 4);
+    EXPECT_GE(waits[loudness], 4);
+    ASSERT_EQ(got[pcm].size(), CELLS);
+    ASSERT_EQ(got[loudness].size(), CELLS);
+    EXPECT_EQ(concatenated(got[pcm]), tone.pcm);
+    EXPECT_EQ(concatenated(got[pcm]), concatenated(expected[pcm]));
+    // Each cell's loudness message, but for its timestamp, which follows each run's anchor
+    const size_t message = sendspin::server::visualizer_message_bytes(visualizer_type::LOUDNESS, 0);
+    for (size_t k = 0; k < CELLS; ++k) {
+        SCOPED_TRACE(k);
+        EXPECT_EQ(got[loudness][k].index, static_cast<int64_t>(k));
+        const std::span<const uint8_t> a = got[loudness][k].payload.bytes();
+        const std::span<const uint8_t> b = expected[loudness][k].payload.bytes();
+        ASSERT_EQ(a.size(), message);
+        ASSERT_EQ(b.size(), message);
+        EXPECT_EQ(a[0], b[0]);
+        EXPECT_TRUE(std::equal(a.begin() + 9, a.end(), b.begin() + 9));
+    }
 }
 
 }  // namespace

@@ -52,6 +52,8 @@ set(SENDSPIN_SERVER_SOURCES
     src/noise.cpp
     # One pairing attempt: the decisions as pure functions, and its state and crypto
     src/pairing.cpp
+    # A pipeline instance's frame payloads, in slots placed with the instance
+    src/payload_slots.cpp
     src/pcm_convert.cpp
     src/pipeline_stages.cpp
     src/playback_policy.cpp

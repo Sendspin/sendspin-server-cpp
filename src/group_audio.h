@@ -23,6 +23,7 @@
 #include "frame_encoder.h"
 #include "host_view.h"
 #include "memory.h"
+#include "payload_slots.h"
 #include "pipeline_stages.h"
 #include "ring.h"
 #include "sched/frames.h"
@@ -101,23 +102,32 @@ struct PipelineFailed {
     sched::InstanceId instance;
 };
 
-using GroupEvent = std::variant<EpochCut, EpochStarted, EpochEnded, AnchorShift, DrainStarted,
-                                FrameReady, InstanceFinal, PipelineFailed>;
+/// @brief Every payload slot of the instance holds a frame core has not dropped: it produces
+/// nothing until core drops one and wakes it. Its frames posted before it are in the FIFO ahead
+/// of it, so once core holds fewer than slots of them, one is free.
+struct PayloadsFull {
+    sched::InstanceId instance;
+    size_t slots{0};
+};
 
-/// @brief The ordered group-to-core FIFO: its producers push from any thread, and one posted
-/// handler at a time delivers the events on core, at most a budget per handler.
+using GroupEvent = std::variant<EpochCut, EpochStarted, EpochEnded, AnchorShift, DrainStarted,
+                                FrameReady, InstanceFinal, PipelineFailed, PayloadsFull>;
+
+/// @brief The ordered group-to-core FIFO: its producers push from any thread and signal its Wakeup,
+/// whose run delivers the events on core, at most a budget per run. A push allocates nothing once
+/// the ring has grown to the events a drain finds.
 ///
-/// It needs no cap, since its producers bound it: a frame comes only from staged input, which
-/// admission keeps within the group's lead and write-ahead past the time playing, and a job posts
-/// at most a few epoch events, however many host calls preceded it.
+/// It needs no cap, since its producers bound it: a frame holds one of its instance's payload slots
+/// until core drops it (sched::payload_slots()), and a job posts at most a few epoch events,
+/// however many host calls preceded it.
 class GroupToCoreFifo {
     struct State;
 
 public:
-    /// The most events one handler delivers before it posts itself again
+    /// The most events one run delivers before it signals the next
     static constexpr size_t DRAIN_BUDGET = 64;
-    /// The events the FIFO and a handler's batch have room for before they grow: a few jobs' frames
-    /// and epoch events between two drains
+    /// The events the FIFO and a run's batch have room for before they grow: a few jobs' frames and
+    /// epoch events between two drains
     static constexpr size_t QUEUED_EVENTS = 16;
 
     /// @brief The pushing end, which a job holds on its thread and which may outlive the FIFO
@@ -129,17 +139,16 @@ public:
     private:
         friend class GroupToCoreFifo;
 
-        Producer(EventLoop& loop, std::shared_ptr<State> state);
+        Producer(std::shared_ptr<State> state, Wakeup::Handle wake);
 
-        /// Outlives every producer: the group audio threads are joined before the loop goes
-        EventLoop* loop_;
         std::shared_ptr<State> state_;
+        Wakeup::Handle wake_;
     };
 
     /// @param deliver called on core, in push order
     GroupToCoreFifo(EventLoop& loop, std::function<void(GroupEvent&)> deliver);
-    /// @brief A posted handler still pending delivers nothing, and a later push is dropped. On
-    /// core.
+    /// @brief A run still pending delivers nothing, and a later push is dropped. On core, from a
+    /// delivery too.
     ~GroupToCoreFifo();
     GroupToCoreFifo(const GroupToCoreFifo&) = delete;
     GroupToCoreFifo& operator=(const GroupToCoreFifo&) = delete;
@@ -152,19 +161,21 @@ private:
         /// Its producers bound it (above); room for QUEUED_EVENTS at first
         Ring<GroupEvent> events{QUEUED_EVENTS, Ring<GroupEvent>::UNLIMITED,
                                 MemoryLocation::PREFER_EXTERNAL};
-        bool drain_posted{false};
         /// The FIFO is gone
         bool closed{false};
         /// Core only
         std::function<void(GroupEvent&)> deliver;
-        /// Core only: the batch a handler delivers
+        /// Core only: the batch a run delivers
         Ring<GroupEvent> taking{QUEUED_EVENTS, DRAIN_BUDGET, MemoryLocation::PREFER_EXTERNAL};
+        /// Core only: the FIFO's Wakeup, which a run signals for the events past its budget
+        Wakeup::Handle wake;
     };
 
-    static void drain(EventLoop& loop, const std::shared_ptr<State>& state);
+    /// On core, as the Wakeup's run
+    static void drain(const std::shared_ptr<State>& state);
 
-    EventLoop& loop_;
     std::shared_ptr<State> state_;
+    Wakeup wakeup_;
 };
 
 // ==============================================================================
@@ -256,6 +267,8 @@ private:
         /// ahead of cell next's first sample, so a frame decodes to its own cells
         uint32_t lead{0};
         std::unique_ptr<FrameEncoder> encoder;
+        /// Built with the encoder, a slot of its largest frame for each frame alive at once
+        SharedPtr<PayloadSlots> payloads;
         /// A resampler built for input at resampler_rate; kept while a segment at the output's
         /// rate needs none
         std::unique_ptr<Resampler> resampler;
@@ -311,6 +324,10 @@ private:
         std::unique_ptr<VisualizerAnalysis> analysis;
         /// The most bytes one cell's messages take
         size_t cell_bytes{0};
+        /// A slot of cell_bytes for each cell alive at once
+        SharedPtr<PayloadSlots> payloads;
+        /// One cell's messages, room for cell_bytes, before they go to their slot
+        std::vector<uint8_t> messages;
         bool failed{false};
         /// Its input in the current epoch has started
         bool begun{false};
@@ -385,6 +402,10 @@ private:
     bool cross(Instance& instance, const JobView& view, size_t segment);
     /// At the drain position: flushes the resampler and cuts the output there
     bool finish_drain(Instance& instance, uint64_t drain_end);
+    /// Reserves a slot for the next frame; posts PayloadsFull when none is left and the last try
+    /// found one
+    /// @return false while every slot is taken
+    bool reserve_slot(PayloadSlots& payloads, sched::InstanceId instance);
     /// The output index of cell index's first sample
     static int64_t frame_start(const Instance& instance, int64_t index);
     /// Appends count output samples, dropping those before cell next's first and the lead
@@ -396,7 +417,7 @@ private:
     /// its last sample up to it
     /// @return false when that would repeat more than MAX_BOUNDARY_EXTENSION samples
     bool cut_to(Instance& instance, int64_t total);
-    /// Encodes the instance's next frame from pending and posts it
+    /// Encodes the instance's next frame from pending into the slot produce() reserved and posts it
     /// @param samples the frame's output samples: its frame length, or a drained epoch's last
     /// frame's
     /// @return false when the encoder refused

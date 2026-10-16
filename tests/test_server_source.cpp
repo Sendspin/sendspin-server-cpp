@@ -25,6 +25,7 @@
 #include "crypto/keys.h"
 #include "fragmentation.h"
 #include "frame_encoder.h"
+#include "frame_payloads.h"
 #include "opus_reader.h"
 #include "peer.h"
 #include "player_sink.h"
@@ -497,7 +498,8 @@ TEST(ServerSources, StreamFlacAndRideOutAStallAndAGap) {
                 signal.put(&pcm[i * signal.frame_bytes()], (k * CHUNK) + i);
             }
             Bytes frame;
-            ASSERT_TRUE(encoder->encode(pcm, sendspin::server::SampleFormat::S24, frame));
+            ASSERT_TRUE(sendspin::server::test::encode_into(
+                *encoder, pcm, sendspin::server::SampleFormat::S24, frame));
             send_chunk(raw, base + (int64_t{k} * 20000), frame);
         };
         const auto live = [&](int from, int to) {

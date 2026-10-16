@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include "frame_payload.h"
 #include "ring.h"
 #include "sched/constants.h"
 #include "sched/types.h"
@@ -25,7 +26,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <vector>
 
 namespace sendspin::server::sched {
 
@@ -60,7 +60,7 @@ struct Frame {
     int64_t duration_us{0};
     /// Per channel: `r * m / 50`, fewer only in a drained epoch's last frame
     uint32_t samples{0};
-    std::vector<uint8_t> payload;
+    FramePayload payload;
 };
 
 /// @brief What packing reads of a frame
@@ -73,12 +73,20 @@ struct FrameView {
 
 FrameView view_of(const Frame& frame);
 
-/// @brief The frames of `cells` cells a ring has room for before it first grows: those over the
-/// staging ring's span (the write-ahead and the lead the profile allows), and one more
+/// @brief The frames of `cells` cells over the staging ring's span (the write-ahead and the lead
+/// the profile allows), and one more
 constexpr size_t ring_frames(uint32_t cells) {
     return static_cast<size_t>(profile::STAGING_RING_US /
                                (int64_t{cells > 0 ? cells : 1} * CELL_US)) +
            1;
+}
+
+/// @brief The frames of `cells` cells alive at once, each in a payload slot: ring_frames(), and
+/// those up to profile::PAYLOAD_LAG_US past their play time that core has not pruned
+constexpr size_t payload_slots(uint32_t cells) {
+    const int64_t frame_us = int64_t{cells > 0 ? cells : 1} * CELL_US;
+    return ring_frames(cells) +
+           static_cast<size_t>((profile::PAYLOAD_LAG_US + frame_us - 1) / frame_us);
 }
 
 /// @brief Core's store of one pipeline instance's frames in one epoch, keyed by cell index. The
@@ -87,7 +95,7 @@ constexpr size_t ring_frames(uint32_t cells) {
 class FrameRing {
 public:
     FrameRing(InstanceId instance, uint32_t cells)
-        : frames_(ring_frames(cells), Ring<Frame>::UNLIMITED, MemoryLocation::PREFER_EXTERNAL),
+        : frames_(payload_slots(cells), Ring<Frame>::UNLIMITED, MemoryLocation::PREFER_EXTERNAL),
           instance_(instance),
           cells_(cells) {}
 
@@ -152,7 +160,8 @@ public:
 
 private:
     /// Bounded by the send path's horizon: a frame is dropped once its `ts` passes, and admission
-    /// keeps the input within the group lead and the write-ahead ahead
+    /// keeps the input within the group lead and the write-ahead ahead; at most payload_slots(),
+    /// since each frame holds one of its instance's payload slots
     Ring<Frame> frames_;
     InstanceId instance_;
     EpochId epoch_;

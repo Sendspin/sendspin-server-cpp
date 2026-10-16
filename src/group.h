@@ -218,6 +218,12 @@ private:
     /// stall_timer_ for counts it holds back
     void report_stalls(int64_t now);
     void on_instance_final(const InstanceFinal& final);
+    /// Holds the instance among those waiting for payload slots, then prune_full()
+    void on_payloads_full(const PayloadsFull& full);
+    /// Prunes the rings of the instances waiting for payload slots and wakes the pipelines once
+    /// one holds fewer frames than its slots; payloads_timer_ fires at the earliest frame still
+    /// due, for the others. Also after a restart or erase of rings, which frees their slots.
+    void prune_full();
     /// Excludes the format until the run ends, ends the streams on it and reports each player that
     /// streamed or wanted it
     void on_pipeline_failed(const PipelineFailed& failed);
@@ -313,12 +319,16 @@ private:
     std::shared_ptr<PipelineSetSlot> slot_;
     PipelineSet pipelines_;
     std::map<sched::InstanceId, sched::FrameRing> rings_;
+    /// The instances whose payload slots were all taken when they last asked, with their slots
+    std::vector<PayloadsFull> full_;
     bool drain_check_posted_{false};
     sched::StallCount stalls_;
     /// Fires once a stall report held back is due
     Timer stall_timer_;
     Timer writable_timer_;
     Timer drain_timer_;
+    /// Fires at the earliest frame of a full_ instance's ring
+    Timer payloads_timer_;
     Timer metadata_timer_;
     Timer color_timer_;
 
