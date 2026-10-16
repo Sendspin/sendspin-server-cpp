@@ -35,7 +35,7 @@ constexpr int64_t PS_PER_SECOND = 1000000000000;
 /// `floor((p - p_j) * 10^6 / r_j)` for the given segment
 int64_t offset_us(const Segment& segment, uint64_t position) {
     const int64_t samples = static_cast<int64_t>(position - segment.position);
-    return floor_div(samples * US_PER_SECOND, segment.rate);
+    return scaled_floor(samples, US_PER_SECOND, segment.rate);
 }
 
 }  // namespace
@@ -130,7 +130,7 @@ uint64_t time_position(const Anchor& anchor, int64_t unshifted_us) {
     // first segment extrapolates it
     const int64_t position =
         static_cast<int64_t>(segment.position) +
-        ceil_div((unshifted_us - segment.unshifted_us) * int64_t{segment.rate}, US_PER_SECOND);
+        scaled_ceil(unshifted_us - segment.unshifted_us, segment.rate, US_PER_SECOND);
     return static_cast<uint64_t>(std::max<int64_t>(position, 0));
 }
 
