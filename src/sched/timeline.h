@@ -37,6 +37,24 @@ constexpr int64_t ceil_div(int64_t n, int64_t d) {
     return -floor_div(-n, d);
 }
 
+/// @brief `floor(n * mul / div)` for mul and div positive with `2 * div * mul` within int64: n is
+/// split at a multiple of div, so `n * mul` is never formed and only a result past int64 overflows
+constexpr int64_t scaled_floor(int64_t n, int64_t mul, int64_t div) {
+    const int64_t whole = floor_div(n, div);
+    return (whole * mul) + (((n - (whole * div)) * mul) / div);
+}
+
+/// @brief `ceil(n * mul / div)`, split as scaled_floor() splits it
+constexpr int64_t scaled_ceil(int64_t n, int64_t mul, int64_t div) {
+    return -scaled_floor(-n, mul, div);
+}
+
+/// @brief `n * mul / div` rounded half up, split as scaled_floor() splits it
+constexpr int64_t scaled_round(int64_t n, int64_t mul, int64_t div) {
+    const int64_t whole = floor_div(n, div);
+    return (whole * mul) + ((2 * (n - (whole * div)) * mul + div) / (2 * div));
+}
+
 /// @brief The smallest multiple of `multiple` (positive) at or above n
 constexpr int64_t round_up(int64_t n, int64_t multiple) {
     return ceil_div(n, multiple) * multiple;

@@ -290,6 +290,84 @@ TEST(SchedTimeline, SegmentOutputIndexMonthsIntoARun) {
     }
 }
 
+// The products split at a multiple of the divisor round as the whole product would, past the 2^63
+// it reaches
+TEST(SchedTimeline, ScaledDivisionRounding) {
+    struct Row {
+        const char* name;
+        int64_t n;
+        int64_t mul;
+        int64_t div;
+        int64_t floor;
+        int64_t ceil;
+        int64_t round;
+    };
+    const Row rows[] = {
+        {"Control: a half", 7, 3, 2, 10, 11, 11},
+        {"Control: exact", 6, 3, 2, 9, 9, 9},
+        {"a negative half rounds up", -7, 3, 2, -11, -10, -10},
+        // 10^6 / 384,000 is 2.604
+        {"negative, below the half", -1, 1000000, 384000, -3, -2, -3},
+        {"300 days of 384 kHz samples and one, as microseconds", 9953280000001, 1000000, 384000,
+         25920000000002, 25920000000003, 25920000000003},
+        // 0.384 of a sample past
+        {"300 days and a microsecond, as 384 kHz samples", 25920000000001, 384000, 1000000,
+         9953280000000, 9953280000001, 9953280000000},
+        {"four years of 192 kHz samples and one, at 384 kHz", 24219648000001, 384000, 192000,
+         48439296000002, 48439296000002, 48439296000002},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        EXPECT_EQ(sched::scaled_floor(row.n, row.mul, row.div), row.floor);
+        EXPECT_EQ(sched::scaled_ceil(row.n, row.mul, row.div), row.ceil);
+        EXPECT_EQ(sched::scaled_round(row.n, row.mul, row.div), row.round);
+    }
+}
+
+// One segment months or years long maps positions, times and cells as a short one does, where a
+// sample count times 10^6, or a microsecond count times the rate, passes 2^63
+TEST(SchedTimeline, TimeAndPositionYearsIntoOneSegment) {
+    constexpr int64_t DAY_S = 86400;
+    constexpr int64_t YEAR_S = 365 * DAY_S;
+    struct Row {
+        const char* name;
+        uint32_t rate;
+        uint64_t p0;
+        uint64_t position;
+        int64_t unshifted_us;
+        int64_t cell;
+        uint64_t cell_start;
+    };
+    const Row rows[] = {
+        {"Control: a second at 384 kHz", 384000, 0, 384000, 1000000, 50, 384000},
+        // 10^6 / 384,000 is 2.604 us
+        {"Control: one sample past it", 384000, 0, 384001, 1000002, 50, 384000},
+        {"Control: before p0, extrapolated back", 384000, 1000, 999, -3, -1, 0},
+        {"300 days at 384 kHz", 384000, 0, 300 * DAY_S * 384000, 300 * DAY_S * sched::US_PER_SECOND,
+         300 * DAY_S * sched::CELLS_PER_SECOND, 300 * DAY_S * 384000},
+        {"one sample past it", 384000, 0, (300 * DAY_S * 384000) + 1,
+         (300 * DAY_S * sched::US_PER_SECOND) + 2, 300 * DAY_S * sched::CELLS_PER_SECOND,
+         300 * DAY_S * 384000},
+        // 10^6 / 48,000 is 20.83 us
+        {"seven years at 48 kHz, one sample past", 48000, 0, (7 * YEAR_S * 48000) + 1,
+         (7 * YEAR_S * sched::US_PER_SECOND) + 20, 7 * YEAR_S * sched::CELLS_PER_SECOND,
+         7 * YEAR_S * 48000},
+        // 10^6 / 44,100 is 22.68 us
+        {"seven years at 44.1 kHz, one sample past", 44100, 0, (7 * YEAR_S * 44100) + 1,
+         (7 * YEAR_S * sched::US_PER_SECOND) + 22, 7 * YEAR_S * sched::CELLS_PER_SECOND,
+         7 * YEAR_S * 44100},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        const Anchor anchor = sched::make_anchor(0, row.p0, row.rate, 2);
+        EXPECT_EQ(sched::unshifted_time(anchor, row.position), row.unshifted_us);
+        // Each sample's time is its own at these rates, so the time maps back to the sample
+        EXPECT_EQ(sched::time_position(anchor, row.unshifted_us), row.position);
+        EXPECT_EQ(sched::cell_at(anchor, row.unshifted_us), row.cell);
+        EXPECT_EQ(sched::cell_position(anchor, row.cell), row.cell_start);
+    }
+}
+
 // An instance starts on its own frame boundary, and past a shift whose index its frame length does
 // not divide, so none of its frames straddles one
 TEST(SchedTimeline, InstanceStartPastAStraddledShift) {

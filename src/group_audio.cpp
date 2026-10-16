@@ -655,7 +655,7 @@ bool GroupAudio::begin(Instance& instance, const JobView& view) {
         const auto step_in = static_cast<int64_t>(in.rate / common);
         const auto step_out = static_cast<int64_t>(out_rate / common);
         const auto base = static_cast<int64_t>(in.position);
-        const int64_t at = base + sched::floor_div((first - origin) * in.rate, out_rate);
+        const int64_t at = base + sched::scaled_floor(first - origin, in.rate, out_rate);
         // History of the same input: the staged segment holding the start, while staged
         int64_t lowest = static_cast<int64_t>(view.retain_from);
         for (const StagedSegment& staged : view.segments) {
@@ -851,9 +851,10 @@ bool GroupAudio::finish_drain(Instance& instance, uint64_t drain_end) {
     }
     // The output sample count from the exact drain position, round((P_end - p) * r_out / r_in) past
     // a position p the stretch maps exactly, so rounding never accumulates
-    const uint64_t span = drain_end - instance.origin_position;
-    const auto total = instance.origin_output +
-                       static_cast<int64_t>(((span * 2 * out_rate) + in_rate) / (2 * in_rate));
+    const auto span = static_cast<int64_t>(drain_end - instance.origin_position);
+    const int64_t total =
+        instance.origin_output +
+        sched::scaled_round(span, static_cast<int64_t>(out_rate), static_cast<int64_t>(in_rate));
     if (instance.produced > total) {
         this->cut_to(instance, total);
     }
