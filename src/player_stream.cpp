@@ -65,15 +65,8 @@ std::optional<sched::TriggerKind> PlayerStream::on_activation_written(bool playe
 }
 
 std::optional<sched::TriggerKind> PlayerStream::on_client_state(const ClientState& state) {
-    const bool was_available = this->available_;
-    const bool first = !this->state_received_;
     this->available_ = state.available;
-    this->state_received_ = true;
     std::optional<sched::TriggerKind> kind;
-    // The first client/state is an initial value; a report of true makes the player eligible
-    if (state.available && (first || !was_available)) {
-        kind = sched::TriggerKind::JOIN;
-    }
     // messaging.md "server/activate": an inactive role's object is ignored
     if (this->role_written_ && state.player) {
         if (!this->state_since_activation_) {

@@ -280,6 +280,11 @@ public:
         return this->queued_.empty() ? this->active_roles_ : this->queued_.back().active_roles;
     }
 
+    /// @brief The latest client/state reported `available: true`; false before the first
+    bool available() const {
+        return this->available_;
+    }
+
     const PlayerStream& player() const {
         return this->player_;
     }
@@ -488,6 +493,7 @@ private:
     bool leave_{false};
     bool rekeyed_{false};
     bool state_changed_{false};
+    bool available_{false};
     std::optional<sched::TriggerKind> state_marker_kind_;
     SessionPhase phase_{SessionPhase::AWAIT_CLIENT_INIT};
 };

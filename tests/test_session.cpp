@@ -1109,14 +1109,8 @@ TEST_P(SessionTest, FailsARekeySilently) {
 }
 
 // ==============================================================================
-// The source role
+// Availability
 // ==============================================================================
-
-SessionSettings source_settings() {
-    SessionSettings settings = test_settings();
-    settings.hello.source_codecs = {sendspin::server::Codec::PCM, sendspin::server::Codec::FLAC};
-    return settings;
-}
 
 /// A client/state as the driver takes it in: the marker it calls for follows
 void send_state(Harness& h, const std::string& payload) {
@@ -1124,6 +1118,69 @@ void send_state(Harness& h, const std::string& payload) {
     if (h.session.take_state_changed()) {
         h.session.queue_state_marker();
     }
+}
+
+/// Through an activation with the visualizer role alone, its markers taken
+void activate_visualizer(Harness& h) {
+    ASSERT_NO_FATAL_FAILURE(h.complete_handshake());
+    h.send(h.client.encrypt_json(
+        R"({"type":"client/hello","payload":{"name":"Display","supported_roles":["visualizer@v1"],)"
+        R"("visualizer@v1_support":{"buffer_capacity":100000},)"
+        R"("supported_pair_methods":{"pairing_psk":{}},"unpaired_access":{"enabled":true}}})"));
+    h.session.activate(
+        ServerActivate{true, std::vector<std::string>{"visualizer@v1"}, std::nullopt});
+    const std::vector<OutboundMessage> sent = h.take_all();
+    ASSERT_EQ(sent.size(), 1U);
+    // Read, so the client's nonce follows the server's
+    EXPECT_NE(h.decrypt_json(sent[0]).find("server/activate"), std::string::npos);
+}
+
+// A report of `available: true` that is the first or follows `false` is a join for the client's
+// stream roles, whose start needs the client available (spec messaging.md "stream/start"); another
+// report is not. The client has the visualizer role alone. Each row's last client/state carries no
+// visualizer object, so any join it makes is availability's; the client/states before it carry
+// the object, and the first-report rows send none. With no group bound the trigger has no
+// observable outcome, so the visualizer stream's preconditions show it.
+TEST_P(SessionTest, MakesATurnToAvailableAJoin) {
+    constexpr const char* VISUALIZER = R"("visualizer":{"types":["loudness"],"rate_max":50})";
+    struct Row {
+        const char* name;
+        /// The client/states before, each with the visualizer object
+        std::vector<bool> before;
+        bool available;
+        bool join;
+    };
+    const Row rows[] = {
+        {"Control: true after false", {false}, true, true},
+        {"the first report of true", {}, true, true},
+        {"true after true", {true}, true, false},
+        {"false after true", {true}, false, false},
+        {"the first report of false", {}, false, false},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        Harness h(GetParam());
+        ASSERT_NO_FATAL_FAILURE(activate_visualizer(h));
+        for (const bool available : row.before) {
+            send_state(h, R"({"available":)" + std::string(available ? "true" : "false") + "," +
+                              VISUALIZER + "}");
+            EXPECT_TRUE(h.take_all().empty());
+        }
+        ASSERT_FALSE(h.session.visualizer().preconditions().trigger_pending);
+        send_state(h, R"({"available":)" + std::string(row.available ? "true" : "false") + "}");
+        EXPECT_EQ(h.session.visualizer().preconditions().trigger_pending, row.join);
+        EXPECT_EQ(h.session.available(), row.available);
+    }
+}
+
+// ==============================================================================
+// The source role
+// ==============================================================================
+
+SessionSettings source_settings() {
+    SessionSettings settings = test_settings();
+    settings.hello.source_codecs = {sendspin::server::Codec::PCM, sendspin::server::Codec::FLAC};
+    return settings;
 }
 
 /// Through an activation with the source role and the client/state source object that follows it
