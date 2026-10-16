@@ -98,6 +98,7 @@ add_executable(sendspin_server_cpp_tests
     test_source_decoder.cpp
     test_source_feed.cpp
     test_source_sink.cpp
+    test_source_sink_internals.cpp
     test_source_stream.cpp
     test_soak_wire_checker.cpp
     test_task_queue.cpp
@@ -235,6 +236,12 @@ set_source_files_properties(test_session_driver_internals.cpp PROPERTIES COMPILE
 # bytes, wiped from them, and reads the capacity of the first two to show a longer message grew
 # them, which nothing the session sends or reports shows.
 set_source_files_properties(test_session_internals.cpp PROPERTIES COMPILE_OPTIONS
+                            -fno-access-control)
+# test_source_sink_internals.cpp reads LiveSourceSink::clock_ to learn when its correction has
+# started and sets SourceAsrc::max_block_ of LiveSourceSink::asrc_ to zero for one chunk, so
+# micro-resampler takes nothing and process() refuses: no input the server receives makes it
+# refuse.
+set_source_files_properties(test_source_sink_internals.cpp PROPERTIES COMPILE_OPTIONS
                             -fno-access-control)
 
 # sendspin_server_cpp_beast last: a system Boost's include directory (e.g. /opt/homebrew/include) must

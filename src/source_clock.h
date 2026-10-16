@@ -154,7 +154,7 @@ public:
     /// what the filter holds at the current ratio
     double next_position() const;
 
-    /// @brief The output frames written since create()
+    /// @brief The output frames written since create() or the last reset()
     uint64_t produced() const {
         return this->produced_;
     }

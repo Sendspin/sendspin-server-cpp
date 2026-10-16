@@ -113,7 +113,7 @@ public:
 private:
     /// The run ends unless a stop by the server holds it or the input closed
     void stop_run();
-    /// The corrected positions start over, for a new run
+    /// The corrected positions start over: for a new run, or after the ASRC refuses a chunk
     void restart_correction();
     /// Corrects one chunk's frames and writes them
     void correct(const uint8_t* pcm, size_t frames, int64_t capture_us);
@@ -128,8 +128,8 @@ private:
     /// The corrected frames written since the corrected positions started
     uint64_t written_{0};
     SampleSlip slip_;
-    /// With profile::SOURCE_ASRC: runs from the stream's start, its output written once the
-    /// correction starts, from the position the unaltered frames reached
+    /// With profile::SOURCE_ASRC: runs from the stream's start or its last restart, its output
+    /// written once the correction starts, from the position the unaltered frames reached
     std::unique_ptr<SourceAsrc> asrc_;
     /// A chunk as floats, then corrected (profile::SOURCE_ASRC), or slipped; in PSRAM where there
     /// is one

@@ -159,7 +159,15 @@ void LiveSourceSink::correct(const uint8_t* pcm, size_t frames, int64_t capture_
     const uint64_t first = this->asrc_->produced();
     const std::optional<SourceAsrc::Processed> processed = this->asrc_->process(
         floats, frames, engaged ? ppm : 0.0, corrected, SourceAsrc::max_output(frames));
-    if (!engaged || !processed) {
+    if (!processed) {
+        // Written unaltered; the ASRC's position, which did not move with it, and its state past
+        // the blocks it took start over, else its next output would be cut as written already. What
+        // its filter held of the chunk before is dropped.
+        (void)this->view_->write(floats, frames);
+        this->restart_correction();
+        return;
+    }
+    if (!engaged) {
         (void)this->view_->write(floats, frames);
         this->written_ += frames;
         return;

@@ -29,7 +29,7 @@ const Segment& segment_for(const Anchor& anchor, uint64_t position) {
     return it == anchor.segments.begin() ? anchor.segments.front() : *std::prev(it);
 }
 
-/// Picoseconds in a second, the unit of a segment's elapsed time
+/// Picoseconds in a second, the unit of a segment's elapsed time past its whole seconds
 constexpr int64_t PS_PER_SECOND = 1000000000000;
 
 /// `floor((p - p_j) * 10^6 / r_j)` for the given segment
@@ -57,11 +57,15 @@ void reset_anchor(Anchor& anchor, int64_t t0_us, uint64_t p0, uint32_t rate, uin
 void add_segment(Anchor& anchor, uint64_t position, uint32_t rate, uint8_t channels) {
     const Segment& last = anchor.segments.back();
     const int64_t unshifted = last.unshifted_us + offset_us(last, position);
-    // Whole seconds and the rest apart, so neither product overflows
+    // The segment's whole seconds and the rest apart, so the rest's product stays small
     const auto samples = static_cast<int64_t>(position - last.position);
-    const int64_t elapsed_ps = last.elapsed_ps + ((samples / last.rate) * PS_PER_SECOND) +
-                               ((samples % last.rate) * PS_PER_SECOND / last.rate);
-    anchor.segments.push_back({position, unshifted, rate, channels, elapsed_ps});
+    int64_t elapsed_s = last.elapsed_s + (samples / last.rate);
+    int64_t elapsed_ps = last.elapsed_ps + ((samples % last.rate) * PS_PER_SECOND / last.rate);
+    if (elapsed_ps >= PS_PER_SECOND) {
+        ++elapsed_s;
+        elapsed_ps -= PS_PER_SECOND;
+    }
+    anchor.segments.push_back({position, unshifted, rate, channels, elapsed_s, elapsed_ps});
 }
 
 void add_shift(Anchor& anchor, int64_t index, int64_t delta_us) {
@@ -140,11 +144,10 @@ int64_t first_index_at_or_after_position(const Anchor& anchor, uint64_t position
 }
 
 int64_t segment_output_index(const Anchor& anchor, size_t segment, uint32_t rate) {
-    const int64_t elapsed = anchor.segments[segment].elapsed_ps;
-    // Whole seconds and the rest apart, so neither product overflows; the rest rounds half up
-    const int64_t rest = elapsed % PS_PER_SECOND;
-    return ((elapsed / PS_PER_SECOND) * int64_t{rate}) +
-           (((2 * rest * int64_t{rate}) + PS_PER_SECOND) / (2 * PS_PER_SECOND));
+    const Segment& boundary = anchor.segments[segment];
+    // The picoseconds past the whole seconds round half up
+    return (boundary.elapsed_s * int64_t{rate}) +
+           (((2 * boundary.elapsed_ps * int64_t{rate}) + PS_PER_SECOND) / (2 * PS_PER_SECOND));
 }
 
 int64_t instance_start(const Anchor& anchor, int64_t requested, uint32_t cells) {

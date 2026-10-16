@@ -142,6 +142,7 @@ TEST(SchedTimeline, ResetAnchorLeavesOneSegmentAndNoShifts) {
     EXPECT_EQ(reused.segments[0].unshifted_us, 1000 * MS);
     EXPECT_EQ(reused.segments[0].rate, 48000U);
     EXPECT_EQ(reused.segments[0].channels, 2U);
+    EXPECT_EQ(reused.segments[0].elapsed_s, 0);
     EXPECT_EQ(reused.segments[0].elapsed_ps, 0);
     EXPECT_EQ(reused.shift_base_us, 0);
     EXPECT_TRUE(reused.shifts.empty());
@@ -242,6 +243,51 @@ TEST(SchedTimeline, SegmentOutputIndexFromTheBoundaryTime) {
         sched::add_segment(alternating, i * 1001, i % 2 == 1 ? 48000 : 44100, 2);
     }
     EXPECT_EQ(sched::segment_output_index(alternating, 4, 48000), 4181);
+}
+
+// A boundary months into one run keeps its time to the picosecond, past the 2^63 picoseconds
+// (about 106.7 days) one count of them would hold: whole seconds and the picoseconds past them,
+// carried at each segment
+TEST(SchedTimeline, SegmentOutputIndexMonthsIntoARun) {
+    constexpr uint64_t DAY_S = 86400;
+    struct Row {
+        const char* name;
+        /// The first segment's rate and samples, then the second's; the third is the boundary
+        uint32_t first_rate;
+        uint64_t first_samples;
+        uint32_t second_rate;
+        uint64_t second_samples;
+        int64_t elapsed_s;
+        int64_t elapsed_ps;
+        uint32_t rate;
+        int64_t index;
+    };
+    const Row rows[] = {
+        {"Control: an hour", 48000, 3600 * 48000, 48000, 0, 3600, 0, 44100, 158760000},
+        {"106 days, under the limit", 48000, 106 * DAY_S * 48000, 48000, 0, 9158400, 0, 44100,
+         403885440000},
+        {"107 days, past it", 48000, 107 * DAY_S * 48000, 48000, 0, 9244800, 0, 44100,
+         407695680000},
+        {"past it, over two segments", 44100, 107 * DAY_S * 44100, 48000, 48000, 9244801, 0, 11025,
+         101923931025},
+        // 10^12 / 44,100 is 22,675,736.96, floored; 22.68 us at 48 kHz is 1.088 samples
+        {"past it, one sample over", 44100, (107 * DAY_S * 44100) + 1, 48000, 0, 9244800, 22675736,
+         48000, 443750400001},
+        // 9,244,800.5 s at 11,025 Hz is 101,923,925,512.5
+        {"past it, half a second over rounds up", 44100, (107 * DAY_S * 44100) + 22050, 48000, 0,
+         9244800, 500000000000, 11025, 101923925513},
+        {"two half seconds carry into a whole one", 44100, (107 * DAY_S * 44100) + 22050, 48000,
+         24000, 9244801, 0, 48000, 443750448000},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        Anchor anchor = sched::make_anchor(0, 0, row.first_rate, 2);
+        sched::add_segment(anchor, row.first_samples, row.second_rate, 2);
+        sched::add_segment(anchor, row.first_samples + row.second_samples, 48000, 2);
+        EXPECT_EQ(anchor.segments[2].elapsed_s, row.elapsed_s);
+        EXPECT_EQ(anchor.segments[2].elapsed_ps, row.elapsed_ps);
+        EXPECT_EQ(sched::segment_output_index(anchor, 2, row.rate), row.index);
+    }
 }
 
 // An instance starts on its own frame boundary, and past a shift whose index its frame length does
