@@ -21,6 +21,7 @@
 #include "crypto/base64url.h"
 #include "dispatcher.h"
 #include "frame_encoder.h"
+#include "frame_payloads.h"
 #include "host_view.h"
 #include "job_view.h"
 #include "source_decoder.h"
@@ -233,8 +234,8 @@ FlacStream encode_flac(const Bytes& audio) {
     constexpr size_t FRAME_BYTES = 960 * 4;
     for (size_t at = 0; at < audio.size(); at += FRAME_BYTES) {
         Bytes payload;
-        EXPECT_TRUE(
-            encoder->encode(std::span(audio).subspan(at, FRAME_BYTES), SampleFormat::S16, payload));
+        EXPECT_TRUE(sendspin::server::test::encode_into(
+            *encoder, std::span(audio).subspan(at, FRAME_BYTES), SampleFormat::S16, payload));
         stream.frames.push_back(payload);
     }
     return stream;
@@ -302,7 +303,8 @@ TEST(SourceDecoder, DecodesOpusPackets) {
     const std::unique_ptr<sendspin::server::FrameEncoder> encoder =
         sendspin::server::FrameEncoder::create(format);
     Bytes packet;
-    ASSERT_TRUE(encoder->encode(pcm16(960), SampleFormat::S16, packet));
+    ASSERT_TRUE(
+        sendspin::server::test::encode_into(*encoder, pcm16(960), SampleFormat::S16, packet));
     Rig r;
     r.start({Codec::OPUS, 2, 48000, 0});
     ASSERT_EQ(r.sink->formats.size(), 1U);

@@ -45,6 +45,9 @@ constexpr int64_t STAGING_RING_US = WRITE_AHEAD_MAX_US + STAGING_LEAD_ALLOWANCE_
 static_assert(STAGING_RING_US > WRITE_AHEAD_MAX_US, "admission must stay within the staging ring");
 /// @brief ...or this many bytes, whichever is less (in PSRAM on the embedded profile)
 constexpr size_t STAGING_RING_MAX_BYTES = (EMBEDDED ? size_t{2} : size_t{64}) * 1024 * 1024;
+/// @brief How long core may stall without pruning a pipeline instance's frames before the
+/// instance's payload slots run out and it waits; past it, the wait costs a rebase
+constexpr int64_t PAYLOAD_LAG_US = EMBEDDED ? 500000 : 1000000;
 
 /// @brief Accepted connections in their WebSocket upgrade or handshake
 /// (connection_limits::MAX_ACCEPTED_HANDSHAKES); lwIP's socket table is small on the embedded

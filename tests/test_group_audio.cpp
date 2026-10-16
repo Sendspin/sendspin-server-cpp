@@ -21,6 +21,7 @@
 #include "dispatcher.h"
 #include "flac_reader.h"
 #include "frame_encoder.h"
+#include "freed_blocks.h"
 #include "group_audio.h"
 #include "group_pipelines.h"
 #include "host_view.h"
@@ -41,6 +42,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -67,6 +69,7 @@ using sendspin::server::InputId;
 using sendspin::server::InstanceFinal;
 using sendspin::server::now_us;
 using sendspin::server::SampleFormat;
+using sendspin::server::test::bytes_of;
 using sendspin::server::test::concatenated;
 using sendspin::server::test::drained_last_cell;
 using sendspin::server::test::expect_resampled;
@@ -98,7 +101,10 @@ protected:
               sendspin::server::InputOptions{InputFormat{RATE, 1, SampleFormat::S16}},
               sendspin::server::GroupParams{LEAD_US, 0, 1000000},
               std::make_shared<sendspin::server::Dispatcher>(), nullptr)),
-          fifo(this->loop, [this](GroupEvent& event) { this->events.push_back(event); }),
+          fifo(this->loop,
+               [this](GroupEvent& event) {
+                   sendspin::server::test::keep_event(this->events, event);
+               }),
           audio(this->view, this->fifo.producer(), this->slot,
                 sendspin::server::ResamplerQuality::MEDIUM) {
         // One 24-bit mono instance from the start
@@ -130,7 +136,7 @@ protected:
     static std::string kinds(const std::vector<GroupEvent>& events) {
         std::string out;
         for (const GroupEvent& event : events) {
-            out += "CSEADFfP"[event.index()];
+            out += "CSEADFfPW"[event.index()];
         }
         return out;
     }
@@ -159,8 +165,8 @@ TEST_F(GroupAudioTest, CutsFramesOnTheCellGridThroughADrain) {
         EXPECT_EQ(frame.duration_us, 20000);
         // 16-bit samples shifted up to 24 bits, little-endian
         ASSERT_EQ(frame.payload.size(), CELL * 3);
-        EXPECT_EQ(frame.payload[3], 0);
-        EXPECT_EQ(frame.payload[4], static_cast<uint8_t>((k * CELL) + 1));
+        EXPECT_EQ(frame.payload.bytes()[3], 0);
+        EXPECT_EQ(frame.payload.bytes()[4], static_cast<uint8_t>((k * CELL) + 1));
     }
 
     // DrainStarted once the last frame is produced, so no rebase follows
@@ -209,11 +215,11 @@ TEST_F(GroupAudioTest, EncodesFlacFramesBesidePcmOnes) {
                 EXPECT_EQ(encoded[i].duration_us, same->duration_us);
                 // Compressed: the ramp is predictable
                 EXPECT_LT(encoded[i].payload.size(), same->payload.size());
-                const auto decoded = decoder.decode(encoded[i].payload);
+                const auto decoded = decoder.decode(encoded[i].payload.bytes());
                 ASSERT_TRUE(decoded);
                 ASSERT_EQ(decoded->size(), 1U);
                 EXPECT_EQ(decoded->front().number, numbers[i]);
-                EXPECT_EQ(decoded->front().pcm, same->payload);
+                EXPECT_EQ(decoded->front().pcm, bytes_of(same->payload));
             }
         };
 
@@ -245,7 +251,8 @@ TEST_F(GroupAudioTest, EncodesFlacFramesBesidePcmOnes) {
     EXPECT_EQ(kinds(events), "FFFFFFDfff");
     for (auto& [instance, list] : frames_by_instance(events)) {
         auto& all = instance == JOINER ? joined[instance] : second[instance];
-        all.insert(all.end(), list.begin(), list.end());
+        all.insert(all.end(), std::make_move_iterator(list.begin()),
+                   std::make_move_iterator(list.end()));
     }
     ASSERT_EQ(second[PCM].size(), 4U);
     EXPECT_EQ(second[PCM].back().samples, 100U);
@@ -283,7 +290,8 @@ TEST_F(GroupAudioTest, FollowsFlushPauseAndResume) {
     ASSERT_EQ(kinds(events), "SFF");
     EXPECT_NE(std::get<EpochStarted>(events[0]).run, first.run);
     // The same audio again, from the start of the resumed epoch
-    EXPECT_EQ(std::get<FrameReady>(events[1]).frame.payload[1], static_cast<uint8_t>(500 & 0xFF));
+    EXPECT_EQ(std::get<FrameReady>(events[1]).frame.payload.bytes()[1],
+              static_cast<uint8_t>(500 & 0xFF));
     EXPECT_EQ(std::get<FrameReady>(events[1]).frame.index, 0);
 
     this->view->stop();
@@ -377,7 +385,7 @@ using sendspin::server::PipelineRequest;
 std::string kinds_of(const std::vector<GroupEvent>& events) {
     std::string out;
     for (const GroupEvent& event : events) {
-        out += "CSEADFfP"[event.index()];
+        out += "CSEADFfPW"[event.index()];
     }
     return out;
 }
@@ -499,10 +507,10 @@ TEST(GroupAudioPipelines, CutEveryFormatOnTheCellGridThroughADrain) {
     const std::vector<sched::Frame>& pcm_frames = frames[sched::InstanceId{21}];
     const std::vector<sched::Frame>& flac_frames = frames[sched::InstanceId{22}];
     for (size_t k = 0; k < flac_frames.size(); ++k) {
-        const auto decoded = reader.decode(flac_frames[k].payload);
+        const auto decoded = reader.decode(flac_frames[k].payload.bytes());
         ASSERT_TRUE(decoded);
         ASSERT_EQ(decoded->size(), 1U);
-        EXPECT_EQ(decoded->front().pcm, pcm_frames[k].payload) << k;
+        EXPECT_EQ(decoded->front().pcm, bytes_of(pcm_frames[k].payload)) << k;
     }
 }
 
@@ -562,10 +570,10 @@ TEST(GroupAudioPipelines, CutsTwoCellFramesAt11025Hz) {
     for (size_t i = 0; i < frames[flac].size(); ++i) {
         EXPECT_EQ(frames[flac][i].index, frames[pcm][i].index);
         EXPECT_EQ(frames[flac][i].ts_us, frames[pcm][i].ts_us);
-        const auto decoded = reader.decode(frames[flac][i].payload);
+        const auto decoded = reader.decode(frames[flac][i].payload.bytes());
         ASSERT_TRUE(decoded);
         ASSERT_EQ(decoded->size(), 1U);
-        EXPECT_EQ(decoded->front().pcm, frames[pcm][i].payload) << i;
+        EXPECT_EQ(decoded->front().pcm, bytes_of(frames[pcm][i].payload)) << i;
     }
 
     ASSERT_EQ(frames[resampled].size(), 52U);
@@ -655,7 +663,7 @@ std::map<int64_t, Bytes> payloads_from(const std::vector<sched::Frame>& frames, 
     std::map<int64_t, Bytes> out;
     for (const sched::Frame& frame : frames) {
         if (frame.index >= index) {
-            out[frame.index] = frame.payload;
+            out[frame.index] = bytes_of(frame.payload);
         }
     }
     return out;
@@ -883,11 +891,12 @@ void run_segments_seed(uint64_t seed) {
             }
             total += list[i].samples;
             if (request.format.codec == sched::Codec::FLAC) {
-                const auto decoded = reader.decode(list[i].payload);
+                const auto decoded = reader.decode(list[i].payload.bytes());
                 ASSERT_TRUE(decoded && decoded->size() == 1U) << i;
                 out.insert(out.end(), decoded->front().pcm.begin(), decoded->front().pcm.end());
             } else {
-                out.insert(out.end(), list[i].payload.begin(), list[i].payload.end());
+                out.insert(out.end(), list[i].payload.bytes().begin(),
+                           list[i].payload.bytes().end());
             }
         }
         EXPECT_EQ(finals.at(request.instance), list.back().index);
@@ -940,14 +949,14 @@ TEST_F(GroupAudioTest, DuplicatesAMonoInputIntoEveryChannel) {
     constexpr sched::InstanceId STEREO{30};
     this->slot->publish({{STEREO, {}, {sched::Codec::PCM, RATE, 2, 16}, 0}});
     this->write(2 * CELL, 100);
-    const std::vector<sched::Frame> frames = frames_by_instance(this->run())[STEREO];
+    const std::vector<sched::Frame> frames = std::move(frames_by_instance(this->run())[STEREO]);
     ASSERT_EQ(frames.size(), 2U);
     for (const sched::Frame& frame : frames) {
         ASSERT_EQ(frame.payload.size(), CELL * 4);
         for (uint64_t i = 0; i < CELL; ++i) {
             const int32_t expected = static_cast<int32_t>(100 + (frame.index * CELL) + i);
-            ASSERT_EQ(sample_at(frame.payload, i * 2, 2), expected);
-            ASSERT_EQ(sample_at(frame.payload, (i * 2) + 1, 2), expected);
+            ASSERT_EQ(sample_at(frame.payload.bytes(), i * 2, 2), expected);
+            ASSERT_EQ(sample_at(frame.payload.bytes(), (i * 2) + 1, 2), expected);
         }
     }
 }
@@ -983,7 +992,7 @@ std::optional<double> impulse_time_us(const std::vector<sched::Frame>& frames, u
     int32_t peak = 0;
     for (const sched::Frame& frame : frames) {
         for (uint32_t i = 0; i < frame.samples; ++i) {
-            const int32_t value = std::abs(sample_at(frame.payload, i, 3));
+            const int32_t value = std::abs(sample_at(frame.payload.bytes(), i, 3));
             if (value > peak) {
                 peak = value;
                 at = static_cast<double>(frame.ts_us) + (i * 1e6 / rate);
@@ -1057,7 +1066,7 @@ TEST(GroupAudioPipelines, ResumesAResampledInstanceFromRealHistory) {
     p.run();
     p.view->resume();
     p.view->drain();
-    std::vector<sched::Frame> frames = frames_by_instance(p.run())[resampled];
+    std::vector<sched::Frame> frames = std::move(frames_by_instance(p.run())[resampled]);
     ASSERT_FALSE(frames.empty());
     EXPECT_EQ(frames.front().index, 0);
 
@@ -1101,14 +1110,15 @@ TEST(GroupAudioPipelines, CatchesUpAResampledInstanceAddedMidEpoch) {
     ASSERT_EQ(p.view->write(pcm.data(), 10 * 882).frames, 10 * 882U);
     std::vector<GroupEvent> events = p.run();
     const sched::EpochId epoch = std::get<EpochStarted>(events.front()).epoch;
-    std::vector<sched::Frame> first = frames_by_instance(events)[running];
+    std::vector<sched::Frame> first = std::move(frames_by_instance(events)[running]);
 
     p.slot->publish({{running, {}, pcm48, 0}, {caught_up, epoch, pcm48, 4}});
     ASSERT_EQ(p.view->write(pcm.data() + (10 * 882 * 4), 10 * 882).frames, 10 * 882U);
     p.view->drain();
     events = p.run();
     std::map<sched::InstanceId, std::vector<sched::Frame>> frames = frames_by_instance(events);
-    first.insert(first.end(), frames[running].begin(), frames[running].end());
+    first.insert(first.end(), std::make_move_iterator(frames[running].begin()),
+                 std::make_move_iterator(frames[running].end()));
     ASSERT_FALSE(frames[caught_up].empty());
     EXPECT_EQ(frames[caught_up].front().index, 4);
     for (const sched::Frame& frame : frames[caught_up]) {
@@ -1116,7 +1126,7 @@ TEST(GroupAudioPipelines, CatchesUpAResampledInstanceAddedMidEpoch) {
             return f.index == frame.index;
         });
         ASSERT_NE(same, first.end());
-        EXPECT_EQ(frame.payload, same->payload) << frame.index;
+        EXPECT_EQ(bytes_of(frame.payload), bytes_of(same->payload)) << frame.index;
     }
     std::map<sched::InstanceId, int64_t> finals = final_indices(events);
     EXPECT_EQ(drained_last_cell(events), 19);
@@ -1366,7 +1376,7 @@ TEST(GroupAudioLive, TakesEveryWriteWhilePausedAndResumesAtTheHead) {
     EXPECT_EQ(std::get<EpochStarted>(events[0]).anchor.segments.front().position, head);
     const sched::Frame& frame = std::get<FrameReady>(events[1]).frame;
     EXPECT_EQ(frame.index, 0);
-    EXPECT_EQ(sample_at(frame.payload, 0, 3), 1000 * 256);
+    EXPECT_EQ(sample_at(frame.payload.bytes(), 0, 3), 1000 * 256);
 }
 
 // Through a live pause, the staging ring keeps the history before the head a resampled instance
@@ -1392,7 +1402,7 @@ TEST(GroupAudioLive, ResumesAResampledInstanceFromTheHistoryBeforeTheHead) {
     p.view->resume();
     ASSERT_EQ(p.view->write(pcm.data() + HEAD, SAMPLES - HEAD).frames, SAMPLES - HEAD);
     p.view->drain();
-    std::vector<sched::Frame> frames = frames_by_instance(p.run())[resampled];
+    std::vector<sched::Frame> frames = std::move(frames_by_instance(p.run())[resampled]);
     ASSERT_FALSE(frames.empty());
     EXPECT_EQ(frames.front().index, 0);
 
@@ -1456,7 +1466,7 @@ TEST(GroupAudioOpus, EncodesPacketsAlignedWithTheInput) {
         EXPECT_EQ(frame.ts_us, frames[pcm][k].ts_us);
         // A packet decodes to a whole frame, the last one too
         EXPECT_EQ(frame.samples, BLOCK);
-        const std::optional<std::vector<int16_t>> samples = reader.decode(frame.payload);
+        const std::optional<std::vector<int16_t>> samples = reader.decode(frame.payload.bytes());
         ASSERT_TRUE(samples);
         ASSERT_EQ(samples->size(), BLOCK * 2);
         decoded.insert(decoded.end(), samples->begin(), samples->end());
@@ -1479,7 +1489,7 @@ TEST(GroupAudioOpus, EncodesPacketsAlignedWithTheInput) {
 }
 
 // Events pushed before core drains, more than the FIFO has room for at first and more than one
-// handler's budget, are delivered once each, in push order
+// run's budget, are delivered once each, in push order
 TEST(GroupToCoreFifo, DeliversInOrderPastItsRoomAndItsBudget) {
     using sendspin::server::AnchorShift;
     using sendspin::server::GroupToCoreFifo;
@@ -1518,7 +1528,7 @@ TEST(GroupAudioOnItsThread, PostsInOrderWhenWokenByTheHost) {
     std::vector<GroupEvent> events;
     sendspin::server::GroupToCoreFifo fifo(loop, [&](GroupEvent& event) {
         const std::lock_guard<std::mutex> lock(mutex);
-        events.push_back(event);
+        sendspin::server::test::keep_event(events, event);
         delivered.notify_all();
     });
     const auto view = std::make_shared<HostView>(
@@ -1580,7 +1590,7 @@ std::vector<int64_t> message_timestamps(const std::vector<GroupEvent>& events, u
         if (ready == nullptr || ready->instance != ANALYSIS) {
             continue;
         }
-        const Bytes& payload = ready->frame.payload;
+        const Bytes payload = bytes_of(ready->frame.payload);
         for (size_t at = 0; at < payload.size(); at += bytes) {
             EXPECT_EQ(payload[at], id);
             out.push_back(wire::timestamp_at(payload, at + wire::TIMESTAMP_AT));
@@ -1635,7 +1645,8 @@ TEST_F(GroupAudioTest, ShiftsAnalysisMessagesWithTheFrames) {
     constexpr int64_t STALL_US = 2000000;
     this->write(2 * CELL, 0);
     std::vector<GroupEvent> stalled = this->run(STALL_US);
-    events.insert(events.end(), stalled.begin(), stalled.end());
+    events.insert(events.end(), std::make_move_iterator(stalled.begin()),
+                  std::make_move_iterator(stalled.end()));
     ASSERT_TRUE(std::any_of(events.begin(), events.end(), [](const GroupEvent& event) {
         return std::holds_alternative<sendspin::server::AnchorShift>(event);
     }));
@@ -1826,6 +1837,86 @@ TEST_F(GroupAudioTest, BuildsOneAnalysisPerJobAndHoldsTheOthersInput) {
         EXPECT_EQ(frames[id].front().index, 20) << id.value;
         EXPECT_EQ(frames[id].back().index, 29) << id.value;
     }
+}
+
+// Once warmed up, producing and dropping frames allocates nothing: the jobs of a PCM, a FLAC and an
+// Opus instance and a visualizer analysis, each frame's payload in its instance's slots, and core's
+// handler appending each frame to its ring, which drops it as it plays. Counted through the
+// sanitizer's malloc hook on the thread that runs both; skipped without ASan or TSan.
+TEST(GroupAudioAllocations, ProducesAndDropsFramesWithoutAllocating) {
+    if (!AllocationCount::available()) {
+        GTEST_SKIP() << "needs the sanitizer's malloc hook";
+    }
+    // Control: a block allocated while counting is counted
+    {
+        AllocationCount control;
+        control.start();
+        // Through a volatile pointer, so the compiler keeps the allocation
+        std::vector<uint8_t>* volatile block = new std::vector<uint8_t>(64);
+        control.stop();
+        delete block;
+        EXPECT_EQ(control.blocks(), 2);
+    }
+    constexpr uint32_t STEREO = 2;
+    const std::array<sched::InstanceId, 3> instances{
+        {sched::InstanceId{51}, sched::InstanceId{52}, sched::InstanceId{53}}};
+    const sched::InstanceId analysis{54};
+    std::map<sched::InstanceId, sched::FrameRing> rings;
+    for (const sched::InstanceId id : instances) {
+        rings.emplace(id, sched::FrameRing(id, 1));
+    }
+    rings.emplace(analysis, sched::FrameRing(analysis, 1));
+    size_t dropped = 0;
+    sendspin::server::EventLoop loop;
+    sendspin::server::GroupToCoreFifo fifo(loop, [&](GroupEvent& event) {
+        if (const auto* started = std::get_if<EpochStarted>(&event)) {
+            for (auto& [id, ring] : rings) {
+                ring.restart(started->epoch, 0);
+            }
+        } else if (auto* ready = std::get_if<FrameReady>(&event)) {
+            // Appended as it plays, so the ring drops it at once
+            const int64_t ts = ready->frame.ts_us;
+            EXPECT_TRUE(rings.at(ready->instance).append(std::move(ready->frame), ts));
+            EXPECT_EQ(rings.at(ready->instance).size(), 0U);
+            ++dropped;
+        }
+    });
+    const auto view = std::make_shared<HostView>(
+        GroupId{1}, InputId{1},
+        sendspin::server::InputOptions{InputFormat{RATE, STEREO, SampleFormat::S16}},
+        sendspin::server::GroupParams{LEAD_US, 0, 10000000},
+        std::make_shared<sendspin::server::Dispatcher>(), nullptr);
+    auto slot = std::make_shared<sendspin::server::PipelineSetSlot>();
+    slot->publish(
+        {{instances[0], {}, {sched::Codec::PCM, RATE, STEREO, 16}, 0},
+         {instances[1], {}, {sched::Codec::FLAC, RATE, STEREO, 16}, 0},
+         {instances[2], {}, {sched::Codec::OPUS, RATE, STEREO, 16}, 0}},
+        {{analysis,
+          {},
+          {sendspin::server::visualizer_type::LOUDNESS | sendspin::server::visualizer_type::F_PEAK,
+           50,
+           {}},
+          0}});
+    sendspin::server::GroupAudio audio(view, fifo.producer(), slot,
+                                       sendspin::server::ResamplerQuality::MEDIUM);
+    const Tone tone(RATE, STEREO, CELL);
+    AllocationCount count;
+    constexpr int WARM_UP = 20;
+    constexpr int COUNTED = 50;
+    for (int cell = 0; cell < WARM_UP + COUNTED; ++cell) {
+        ASSERT_EQ(view->write(tone.pcm.data(), CELL).frames, CELL);
+        if (cell == WARM_UP) {
+            dropped = 0;
+            count.start();
+        }
+        while (audio.run_job(now_us())) {}
+        loop.impl().io().restart();
+        loop.impl().io().poll();
+    }
+    count.stop();
+    // Every instance's frame and the analysis's cell for each counted cell
+    EXPECT_GE(dropped, size_t{COUNTED} * 4);
+    EXPECT_EQ(count.blocks(), 0);
 }
 
 }  // namespace

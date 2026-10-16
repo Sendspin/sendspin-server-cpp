@@ -15,7 +15,8 @@
 /// @file test_group_internals.cpp
 /// @brief A group on core with its pipeline job on the group audio threads: a group erased on
 /// core while its job runs, an input released while its epoch start is queued, a full ring
-/// answered once the job frees it, a slew freed on core, and a group's stall counts and reports.
+/// answered once the job frees it, a slew freed on core, a group's stall counts and reports, and
+/// the rings of an instance whose payload slots are all taken.
 /// Compiled with -fno-access-control (tests/CMakeLists.txt).
 
 #include "artwork_cache.h"
@@ -104,7 +105,7 @@ TEST(GroupAudioThread, ErasesAGroupWhileItsJobRuns) {
             return more;
         };
     });
-    // Core waits, then erases the group, so the FIFO handler the job posts runs after the erase
+    // Core waits, then erases the group, so the FIFO's run the job signals comes after the erase
     std::promise<void> core_gate;
     std::promise<void> erased;
     loop.post([&] {
@@ -118,7 +119,7 @@ TEST(GroupAudioThread, ErasesAGroupWhileItsJobRuns) {
     gate.wait_reached();
     core_gate.set_value();
     erased.get_future().wait();
-    // The FIFO handler the job posted has run once a handler posted now runs, while the job,
+    // The FIFO's run the job signalled has run once a handler posted now runs, while the job,
     // still at its gate, holds the FIFO's state
     std::promise<void> handled;
     loop.post([&] { handled.set_value(); });
@@ -204,8 +205,8 @@ TEST(GroupAudioThread, ReleasesAnInputWhoseEpochStartIsStillQueued) {
             };
         });
         on_core(loop, [] {});
-        // Core waits until the release, so the write's wakeup and the FIFO handler the job posts
-        // run after it, in that order
+        // Core waits until the release, so the write's wakeup and the FIFO's run the job signals
+        // come after it, in that order
         std::promise<void> core_gate;
         if (queued) {
             loop.post([gate = core_gate.get_future().share()] { gate.wait(); });
@@ -214,7 +215,7 @@ TEST(GroupAudioThread, ReleasesAnInputWhoseEpochStartIsStillQueued) {
         const std::vector<uint8_t> pcm(size_t{960} * 4, 1);
         ASSERT_EQ(view->write(pcm.data(), 960).frames, 960U);
         ran.get_future().wait();
-        // The FIFO handler, posted before the job returned, has run once a later handler runs
+        // The FIFO's run, signalled before the job returned, has run once a later handler runs
         if (!queued) {
             EXPECT_TRUE(on_core(loop, [&] { return group->playing_; }));
         }
@@ -231,7 +232,7 @@ TEST(GroupAudioThread, ReleasesAnInputWhoseEpochStartIsStillQueued) {
         busy.get_future().wait();
         view->release();
         core_gate.set_value();
-        // Core handles the release's wakeup, then the FIFO handler, then this
+        // Core handles the release's wakeup, then the FIFO's run, then this
         on_core(loop, [] {});
         const auto [playing, attached] =
             on_core(loop, [&] { return std::pair{group->playing_, group->input_ != nullptr}; });
@@ -484,6 +485,159 @@ TEST(GroupStalls, ReportsAtMostEveryPeriodAndHoldsNothingBack) {
         s.loop.shutdown(0);
     });
     core.join();
+}
+
+// ==============================================================================
+// An instance whose payload slots are all taken
+// ==============================================================================
+
+// Core holds a full instance until its ring holds fewer frames than its slots, then wakes the
+// pipelines: at once for a ring empty or pruned below them, and by its timer at the earliest
+// frame's time when every frame is still ahead; an instance with no ring is let go without a wake.
+// White-box: the group's pipeline task (Group::audio_) replaced with one that counts its runs, its
+// rings_ filled directly, on_payloads_full() called as the group-to-core FIFO does, and full_ read
+// on core.
+TEST(GroupPayloads, WakesAFullInstanceOnceItsRingHoldsFewerFramesThanItsSlots) {
+    using sendspin::server::PayloadsFull;
+    namespace sched = sendspin::server::sched;
+    constexpr size_t SLOTS = 2;
+    StallGroup s;
+    sendspin::server::Group& group = *s.group;
+    std::atomic<int> runs{0};
+    group.audio_ = s.workers.add([&runs] {
+        ++runs;
+        return false;
+    });
+    std::thread core([&] { s.loop.run(); });
+    const auto wait_for_runs = [&](int count) {
+        // A regression hangs into the suite watchdog
+        while (runs.load() < count) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    sched::FrameRing& ring = group.rings_.at(StallGroup::PLAYER);
+    // Two frames, the first at first_us; on core
+    const auto hold = [&](int64_t first_us, int64_t second_us) {
+        ring.restart(StallGroup::EPOCH, 0);
+        const int64_t now = sendspin::server::now_us();
+        for (int64_t index = 0; index < 2; ++index) {
+            sched::Frame frame;
+            frame.epoch = StallGroup::EPOCH;
+            frame.index = index;
+            frame.ts_us = index == 0 ? first_us : second_us;
+            EXPECT_TRUE(ring.append(std::move(frame), now));
+        }
+    };
+
+    // No ring: let go. The one worker runs tasks in the order woken, so once a probe woken after
+    // has run, a wake would have run too.
+    on_core(s.loop, [&] {
+        group.on_payloads_full(PayloadsFull{sched::InstanceId{99}, SLOTS});
+        EXPECT_TRUE(group.full_.empty());
+    });
+    std::promise<void> probed;
+    const std::shared_ptr<AudioWorkers::Task> probe = s.workers.add([&probed] {
+        probed.set_value();
+        return false;
+    });
+    probe->wake();
+    probed.get_future().wait();
+    EXPECT_EQ(runs.load(), 0);
+
+    // An empty ring holds fewer frames than its slots
+    on_core(s.loop, [&] {
+        group.on_payloads_full(PayloadsFull{StallGroup::ANALYSIS, SLOTS});
+        EXPECT_TRUE(group.full_.empty());
+    });
+    wait_for_runs(1);
+
+    // One frame due and one ahead: the due one is pruned
+    const int64_t now = sendspin::server::now_us();
+    on_core(s.loop, [&] { hold(now + 1, now + 10'000'000); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    on_core(s.loop, [&] {
+        group.on_payloads_full(PayloadsFull{StallGroup::PLAYER, SLOTS});
+        EXPECT_TRUE(group.full_.empty());
+        EXPECT_EQ(ring.size(), 1U);
+    });
+    wait_for_runs(2);
+
+    // Every frame ahead: held, nothing pruned, until the timer at the earliest one
+    on_core(s.loop, [&] {
+        const int64_t at = sendspin::server::now_us();
+        hold(at + 50'000, at + 10'000'000);
+        group.on_payloads_full(PayloadsFull{StallGroup::PLAYER, SLOTS});
+        ASSERT_EQ(group.full_.size(), 1U);
+        EXPECT_EQ(ring.size(), 2U);
+        EXPECT_EQ(runs.load(), 2);
+    });
+    wait_for_runs(3);
+    on_core(s.loop, [&] {
+        EXPECT_TRUE(group.full_.empty());
+        EXPECT_EQ(ring.size(), 1U);
+    });
+
+    s.loop.post([&] {
+        s.group.reset();
+        s.loop.shutdown(0);
+    });
+    core.join();
+}
+
+// A full instance whose frames are all far ahead is let go as soon as its ring restarts and so
+// returns every slot: at a flush's cut, an epoch's start or the run's end. White-box: rings_ filled
+// directly, on_payloads_full() and the restarts called as the FIFO does, and full_ read; the run's
+// end with no pipelines (pipelines_), so its recompute keeps the rings.
+TEST(GroupPayloads, LetsAFullInstanceGoWhenItsRingRestarts) {
+    using sendspin::server::PayloadsFull;
+    namespace sched = sendspin::server::sched;
+    struct Row {
+        const char* name;
+        void (*restart)(sendspin::server::Group&);
+        bool held;
+    };
+    const Row rows[] = {
+        {"Control: no restart", [](sendspin::server::Group&) {}, true},
+        {"a flush's cut",
+         [](sendspin::server::Group& group) {
+             group.on_epoch_cut(sendspin::server::EpochCut{sched::EpochId{2}});
+         },
+         false},
+        {"an epoch's start",
+         [](sendspin::server::Group& group) {
+             sendspin::server::EpochStarted started{sched::RunId{1}, sched::EpochId{2},
+                                                    sched::make_anchor(0, 0, 48000, 2),
+                                                    std::nullopt};
+             group.on_epoch_started(started);
+         },
+         false},
+        {"the run's end",
+         [](sendspin::server::Group& group) {
+             group.pipelines_ = {};
+             group.end_run(StallGroup::EPOCH);
+         },
+         false},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        StallGroup s;
+        sendspin::server::Group& group = *s.group;
+        sched::FrameRing& ring = group.rings_.at(StallGroup::PLAYER);
+        ring.restart(StallGroup::EPOCH, 0);
+        const int64_t now = sendspin::server::now_us();
+        for (int64_t index = 0; index < 2; ++index) {
+            sched::Frame frame;
+            frame.epoch = StallGroup::EPOCH;
+            frame.index = index;
+            frame.ts_us = now + ((index + 1) * 10'000'000);
+            ASSERT_TRUE(ring.append(std::move(frame), now));
+        }
+        group.on_payloads_full(PayloadsFull{StallGroup::PLAYER, 2});
+        ASSERT_EQ(group.full_.size(), 1U);
+        row.restart(group);
+        EXPECT_EQ(group.rings_.size(), 2U);
+        EXPECT_EQ(group.full_.size(), row.held ? 1U : 0U);
+    }
 }
 
 }  // namespace

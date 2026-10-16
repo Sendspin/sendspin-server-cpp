@@ -18,6 +18,7 @@
 
 #include "flac_reader.h"
 #include "frame_encoder.h"
+#include "frame_payloads.h"
 #include "opus_reader.h"
 #include "pcm_convert.h"
 #include <gtest/gtest.h>
@@ -109,7 +110,11 @@ TEST(OutputShape, GivesEachEncodersFrameBound) {
         EXPECT_EQ(shape.encoder_available, row.available);
         EXPECT_EQ(shape.max_frame_bytes, row.max_frame_bytes);
         EXPECT_EQ(shape.layout.samples, row.format.sample_rate / 50);
-        EXPECT_EQ(static_cast<bool>(FrameEncoder::create(row.format)), row.available);
+        const std::unique_ptr<FrameEncoder> encoder = FrameEncoder::create(row.format);
+        EXPECT_EQ(static_cast<bool>(encoder), row.available);
+        if (encoder) {
+            EXPECT_EQ(static_cast<int64_t>(encoder->max_frame_bytes()), row.max_frame_bytes);
+        }
     }
     // A FLAC bound is a real one: above the PCM frame of the same format
     EXPECT_GT(flac_bound(FLAC48_16), 960 * 4);
@@ -124,6 +129,27 @@ TEST(OutputShape, GivesEachEncodersFrameBound) {
     deep.format.bit_depth = 32;
     EXPECT_TRUE(sched::producible(sendspin::server::output_shape(FLAC48_16), 100000));
     EXPECT_FALSE(sched::producible(deep, 100000));
+}
+
+// A PCM or FLAC frame is written into room of the frame bound, never past it; room one byte short
+// of the bound is refused, as micro-flac takes no less than its worst case
+TEST(FrameEncoderOutput, RefusesRoomShortOfTheFrameBound) {
+    const sched::AudioFormat formats[] = {{sched::Codec::PCM, 48000, 2, 24}, FLAC48_16};
+    const Bytes input = float_signal(48000, 960, 0);
+    for (const sched::AudioFormat& format : formats) {
+        SCOPED_TRACE(format.codec == sched::Codec::PCM ? "PCM" : "FLAC");
+        // Control: room of the bound takes the frame
+        const std::unique_ptr<FrameEncoder> whole = FrameEncoder::create(format);
+        ASSERT_TRUE(whole);
+        Bytes room(whole->max_frame_bytes());
+        const std::optional<size_t> written = whole->encode(input, SampleFormat::F32, room);
+        ASSERT_TRUE(written);
+        EXPECT_GT(*written, 0U);
+        EXPECT_LE(*written, whole->max_frame_bytes());
+        const std::unique_ptr<FrameEncoder> short_of = FrameEncoder::create(format);
+        Bytes less(short_of->max_frame_bytes() - 1);
+        EXPECT_FALSE(short_of->encode(input, SampleFormat::F32, less));
+    }
 }
 
 // spec player/v1.md "Codec framing": FLAC's codec_header is `fLaC` and STREAMINFO in standard
@@ -160,7 +186,7 @@ TEST(FrameEncoderPcm, IsTheQuantizedInput) {
     Bytes expected(960 * 2 * 3);
     sendspin::server::convert_pcm(input, SampleFormat::F32, 24, expected);
     Bytes payload;
-    ASSERT_TRUE(encoder->encode(input, SampleFormat::F32, payload));
+    ASSERT_TRUE(sendspin::server::test::encode_into(*encoder, input, SampleFormat::F32, payload));
     EXPECT_EQ(payload, expected);
 }
 
@@ -192,7 +218,7 @@ TEST(FrameEncoderFlac, EncodesCellsThatDecodeToTheQuantizedInput) {
             Bytes expected(frames * 2 * out_bytes);
             sendspin::server::convert_pcm(input, row.input, row.format.bit_depth, expected);
             Bytes payload;
-            ASSERT_TRUE(encoder->encode(input, row.input, payload));
+            ASSERT_TRUE(sendspin::server::test::encode_into(*encoder, input, row.input, payload));
             EXPECT_LT(payload.size(), expected.size());
             const auto decoded = reader.decode(payload);
             ASSERT_TRUE(decoded);
@@ -211,7 +237,7 @@ TEST(FrameEncoderFlac, EncodesCellsThatDecodeToTheQuantizedInput) {
         // The stream ended until the next reset
         Bytes payload;
         const Bytes more = float_signal(row.format.sample_rate, block, 0);
-        EXPECT_FALSE(encoder->encode(more, row.input, payload));
+        EXPECT_FALSE(sendspin::server::test::encode_into(*encoder, more, row.input, payload));
         EXPECT_TRUE(payload.empty());
         encoder->reset();
         check(0, block, 0);
@@ -241,7 +267,8 @@ TEST(OpusFrameEncoder, DecodesToTheInputBehindItsLookahead) {
         for (size_t k = 0; k < FRAMES; ++k) {
             Bytes payload;
             const std::span<const uint8_t> frame(input.data() + (k * block * 4), block * 4);
-            ASSERT_TRUE(encoder->encode(frame, SampleFormat::S16, payload));
+            ASSERT_TRUE(
+                sendspin::server::test::encode_into(*encoder, frame, SampleFormat::S16, payload));
             EXPECT_LE(payload.size(), 1276U);
             const std::optional<std::vector<int16_t>> samples = reader.decode(payload);
             ASSERT_TRUE(samples);
@@ -265,13 +292,14 @@ TEST(OpusFrameEncoder, DecodesToTheInputBehindItsLookahead) {
 
         // A short last frame is a whole packet, and reset() starts a new stream
         Bytes payload;
-        ASSERT_TRUE(encoder->encode(std::span(input.data(), 100 * 4), SampleFormat::S16, payload));
+        ASSERT_TRUE(sendspin::server::test::encode_into(*encoder, std::span(input.data(), 100 * 4),
+                                                        SampleFormat::S16, payload));
         const std::optional<std::vector<int16_t>> last = reader.decode(payload);
         ASSERT_TRUE(last);
         EXPECT_EQ(last->size(), size_t{block} * 2);
         encoder->reset();
-        ASSERT_TRUE(
-            encoder->encode(std::span(input.data(), block * 4), SampleFormat::S16, payload));
+        ASSERT_TRUE(sendspin::server::test::encode_into(
+            *encoder, std::span(input.data(), block * 4), SampleFormat::S16, payload));
         EXPECT_FALSE(payload.empty());
     }
 }
@@ -299,7 +327,8 @@ TEST(OpusFrameEncoder, DecodesAtTheInputsLevelFromAnyPacket) {
     const auto encode = [&](uint64_t position) {
         const Bytes input = sendspin::server::test::tone_frames(position, BLOCK, RATE);
         Bytes payload;
-        EXPECT_TRUE(encoder->encode(input, SampleFormat::S16, payload));
+        EXPECT_TRUE(
+            sendspin::server::test::encode_into(*encoder, input, SampleFormat::S16, payload));
         return payload;
     };
     // The tones' level, which every frame's input has
@@ -334,7 +363,8 @@ TEST(OpusFrameEncoder, DecodesAtTheInputsLevelFromAnyPacket) {
     Bytes primed;
     {
         const Bytes input = sendspin::server::test::tone_frames(seek - lead, BLOCK, RATE);
-        ASSERT_TRUE(encoder->encode(input, SampleFormat::S16, primed));
+        ASSERT_TRUE(
+            sendspin::server::test::encode_into(*encoder, input, SampleFormat::S16, primed));
     }
     EXPECT_NEAR(heard_db(first, primed), reference_db, 1.0) << "seek, frame 0";
     for (uint64_t k = 1; k < 10; ++k) {
@@ -363,7 +393,8 @@ TEST(OpusFrameEncoder, CarriesSixtyFourKilobitsPerChannel) {
                              stereo.begin() + static_cast<std::ptrdiff_t>(at + (2 * channels)));
             }
             Bytes payload;
-            ASSERT_TRUE(encoder->encode(input, SampleFormat::S16, payload));
+            ASSERT_TRUE(
+                sendspin::server::test::encode_into(*encoder, input, SampleFormat::S16, payload));
             bytes += payload.size();
         }
         // 50 packets a second: 160 bytes per channel per packet at 64 kbit/s

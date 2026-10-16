@@ -216,15 +216,17 @@ FrameEncoder::FrameEncoder(const sched::AudioFormat& format, uint32_t frame_samp
       frame_samples_(frame_samples),
       flac_(std::move(flac)),
       opus_(std::move(opus)) {
+    const size_t frame_bytes =
+        size_t{frame_samples} * format.channels * pcm_output_bytes(quantized_depth(format));
+    this->max_frame_bytes_ = frame_bytes;
     if (this->flac_ || this->opus_) {
-        this->quantized_.resize(size_t{frame_samples} * format.channels *
-                                pcm_output_bytes(quantized_depth(format)));
+        this->quantized_.resize(frame_bytes);
     }
     if (this->flac_) {
-        this->encoded_.resize(this->flac_->get_max_output_bytes());
+        this->max_frame_bytes_ = this->flac_->get_max_output_bytes();
     }
     if (this->opus_) {
-        this->encoded_.resize(OPUS_MAX_PACKET_BYTES);
+        this->max_frame_bytes_ = OPUS_MAX_PACKET_BYTES;
         this->opus_input_.resize(size_t{frame_samples} * format.channels);
     }
 }
@@ -240,64 +242,65 @@ void FrameEncoder::reset() {
     }
 }
 
-bool FrameEncoder::encode(std::span<const uint8_t> input, SampleFormat in_format,
-                          std::vector<uint8_t>& payload) {
+std::optional<size_t> FrameEncoder::encode(std::span<const uint8_t> input, SampleFormat in_format,
+                                           std::span<uint8_t> out) {
     // Samples of every channel
     const size_t values = input.size() / sample_bytes(in_format);
     const uint32_t depth = quantized_depth(this->format_);
     const size_t bytes = values * pcm_output_bytes(depth);
     if (!this->flac_ && !this->opus_) {
-        payload.resize(bytes);
-        convert_pcm(input, in_format, depth, payload);
-        return true;
+        if (bytes > out.size()) {
+            return std::nullopt;
+        }
+        convert_pcm(input, in_format, depth, out.first(bytes));
+        return bytes;
     }
-    payload.clear();
     if (bytes > this->quantized_.size()) {
-        return false;
+        return std::nullopt;
     }
     const std::span<uint8_t> quantized(this->quantized_.data(), bytes);
     convert_pcm(input, in_format, depth, quantized);
-    return this->encode_quantized(quantized, payload);
+    return this->encode_quantized(quantized, out);
 }
 
-bool FrameEncoder::encode_quantized(std::span<const uint8_t> samples,
-                                    std::vector<uint8_t>& payload) {
+std::optional<size_t> FrameEncoder::encode_quantized(std::span<const uint8_t> samples,
+                                                     std::span<uint8_t> out) {
     if (this->opus_) {
-        return this->encode_opus(samples, payload);
+        return this->encode_opus(samples, out);
     }
     if (!this->flac_) {
-        payload.assign(samples.begin(), samples.end());
-        return true;
+        if (samples.size() > out.size()) {
+            return std::nullopt;
+        }
+        std::copy(samples.begin(), samples.end(), out.begin());
+        return samples.size();
     }
-    payload.clear();
     const size_t full = this->quantized_.size();
     if (samples.size() > full) {
-        return false;
+        return std::nullopt;
     }
     size_t written = 0;
     micro_flac::FLACEncoderResult result = micro_flac::FLAC_ENCODER_SUCCESS;
     if (samples.size() == full) {
         size_t consumed = 0;
-        result = this->flac_->encode(samples.data(), samples.size(), this->encoded_.data(),
-                                     this->encoded_.size(), consumed, written);
+        result = this->flac_->encode(samples.data(), samples.size(), out.data(), out.size(),
+                                     consumed, written);
     } else {
         // A short frame is the stream's last
-        result = this->flac_->finish(samples.data(), samples.size(), this->encoded_.data(),
-                                     this->encoded_.size(), written);
+        result =
+            this->flac_->finish(samples.data(), samples.size(), out.data(), out.size(), written);
     }
     if (result != micro_flac::FLAC_ENCODER_SUCCESS || written == 0) {
-        return false;
+        return std::nullopt;
     }
-    payload.assign(this->encoded_.begin(),
-                   this->encoded_.begin() + static_cast<std::ptrdiff_t>(written));
-    return true;
+    return written;
 }
 
-bool FrameEncoder::encode_opus(std::span<const uint8_t> samples, std::vector<uint8_t>& payload) {
-    payload.clear();
+std::optional<size_t> FrameEncoder::encode_opus(std::span<const uint8_t> samples,
+                                                std::span<uint8_t> out) {
     const size_t full = this->opus_input_.size() * sizeof(int16_t);
     if (samples.size() > full) {
-        return false;
+        return std::nullopt;
     }
     // Little-endian 16-bit samples, then silence to a whole frame: an Opus frame has a fixed
     // duration (spec player/v1.md "Codec framing": one packet per chunk)
@@ -306,14 +309,12 @@ bool FrameEncoder::encode_opus(std::span<const uint8_t> samples, std::vector<uin
         const auto value = static_cast<uint16_t>(samples[i * 2] | (samples[(i * 2) + 1] << 8));
         this->opus_input_[i] = static_cast<int16_t>(value);
     }
-    const size_t written = opus_encode_frame(this->opus_.get(), this->opus_input_.data(),
-                                             this->frame_samples_, this->encoded_);
+    const size_t written =
+        opus_encode_frame(this->opus_.get(), this->opus_input_.data(), this->frame_samples_, out);
     if (written == 0) {
-        return false;
+        return std::nullopt;
     }
-    payload.assign(this->encoded_.begin(),
-                   this->encoded_.begin() + static_cast<std::ptrdiff_t>(written));
-    return true;
+    return written;
 }
 
 }  // namespace sendspin::server

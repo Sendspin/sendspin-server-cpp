@@ -84,17 +84,24 @@ public:
     /// cleared. At every epoch start.
     void reset();
 
-    /// @brief Encodes one frame
+    /// @brief Encodes one frame into out
     /// @param input whole samples in in_format at the format's channel count: one frame's, or
     /// fewer for a drained epoch's last frame, which ends a FLAC stream and which Opus pads with
     /// silence to a whole frame
-    /// @return false when the encoder refused the call; payload is then empty
-    bool encode(std::span<const uint8_t> input, SampleFormat in_format,
-                std::vector<uint8_t>& payload);
+    /// @param out room for max_frame_bytes()
+    /// @return the bytes written, or nullopt when the encoder refused the call
+    std::optional<size_t> encode(std::span<const uint8_t> input, SampleFormat in_format,
+                                 std::span<uint8_t> out);
 
     /// @brief encode() for samples the quantize stage (convert_pcm()) already wrote at
     /// quantized_depth()
-    bool encode_quantized(std::span<const uint8_t> samples, std::vector<uint8_t>& payload);
+    std::optional<size_t> encode_quantized(std::span<const uint8_t> samples,
+                                           std::span<uint8_t> out);
+
+    /// @brief The most bytes one frame takes: output_shape()'s `B_f`
+    size_t max_frame_bytes() const {
+        return this->max_frame_bytes_;
+    }
 
 private:
     struct OpusDeleter {
@@ -105,7 +112,7 @@ private:
                  std::unique_ptr<micro_flac::FLACEncoder> flac,
                  std::unique_ptr<OpusEncoder, OpusDeleter> opus);
 
-    bool encode_opus(std::span<const uint8_t> samples, std::vector<uint8_t>& payload);
+    std::optional<size_t> encode_opus(std::span<const uint8_t> samples, std::span<uint8_t> out);
 
     sched::AudioFormat format_;
     uint32_t frame_samples_;
@@ -113,10 +120,9 @@ private:
     std::unique_ptr<micro_flac::FLACEncoder> flac_;
     /// Opus only
     std::unique_ptr<OpusEncoder, OpusDeleter> opus_;
-    /// FLAC and Opus: the quantize stage's output, one full frame's, and the encoder's, at its
-    /// largest
+    size_t max_frame_bytes_{0};
+    /// FLAC and Opus: the quantize stage's output, one full frame's
     std::vector<uint8_t> quantized_;
-    std::vector<uint8_t> encoded_;
     /// Opus only: one frame of 16-bit samples, aligned for the encoder
     std::vector<int16_t> opus_input_;
 };

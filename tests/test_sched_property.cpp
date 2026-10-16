@@ -23,6 +23,7 @@
 /// from slow clocks and with rising group leads, check the live rebase, admission as if rebased
 /// and the folding of shifts.
 
+#include "frame_payloads.h"
 #include "sched/admission.h"
 #include "sched/chunk.h"
 #include "sched/constants.h"
@@ -128,7 +129,8 @@ void run_seed(uint64_t seed) {
             frame.index = produced;
             frame.ts_us = T0 + produced * sched::CELL_US;
             frame.duration_us = cells * sched::CELL_US;
-            frame.payload.assign(static_cast<size_t>(uniform(1, max_frame)), 0);
+            frame.payload =
+                sendspin::server::test::zero_payload(static_cast<size_t>(uniform(1, max_frame)));
             ASSERT_TRUE(ring.append(std::move(frame), now));
             produced += cells;
         }
@@ -273,7 +275,8 @@ void run_switch_seed(uint64_t seed) {
                 frame.index = instance.produced;
                 frame.ts_us = T0 + instance.produced * sched::CELL_US;
                 frame.duration_us = instance.cells * sched::CELL_US;
-                frame.payload.assign(static_cast<size_t>(uniform(1, 3000)), 0);
+                frame.payload =
+                    sendspin::server::test::zero_payload(static_cast<size_t>(uniform(1, 3000)));
                 // A frame already late is dropped at insertion
                 instance.ring.append(std::move(frame), now);
                 instance.produced += instance.cells;

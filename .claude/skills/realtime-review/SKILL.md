@@ -16,7 +16,7 @@ Determine the diff: if `$ARGUMENTS` names a commit range or branch, diff that; o
 ## Core handler budget
 
 - Every core handler stays within about 200 microseconds: AEAD over one message, one X25519 step, a few KB of JSON. Receive stamps are read on the network thread, so a long handler does not move them, but it holds every time reply and send behind it. Flag new work on core that scales with the number of connections, members, frames or queued items without a bound per handler.
-- Work that can exceed the budget is cut into posted steps, as `GroupToCoreFifo` drains (`DRAIN_BUDGET` events per handler, then it posts itself again), or moved off core, as the pipeline jobs are (to the group audio threads, `AudioWorkers`). Flag a loop that drains a whole queue in one handler, and encoding or resampling on core.
+- Work that can exceed the budget is cut into posted steps, as `GroupToCoreFifo` drains (`DRAIN_BUDGET` events per run of its `Wakeup`, then it signals itself again), or moved off core, as the pipeline jobs are (to the group audio threads, `AudioWorkers`). Flag a loop that drains a whole queue in one handler, and encoding or resampling on core.
 - A pipeline job stays one frame per instance with at most one resampler built, so groups sharing the group audio threads take turns. Flag a job that loops until its input runs out.
 - When the verdict depends on a number, say what to measure, in a `RelWithDebInfo` build.
 

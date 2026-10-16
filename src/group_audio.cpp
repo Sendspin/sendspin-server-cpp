@@ -62,8 +62,13 @@ uint32_t segment_rate(const sched::Anchor& anchor, uint64_t position) {
 // ==============================================================================
 
 GroupToCoreFifo::GroupToCoreFifo(EventLoop& loop, std::function<void(GroupEvent&)> deliver)
-    : loop_(loop), state_(std::make_shared<State>()) {
+    : state_(std::make_shared<State>()), wakeup_(loop, [weak = std::weak_ptr<State>(this->state_)] {
+          if (const std::shared_ptr<State> state = weak.lock()) {
+              GroupToCoreFifo::drain(state);
+          }
+      }) {
     this->state_->deliver = std::move(deliver);
+    this->state_->wake = this->wakeup_.handle();
 }
 
 GroupToCoreFifo::~GroupToCoreFifo() {
@@ -74,61 +79,52 @@ GroupToCoreFifo::~GroupToCoreFifo() {
         dropped.swap(this->state_->events);
     }
     this->state_->deliver = nullptr;
+    this->state_->wake.reset();
 }
 
 GroupToCoreFifo::Producer GroupToCoreFifo::producer() const {
-    return {this->loop_, this->state_};
+    return {this->state_, this->wakeup_.handle()};
 }
 
-GroupToCoreFifo::Producer::Producer(EventLoop& loop, std::shared_ptr<State> state)
-    : loop_(&loop), state_(std::move(state)) {}
+GroupToCoreFifo::Producer::Producer(std::shared_ptr<State> state, Wakeup::Handle wake)
+    : state_(std::move(state)), wake_(std::move(wake)) {}
 
 void GroupToCoreFifo::Producer::push(GroupEvent event) const {
-    bool post = false;
     {
         const std::lock_guard<std::mutex> lock(this->state_->mutex);
         if (this->state_->closed) {
             return;
         }
         this->state_->events.push(std::move(event));
-        post = !std::exchange(this->state_->drain_posted, true);
     }
-    if (post) {
-        GroupToCoreFifo::drain(*this->loop_, this->state_);
-    }
+    // A signal while a run is pending adds nothing
+    Wakeup::signal(this->wake_);
 }
 
-// At most one handler is pending, and none leaves an event stranded
-void GroupToCoreFifo::drain(EventLoop& loop, const std::shared_ptr<State>& state) {
-    loop.post([&loop, weak = std::weak_ptr<State>(state)] {
-        const std::shared_ptr<State> state = weak.lock();
-        if (!state) {
+void GroupToCoreFifo::drain(const std::shared_ptr<State>& state) {
+    Ring<GroupEvent>& batch = state->taking;
+    {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        while (!state->events.empty() && batch.try_push(std::move(state->events.front()))) {
+            state->events.pop_front();
+        }
+    }
+    for (; !batch.empty(); batch.pop_front()) {
+        // A delivery may destroy the FIFO
+        if (!state->deliver) {
+            batch.clear();
             return;
         }
-        Ring<GroupEvent>& batch = state->taking;
-        {
-            const std::lock_guard<std::mutex> lock(state->mutex);
-            while (!state->events.empty() && batch.try_push(std::move(state->events.front()))) {
-                state->events.pop_front();
-            }
-        }
-        for (; !batch.empty(); batch.pop_front()) {
-            if (!state->deliver) {
-                batch.clear();
-                return;
-            }
-            state->deliver(batch.front());
-        }
-        bool again = false;
-        {
-            const std::lock_guard<std::mutex> lock(state->mutex);
-            again = !state->events.empty();
-            state->drain_posted = again;
-        }
-        if (again) {
-            GroupToCoreFifo::drain(loop, state);
-        }
-    });
+        state->deliver(batch.front());
+    }
+    bool again = false;
+    {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        again = !state->events.empty();
+    }
+    if (again) {
+        Wakeup::signal(state->wake);
+    }
 }
 
 // ==============================================================================
@@ -477,6 +473,12 @@ bool GroupAudio::configure_one(const JobView& view) {
                 this->fail(instance);
                 continue;
             }
+            instance.payloads = PayloadSlots::create(instance.encoder->max_frame_bytes(),
+                                                     sched::payload_slots(instance.cells));
+            if (!instance.payloads) {
+                this->fail(instance);
+                continue;
+            }
         }
         const Stage stage = this->ensure_resampler(instance, this->start_rate(instance, view));
         if (stage == Stage::FAILED) {
@@ -585,6 +587,9 @@ bool GroupAudio::produce(Instance& instance, const JobView& view) {
         return this->post_final(instance, view);
     }
     if (!instance.configured) {
+        return false;
+    }
+    if (!this->reserve_slot(*instance.payloads, instance.id)) {
         return false;
     }
     if (!instance.begun && !this->begin(instance, view)) {
@@ -922,10 +927,13 @@ bool GroupAudio::emit(Instance& instance, const JobView& view, size_t samples) {
     frame.duration_us = sched::frame_duration_us(frame.samples, instance.format.sample_rate);
     // With a lead, a drained epoch's last frames take what pending still holds
     const size_t bytes = std::min(samples * instance.sample_bytes, instance.pending.size());
-    if (!instance.encoder->encode_quantized(std::span(instance.pending.data(), bytes),
-                                            frame.payload)) {
+    // The slot produce() reserved
+    const std::optional<size_t> written = instance.encoder->encode_quantized(
+        std::span(instance.pending.data(), bytes), instance.payloads->reserve());
+    if (!written) {
         return false;
     }
+    frame.payload = instance.payloads->commit(*written);
     this->fifo_.push(FrameReady{instance.id, std::move(frame)});
     instance.pending.erase(instance.pending.begin(),
                            instance.pending.begin() + static_cast<std::ptrdiff_t>(bytes));
@@ -966,6 +974,12 @@ void GroupAudio::follow_analyses(const JobView& view) {
                 analysis.cell_bytes += visualizer_message_bytes(type, bins);
             }
         }
+        analysis.messages.reserve(analysis.cell_bytes);
+        analysis.payloads =
+            PayloadSlots::create(std::max<size_t>(1, analysis.cell_bytes), sched::payload_slots(1));
+        if (!analysis.payloads) {
+            this->fail(analysis);
+        }
         // from_index applies in its own epoch once anchored
         if (this->started_) {
             analysis.start = this->start_cell(
@@ -983,6 +997,9 @@ bool GroupAudio::analyze(Analysis& analysis, const JobView& view, int64_t now_us
     }
     if (view.drain_end && analysis_finished(analysis, view)) {
         return this->post_analysis_final(analysis);
+    }
+    if (!this->reserve_slot(*analysis.payloads, analysis.id)) {
+        return false;
     }
     const sched::Anchor& anchor = view.anchor;
     // A cell that ends by now has every instant, shifted as it is, at or before now, so every
@@ -1048,7 +1065,8 @@ bool GroupAudio::analyze(Analysis& analysis, const JobView& view, int64_t now_us
     frame.epoch = this->epoch_;
     frame.index = cell;
     frame.ts_us = cell_start + shift;
-    frame.payload.reserve(analysis.cell_bytes);
+    std::vector<uint8_t>& messages = analysis.messages;
+    messages.clear();
     const auto instant = [&](int64_t at, bool is_periodic, bool onset) {
         // A drained epoch's last cell has no input past the drain position to analyze
         const uint64_t position = sched::time_position(anchor, at);
@@ -1058,9 +1076,9 @@ bool GroupAudio::analyze(Analysis& analysis, const JobView& view, int64_t now_us
         if (!this->feed_analysis(analysis, view, position)) {
             return false;
         }
-        const size_t before = frame.payload.size();
-        analysis.analysis->analyze(at + shift, is_periodic, onset, frame.payload);
-        if (frame.payload.size() != before) {
+        const size_t before = messages.size();
+        analysis.analysis->analyze(at + shift, is_periodic, onset, messages);
+        if (messages.size() != before) {
             frame.ts_us = at + shift;
         }
         return true;
@@ -1075,6 +1093,14 @@ bool GroupAudio::analyze(Analysis& analysis, const JobView& view, int64_t now_us
         analysis.start = cell;
         return analysis.failed;
     }
+    // The slot reserved above, of cell_bytes
+    const std::span<uint8_t> room = analysis.payloads->reserve();
+    if (messages.size() > room.size()) {
+        this->fail(analysis);
+        return true;
+    }
+    std::copy(messages.begin(), messages.end(), room.begin());
+    frame.payload = analysis.payloads->commit(messages.size());
     this->fifo_.push(FrameReady{analysis.id, std::move(frame)});
     analysis.last = cell;
     analysis.next = cell + 1;
@@ -1173,6 +1199,17 @@ void GroupAudio::fail(Analysis& analysis) {
     }
     analysis.failed = true;
     this->fifo_.push(PipelineFailed{this->epoch_, analysis.id});
+}
+
+bool GroupAudio::reserve_slot(PayloadSlots& payloads, sched::InstanceId instance) {
+    const bool starved = payloads.starved();
+    if (!payloads.reserve().empty()) {
+        return true;
+    }
+    if (!starved) {
+        this->fifo_.push(PayloadsFull{instance, payloads.slots()});
+    }
+    return false;
 }
 
 int64_t GroupAudio::frame_start(const Instance& instance, int64_t index) {

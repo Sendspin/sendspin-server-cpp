@@ -51,6 +51,7 @@ add_executable(sendspin_server_cpp_tests
     test_pairing.cpp
     test_pairing_crypto.cpp
     test_pairing_crypto_internals.cpp
+    test_payload_slots.cpp
     test_pcm_convert.cpp
     test_peer.cpp
     test_pipeline_stages.cpp
@@ -163,7 +164,9 @@ set_source_files_properties(test_dispatcher_internals.cpp PROPERTIES COMPILE_OPT
 # resampler. It calls GroupAudio::cut_to() on a GroupAudio::Instance of its own to extend a short
 # stretch, which the stages never give, and sets HostView::p_pause_ to resume from a chosen
 # position, which pause() takes from the time. It reads HostView::rebase_latency_us_, the `L_p`
-# the pipelines publish for admission, which only shows in admission's bounds.
+# the pipelines publish for admission, which only shows in admission's bounds. It gives an instance
+# and an analysis two payload slots each (GroupAudio::instances_, analyses_), since admission keeps
+# the frames alive below the slots they are built with.
 set_source_files_properties(test_group_audio_internals.cpp PROPERTIES COMPILE_OPTIONS
                             -fno-access-control)
 # test_group_internals.cpp wraps a group's pipeline job (Group::audio_) with group_job.h, to hold
@@ -176,7 +179,11 @@ set_source_files_properties(test_group_audio_internals.cpp PROPERTIES COMPILE_OP
 # rather than after 10 s, and take from it to read the counts, which only the log line shows
 # otherwise. It calls Group::on_wake() as the group's wakeup does, since a write's signal can fold
 # into a pipeline job's that is not posted yet, and reads HostView::slew_ and next_slew_ under
-# HostView::mutex_, as only their storage shows that core freed the slew a write left it.
+# HostView::mutex_, as only their storage shows that core freed the slew a write left it. Its
+# payload tests replace Group::audio_ with a task that counts its runs, fill rings_ directly and
+# call on_payloads_full(), on_epoch_cut(), on_epoch_started() and end_run() as the FIFO does,
+# reading Group::full_, the instances held for the timer; the run's end empties pipelines_ first,
+# so its recompute keeps the rings.
 # group_job.h, which only the files given the flag include, waits for a task between runs under
 # its pool's mutex (AudioWorkers::Task::pool_, running_ and queued_) to replace its job
 # (Task::job_), and reads a group's pipelines from the job (Group::PipelineJob::audio).

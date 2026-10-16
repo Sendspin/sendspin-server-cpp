@@ -14,13 +14,14 @@
 
 /// @file group_pipelines.h
 /// @brief Pipelines, a group's pipelines over an input of any format and kind, with their jobs and
-/// the FIFO's handler run on the test thread, and what the tests read of their output: frames,
+/// the FIFO's `Wakeup` run on the test thread, and what the tests read of their output: frames,
 /// samples, a reference resampling, a test tone
 
 #pragma once
 
 #include "clock.h"
 #include "dispatcher.h"
+#include "frame_payloads.h"
 #include "group_audio.h"
 #include "host_view.h"
 #include "resampler_reference.h"
@@ -33,9 +34,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -48,10 +51,19 @@ inline std::map<sched::InstanceId, std::vector<sched::Frame>> frames_by_instance
     std::map<sched::InstanceId, std::vector<sched::Frame>> out;
     for (const GroupEvent& event : events) {
         if (const auto* ready = std::get_if<FrameReady>(&event)) {
-            out[ready->instance].push_back(ready->frame);
+            out[ready->instance].push_back(copy_of(ready->frame));
         }
     }
     return out;
+}
+
+/// Appends event, a frame in a store of its own, so a frame the test holds returns its instance's
+/// slot
+inline void keep_event(std::vector<GroupEvent>& events, GroupEvent& event) {
+    if (auto* ready = std::get_if<FrameReady>(&event)) {
+        ready->frame = copy_of(ready->frame);
+    }
+    events.push_back(std::move(event));
 }
 
 /// A group's pipelines over an input of any format and kind
@@ -66,7 +78,7 @@ struct Pipelines {
         : view(std::make_shared<HostView>(GroupId{1}, InputId{1}, options,
                                           GroupParams{LEAD_US, 0, write_ahead_us},
                                           std::make_shared<Dispatcher>(), nullptr)),
-          fifo(this->loop, [this](GroupEvent& event) { this->events.push_back(event); }),
+          fifo(this->loop, [this](GroupEvent& event) { keep_event(this->events, event); }),
           audio(this->view, this->fifo.producer(), this->slot, ResamplerQuality::MEDIUM) {}
 
     /// @param late_us how far past now_us() the jobs run
@@ -86,7 +98,7 @@ struct Pipelines {
 };
 
 /// A little-endian signed sample of bytes bytes
-inline int32_t sample_at(const std::vector<uint8_t>& payload, size_t index, size_t bytes) {
+inline int32_t sample_at(std::span<const uint8_t> payload, size_t index, size_t bytes) {
     uint32_t value = 0;
     for (size_t i = 0; i < bytes; ++i) {
         value |= uint32_t{payload[(index * bytes) + i]} << (8 * i);
@@ -99,7 +111,7 @@ inline int32_t sample_at(const std::vector<uint8_t>& payload, size_t index, size
 inline std::vector<uint8_t> concatenated(const std::vector<sched::Frame>& frames) {
     std::vector<uint8_t> out;
     for (const sched::Frame& frame : frames) {
-        out.insert(out.end(), frame.payload.begin(), frame.payload.end());
+        out.insert(out.end(), frame.payload.bytes().begin(), frame.payload.bytes().end());
     }
     return out;
 }
@@ -206,7 +218,8 @@ inline void expect_resampled(const std::vector<uint8_t>& out, size_t at,
 inline std::vector<GroupEvent> run_all(Pipelines& p) {
     std::vector<GroupEvent> events = p.run();
     for (std::vector<GroupEvent> more = p.run(); !more.empty(); more = p.run()) {
-        events.insert(events.end(), more.begin(), more.end());
+        events.insert(events.end(), std::make_move_iterator(more.begin()),
+                      std::make_move_iterator(more.end()));
     }
     return events;
 }

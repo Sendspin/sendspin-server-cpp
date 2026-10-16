@@ -15,11 +15,15 @@
 /// @file test_sched_frames.cpp
 /// @brief The frame grid, the frame ring and the cursor's prepare step
 
+#include "frame_payloads.h"
+#include "payload_slots.h"
+#include "profile.h"
 #include "sched/frames.h"
 #include <gtest/gtest.h>
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -45,7 +49,7 @@ Frame frame(int64_t index, uint32_t cells = 1) {
     f.ts_us = 1000 * MS + index * 20 * MS;
     f.duration_us = cells * 20 * MS;
     f.samples = 960 * cells;
-    f.payload.assign(100, 0);
+    f.payload = sendspin::server::test::zero_payload(100);
     return f;
 }
 
@@ -99,7 +103,7 @@ TEST(SchedFrameRing, KeysFramesByCellIndex) {
     EXPECT_FALSE(ring.append(frame(126, 2), 0));
     Frame stale = frame(130, 2);
     stale.epoch = OTHER_EPOCH;
-    EXPECT_FALSE(ring.append(stale, 0));
+    EXPECT_FALSE(ring.append(std::move(stale), 0));
     EXPECT_EQ(ring.base(), 128);
     ASSERT_TRUE(ring.append(frame(130, 2), 0));
     EXPECT_EQ(ring.base(), 130);
@@ -170,7 +174,7 @@ TEST(SchedFrameRing, SkipsToALaterIndexOnceEmptied) {
 TEST(SchedFrameRing, HoldsFramesPastItsFirstRoom) {
     FrameRing ring(InstanceId{1}, 1);
     ring.restart(EPOCH, 0);
-    const auto frames = static_cast<int64_t>(sched::ring_frames(1)) * 2;
+    const auto frames = static_cast<int64_t>(sched::payload_slots(1)) * 2;
     for (int64_t k = 0; k < frames; ++k) {
         ASSERT_TRUE(ring.append(frame(k), 0));
     }
@@ -179,6 +183,62 @@ TEST(SchedFrameRing, HoldsFramesPastItsFirstRoom) {
         const Frame* held = ring.at(EPOCH, k);
         ASSERT_NE(held, nullptr) << k;
         EXPECT_EQ(held->index, k);
+    }
+}
+
+// An instance's payload slots cover the ring's span and the frames core may leave unpruned past
+// their play time, a part frame rounded up: 3 s and 0.5 s on the embedded profile, 12 s and 1 s
+// on a host
+TEST(SchedFrameRing, SizesPayloadSlotsPastTheRingsSpan) {
+    constexpr bool EMBEDDED = sendspin::server::profile::EMBEDDED;
+    EXPECT_EQ(sched::payload_slots(1), EMBEDDED ? 151U + 25U : 601U + 50U);
+    EXPECT_EQ(sched::payload_slots(2), EMBEDDED ? 76U + 13U : 301U + 25U);
+    EXPECT_EQ(sched::payload_slots(7), EMBEDDED ? 22U + 4U : 86U + 8U);
+}
+
+// A frame the ring drops gives its payload's slot back: pruned at its play time, cleared by a
+// restart, or refused on append
+TEST(SchedFrameRing, ReturnsTheSlotOfEachFrameItDrops) {
+    using sendspin::server::FramePayload;
+    using sendspin::server::PayloadSlots;
+    struct Row {
+        const char* name;
+        /// Drops a frame, or not; spare holds the store's last slot
+        void (*drop)(FrameRing&, FramePayload& spare);
+        bool returned;
+    };
+    const Row rows[] = {
+        {"Control: none dropped", [](FrameRing& ring, FramePayload&) { ring.prune(0); }, false},
+        {"pruned", [](FrameRing& ring, FramePayload&) { ring.prune(frame(0).ts_us); }, true},
+        {"restarted", [](FrameRing& ring, FramePayload&) { ring.restart(EPOCH, 0); }, true},
+        {"refused",
+         [](FrameRing& ring, FramePayload& spare) {
+             Frame stale = frame(2);
+             stale.epoch = OTHER_EPOCH;
+             stale.payload = std::move(spare);
+             EXPECT_FALSE(ring.append(std::move(stale), 0));
+         },
+         true},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        const auto slots = PayloadSlots::create(8, 3);
+        ASSERT_TRUE(slots);
+        const auto take = [&] {
+            static_cast<void>(slots->reserve());
+            return slots->commit(1);
+        };
+        FrameRing ring(InstanceId{1}, 1);
+        ring.restart(EPOCH, 0);
+        for (int64_t k = 0; k < 2; ++k) {
+            Frame f = frame(k);
+            f.payload = take();
+            ASSERT_TRUE(ring.append(std::move(f), 0));
+        }
+        FramePayload spare = take();
+        EXPECT_TRUE(slots->reserve().empty());
+        row.drop(ring, spare);
+        EXPECT_EQ(!slots->reserve().empty(), row.returned);
     }
 }
 

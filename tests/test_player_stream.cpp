@@ -17,6 +17,7 @@
 /// cursor emit around a switch in place, and how long its cursor holds a short chunk
 
 #include "fragmentation.h"
+#include "frame_payloads.h"
 #include "player_stream.h"
 #include "wire_messages.h"
 #include <gtest/gtest.h>
@@ -88,7 +89,7 @@ public:
             frame.ts_us = T0 + (k * sched::CELL_US);
             frame.duration_us = sched::CELL_US;
             frame.samples = 960;
-            frame.payload.assign(PAYLOAD, 0);
+            frame.payload = sendspin::server::test::zero_payload(PAYLOAD);
             EXPECT_TRUE(ring.append(std::move(frame), START_US));
         }
         if (final) {
