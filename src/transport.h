@@ -396,7 +396,7 @@ public:
     Timer& operator=(const Timer&) = delete;
 
     /// @brief Calls on_fire from the loop once now_us() reaches about at_us, replacing any
-    /// pending call. The wait runs on the steady clock, which can fall behind now_us().
+    /// pending call. The wait runs on the steady clock, which can drift from now_us().
     void start(int64_t at_us, std::function<void()> on_fire);
 
     void cancel();

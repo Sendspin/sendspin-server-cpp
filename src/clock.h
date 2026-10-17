@@ -21,8 +21,9 @@
 
 namespace sendspin::server {
 
-/// @brief Monotonic microseconds that keep counting while the system sleeps: `CLOCK_MONOTONIC`
-/// on Linux, `mach_continuous_time` on macOS (whose `steady_clock` stops during sleep)
+/// @brief Monotonic microseconds at the clock's own rate, never slewed by NTP:
+/// `CLOCK_MONOTONIC_RAW` on Linux, `mach_continuous_time` on macOS (which keeps counting while the
+/// system sleeps), the esp_timer's `CLOCK_MONOTONIC` on ESP-IDF
 int64_t now_us();
 
 }  // namespace sendspin::server

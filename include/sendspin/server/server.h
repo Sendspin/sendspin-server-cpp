@@ -324,8 +324,8 @@ public:
     /// and after its source's open stream is reported stopped.
     void stop();
 
-    /// @brief The clock of every timestamp the server sends, in microseconds: monotonic, and
-    /// counting through system sleep
+    /// @brief The clock of every timestamp the server sends, in microseconds: monotonic, at the
+    /// clock's own rate, never slewed by NTP
     int64_t now_us() const;
 
     /// @brief The server_id clients see (spec connection.md "Identities"); empty while stopped
