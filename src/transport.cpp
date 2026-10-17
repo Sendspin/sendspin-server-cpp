@@ -1699,17 +1699,9 @@ public:
     explicit Impl(asio::io_context& io) : timer_(io) {}
 
     void start(int64_t at_us, std::function<void()> on_fire) {
-        const uint64_t generation = ++this->generation_;
+        this->at_us_ = at_us;
         this->on_fire_ = std::move(on_fire);
-        this->timer_.expires_after(microseconds(std::max<int64_t>(at_us - now_us(), 0)));
-        // A weak reference: the timer's owner may drop it before the wait completes
-        this->timer_.async_wait([weak = this->weak_from_this(), generation](const error_code& ec) {
-            const std::shared_ptr<Impl> self = weak.lock();
-            if (!ec && self && generation == self->generation_) {
-                std::function<void()> on_fire = std::move(self->on_fire_);
-                on_fire();
-            }
-        });
+        this->wait(++this->generation_);
     }
 
     void cancel() {
@@ -1719,8 +1711,27 @@ public:
     }
 
 private:
+    void wait(uint64_t generation) {
+        this->timer_.expires_after(microseconds(std::max<int64_t>(this->at_us_ - now_us(), 0)));
+        // A weak reference: the timer's owner may drop it before the wait completes
+        this->timer_.async_wait([weak = this->weak_from_this(), generation](const error_code& ec) {
+            const std::shared_ptr<Impl> self = weak.lock();
+            if (ec || !self || generation != self->generation_) {
+                return;
+            }
+            // The steady clock can run ahead of now_us(), ending the wait short of at_us
+            if (now_us() < self->at_us_) {
+                self->wait(generation);
+                return;
+            }
+            std::function<void()> on_fire = std::move(self->on_fire_);
+            on_fire();
+        });
+    }
+
     asio::steady_timer timer_;
     std::function<void()> on_fire_;
+    int64_t at_us_{0};
     uint64_t generation_{0};
 };
 

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 /// @file test_clock.cpp
-/// @brief now_us() counts microseconds on the system's sleep-inclusive monotonic clock.
+/// @brief now_us() counts microseconds on the system's raw monotonic clock.
 
 #include "clock.h"
 #include <gtest/gtest.h>
@@ -26,15 +26,10 @@ namespace {
 using sendspin::server::now_us;
 
 // The clock now_us() reads: on macOS CLOCK_MONOTONIC_RAW is mach_continuous_time, while
-// CLOCK_MONOTONIC is adjusted and drifts from it.
+// CLOCK_MONOTONIC is adjusted and drifts from it, on Linux by NTP's slew.
 int64_t monotonic_us() {
-#if defined(__APPLE__)
-    constexpr clockid_t REFERENCE = CLOCK_MONOTONIC_RAW;
-#else
-    constexpr clockid_t REFERENCE = CLOCK_MONOTONIC;
-#endif
     timespec ts{};
-    clock_gettime(REFERENCE, &ts);
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
     return (static_cast<int64_t>(ts.tv_sec) * 1000000) + (ts.tv_nsec / 1000);
 }
 

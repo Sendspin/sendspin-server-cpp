@@ -49,7 +49,12 @@ int64_t now_us() {
 int64_t now_us() {
     constexpr int64_t US_PER_S = 1000000;
     timespec ts{};
+#if defined(__linux__)
+    // A slewed clock would change rate under the clients' time filters
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#else
     clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
     return (static_cast<int64_t>(ts.tv_sec) * US_PER_S) + (ts.tv_nsec / NS_PER_US);
 }
 
