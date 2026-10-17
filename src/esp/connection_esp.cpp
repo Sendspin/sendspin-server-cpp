@@ -357,6 +357,8 @@ bool Connection::can_write() const {
     return this->impl_->can_write();
 }
 
+void Connection::debug_time_reply(const TimeReplyTrace& /*trace*/) {}
+
 bool Connection::write(MessageKind kind, std::span<const uint8_t> payload) {
     return this->impl_->write(kind, payload);
 }

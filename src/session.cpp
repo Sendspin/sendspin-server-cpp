@@ -867,6 +867,7 @@ std::optional<OutboundMessage> Session::take_message() {
     int64_t stamp_us = 0;
     size_t audio_bytes = 0;
     bool time_reply = false;
+    TimeReplyTrace debug_trace;  // TEMPORARY DEBUG
     for (bool taken = false; !taken;) {
         const int64_t now = now_us();
         this->prepare(now);
@@ -874,8 +875,22 @@ std::optional<OutboundMessage> Session::take_message() {
         switch (sched::select_next(snapshot)) {
             case sched::Choice::TIME: {
                 const ClientTime request = this->queues_.take_time();
+                std::optional<PreviousTimeReply> previous;
+                if (request.interleaved && this->last_time_reply_ &&
+                    this->last_time_reply_->sent_us != 0) {
+                    previous = PreviousTimeReply{this->last_time_reply_->client_transmitted,
+                                                 this->last_time_reply_->sent_us};
+                }
                 stamp_us = ::sendspin::server::now_us();
-                message = json_plaintext(build_server_time(request, stamp_us));
+                message = json_plaintext(build_server_time(request, stamp_us, previous));
+                if (request.interleaved) {
+                    this->last_time_reply_ = LastTimeReply{request.client_transmitted, stamp_us, 0};
+                } else {
+                    this->last_time_reply_.reset();
+                }
+                debug_trace.stamp_us = stamp_us;
+                debug_trace.request_rx_us = request.rx_us;
+                debug_trace.built_us = ::sendspin::server::now_us();
                 time_reply = true;
                 taken = true;
                 break;
@@ -971,10 +986,11 @@ std::optional<OutboundMessage> Session::take_message() {
         this->finish(SessionEnd::ENCRYPT_FAILED);
         return std::nullopt;
     }
+    debug_trace.encrypted_us = ::sendspin::server::now_us();
     if (this->trace_ != nullptr) {
         this->trace_->on_outbound(message.kind, traced, stamp_us, audio_bytes);
     }
-    return OutboundMessage{message.kind, std::move(message.bytes), time_reply};
+    return OutboundMessage{message.kind, std::move(message.bytes), time_reply, debug_trace};
 }
 
 bool Session::queue_text(const std::string& text) {

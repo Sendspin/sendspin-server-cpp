@@ -439,7 +439,9 @@ std::optional<ClientTime> parse_client_time(JsonObjectConst payload, int64_t rx_
     if (!transmitted.is<int64_t>()) {
         return std::nullopt;
     }
-    return ClientTime{transmitted.as<int64_t>(), rx_us};
+    const JsonVariantConst interleaved = payload["interleaved"];
+    return ClientTime{transmitted.as<int64_t>(), rx_us,
+                      interleaved.is<bool>() && interleaved.as<bool>()};
 }
 
 // ==============================================================================
@@ -1330,12 +1332,17 @@ UnhandledRule rule_for_unhandled(std::string_view type) {
 // server/time
 // ==============================================================================
 
-std::string build_server_time(const ClientTime& request, int64_t transmitted_us) {
+std::string build_server_time(const ClientTime& request, int64_t transmitted_us,
+                              const std::optional<PreviousTimeReply>& previous) {
     JsonDocument doc;
     doc["type"] = "server/time";
     doc["payload"]["client_transmitted"] = request.client_transmitted;
     doc["payload"]["server_received"] = request.rx_us;
     doc["payload"]["server_transmitted"] = transmitted_us;
+    if (previous) {
+        doc["payload"]["previous"]["client_transmitted"] = previous->client_transmitted;
+        doc["payload"]["previous"]["server_transmitted"] = previous->server_transmitted;
+    }
     return serialize(doc);
 }
 

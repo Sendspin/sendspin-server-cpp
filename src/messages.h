@@ -255,6 +255,15 @@ std::string_view to_wire(GoodbyeReason reason);
 struct ClientTime {
     int64_t client_transmitted{0};
     int64_t rx_us{0};
+    /// TEMPORARY DEBUG: interleaved mode asked for (`"interleaved": true`)
+    bool interleaved{false};
+};
+
+/// TEMPORARY DEBUG: interleaved mode's report on the previous reply: the client_transmitted it
+/// echoed and when it actually left (the kernel's send stamp where there is one)
+struct PreviousTimeReply {
+    int64_t client_transmitted{0};
+    int64_t server_transmitted{0};
 };
 
 /// @brief Bits of PlayerState::supported_commands
@@ -520,7 +529,8 @@ UnhandledRule rule_for_unhandled(std::string_view type);
 /// @brief The reply to request (messaging.md "server/time"): `server_received` is the request's
 /// receive stamp, `server_transmitted` the stamp taken immediately before encryption
 /// (messaging.md "Transmit timestamps")
-std::string build_server_time(const ClientTime& request, int64_t transmitted_us);
+std::string build_server_time(const ClientTime& request, int64_t transmitted_us,
+                              const std::optional<PreviousTimeReply>& previous = std::nullopt);
 
 // ==============================================================================
 // group/update and stream lifecycle

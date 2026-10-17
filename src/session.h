@@ -22,6 +22,7 @@
 
 #include "artwork_stream.h"
 #include "crypto/keys.h"
+#include "debug_time_reply.h"
 #include "fragmentation.h"
 #include "memory.h"
 #include "message_kind.h"
@@ -91,6 +92,8 @@ struct OutboundMessage {
     /// A server/time: the last message of its write, so no message is built between its stamp and
     /// its write
     bool time_reply{false};
+    // TEMPORARY DEBUG
+    TimeReplyTrace debug_trace{};
 };
 
 /// @brief Receives the plaintext of every WebSocket message a session takes in or yields
@@ -211,6 +214,14 @@ public:
 
     /// @brief Whether a client/state was taken in since the last call; the owner then reacts and
     /// calls queue_state_marker()
+    /// TEMPORARY DEBUG: when the server/time stamped at stamp_us actually left, for interleaved
+    /// mode's next reply
+    void on_time_reply_sent(int64_t stamp_us, int64_t sent_us) {
+        if (this->last_time_reply_ && this->last_time_reply_->stamp_us == stamp_us) {
+            this->last_time_reply_->sent_us = sent_us;
+        }
+    }
+
     bool take_state_changed() {
         return std::exchange(this->state_changed_, false);
     }
@@ -493,6 +504,13 @@ private:
     bool leave_{false};
     bool rekeyed_{false};
     bool state_changed_{false};
+    // TEMPORARY DEBUG: the last server/time an interleaved client/time was answered with
+    struct LastTimeReply {
+        int64_t client_transmitted{0};
+        int64_t stamp_us{0};
+        int64_t sent_us{0};  // 0 until the transport reports it
+    };
+    std::optional<LastTimeReply> last_time_reply_;
     bool available_{false};
     std::optional<sched::TriggerKind> state_marker_kind_;
     SessionPhase phase_{SessionPhase::AWAIT_CLIENT_INIT};

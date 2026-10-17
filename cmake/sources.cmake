@@ -75,6 +75,7 @@ set(SENDSPIN_SERVER_SOURCES
     src/server_core.cpp
     src/server_core_pairing.cpp
     src/server_core_source.cpp
+    src/debug_time_reply.cpp
     src/session.cpp
     src/session_driver.cpp
     # The source role: a session's commands and input stream, the feed to a routed source's

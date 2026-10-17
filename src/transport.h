@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include "debug_time_reply.h"
 #include "message_kind.h"
 #include "shared.h"
 #include "task_queue.h"
@@ -142,6 +143,9 @@ public:
     /// @brief Every message of the write is fully handed to the kernel
     virtual void on_write_done() = 0;
 
+    /// TEMPORARY DEBUG: the server/time stamped at stamp_us left at sent_us (now_us())
+    virtual void on_time_reply_sent(int64_t /*stamp_us*/, int64_t /*sent_us*/) {}
+
     /// @brief The connection failed or the peer closed it. The last event; close() reports none.
     virtual void on_closed(CloseReason reason) = 0;
 };
@@ -188,6 +192,8 @@ public:
     /// returns; the payload is copied. Write-stall timed.
     /// @return false when closed or refused by the write invariant
     bool write(MessageKind kind, std::span<const uint8_t> payload);
+    // TEMPORARY DEBUG: the last message written is a server/time with this trace so far
+    void debug_time_reply(const TimeReplyTrace& trace);
 
     /// @brief Closes with a WebSocket close frame carrying code, or drops the TCP connection
     /// when a write is in flight. Inside on_writable(), the messages written there are dropped.

@@ -76,6 +76,8 @@ void SessionDriver::on_writable() {
             this->writing_ = true;
         }
         if (message->time_reply) {
+            message->debug_trace.batched_us = now_us();
+            this->connection_.debug_time_reply(message->debug_trace);
             break;
         }
     }

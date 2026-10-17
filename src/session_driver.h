@@ -110,6 +110,9 @@ private:
     void on_message(MessageKind kind, std::span<const uint8_t> payload, int64_t rx_us) override;
     void on_writable() override;
     void on_write_done() override;
+    void on_time_reply_sent(int64_t stamp_us, int64_t sent_us) override {
+        this->session_.on_time_reply_sent(stamp_us, sent_us);
+    }
     void on_closed(CloseReason reason) override;
 
     void on_timer();

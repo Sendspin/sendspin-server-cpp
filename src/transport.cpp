@@ -33,6 +33,13 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#ifdef __linux__
+#include <linux/errqueue.h>
+#include <linux/net_tstamp.h>
+#include <linux/sockios.h>
+#include <sys/ioctl.h>
+#include <sys/uio.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -40,6 +47,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -66,7 +76,112 @@ namespace http = beast::http;
 namespace websocket = beast::websocket;
 using tcp = asio::ip::tcp;
 using boost::system::error_code;
+
+#ifdef __linux__
+// TEMPORARY DEBUG: SO_TIMESTAMPING. The receive stamps come as control messages, which Beast's
+// reads drop, so this stream reads with recvmsg() itself and keeps the last read's stamps.
+constexpr int RX_TS_FLAGS = SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_RX_HARDWARE |
+                            SOF_TIMESTAMPING_SOFTWARE | SOF_TIMESTAMPING_RAW_HARDWARE;
+constexpr int TX_TS_FLAGS = RX_TS_FLAGS | SOF_TIMESTAMPING_TX_SCHED | SOF_TIMESTAMPING_TX_SOFTWARE |
+                            SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_OPT_ID |
+                            SOF_TIMESTAMPING_OPT_TSONLY
+#ifdef SOF_TIMESTAMPING_OPT_TX_SWHW
+                            | SOF_TIMESTAMPING_OPT_TX_SWHW
+#endif
+#ifdef SOF_TIMESTAMPING_OPT_ID_TCP
+                            | SOF_TIMESTAMPING_OPT_ID_TCP
+#endif
+    ;
+
+int64_t ts_ns(const timespec& ts) {
+    return static_cast<int64_t>(ts.tv_sec) * 1000000000 + ts.tv_nsec;
+}
+
+class StampedStream : public beast::tcp_stream {
+public:
+    using beast::tcp_stream::tcp_stream;
+    explicit StampedStream(beast::tcp_stream&& stream) : beast::tcp_stream(std::move(stream)) {}
+
+    template <class MutableBuffers, class ReadHandler>
+    auto async_read_some(const MutableBuffers& buffers, ReadHandler&& handler) {
+        return asio::async_initiate<ReadHandler, void(error_code, size_t)>(
+            [this](auto h, const MutableBuffers& b) { this->wait_and_read(b, std::move(h)); },
+            handler, buffers);
+    }
+
+    /// The last read's kernel stamps (CLOCK_REALTIME ns, the NIC's raw clock ns), 0 for none
+    int64_t rx_sw_ns{0};
+    int64_t rx_hw_ns{0};
+    uint64_t reads{0};
+
+private:
+    template <class MutableBuffers, class Handler>
+    void wait_and_read(const MutableBuffers& buffers, Handler handler) {
+        this->socket().async_wait(
+            tcp::socket::wait_read,
+            [this, buffers, handler = std::move(handler)](const error_code& ec) mutable {
+                if (ec) {
+                    std::move(handler)(ec, size_t{0});
+                    return;
+                }
+                std::array<iovec, 16> iov{};
+                size_t count = 0;
+                for (auto it = asio::buffer_sequence_begin(buffers);
+                     it != asio::buffer_sequence_end(buffers) && count < iov.size(); ++it) {
+                    const asio::mutable_buffer b = *it;
+                    iov[count++] = {b.data(), b.size()};
+                }
+                alignas(cmsghdr) std::array<char, 256> control{};
+                msghdr msg{};
+                msg.msg_iov = iov.data();
+                msg.msg_iovlen = count;
+                msg.msg_control = control.data();
+                msg.msg_controllen = control.size();
+                const ssize_t n = ::recvmsg(this->socket().native_handle(), &msg, MSG_DONTWAIT);
+                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+                    this->wait_and_read(buffers, std::move(handler));
+                    return;
+                }
+                if (n < 0) {
+                    std::move(handler)(error_code(errno, boost::system::system_category()),
+                                       size_t{0});
+                    return;
+                }
+                if (n == 0) {
+                    std::move(handler)(error_code(asio::error::eof), size_t{0});
+                    return;
+                }
+                ++this->reads;
+                this->rx_sw_ns = 0;
+                this->rx_hw_ns = 0;
+                for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c != nullptr; c = CMSG_NXTHDR(&msg, c)) {
+                    if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_TIMESTAMPING) {
+                        scm_timestamping ts{};
+                        std::memcpy(&ts, CMSG_DATA(c), sizeof(ts));
+                        this->rx_sw_ns = ts_ns(ts.ts[0]);
+                        this->rx_hw_ns = ts_ns(ts.ts[2]);
+                    }
+                }
+                std::move(handler)(error_code{}, static_cast<size_t>(n));
+            });
+    }
+};
+
+// Beast's generic teardown would win over basic_stream's for a derived stream
+[[maybe_unused]] void teardown(beast::role_type role, StampedStream& stream, error_code& ec) {
+    beast::websocket::teardown(role, static_cast<beast::tcp_stream&>(stream).socket(), ec);
+}
+
+template <class TeardownHandler>
+void async_teardown(beast::role_type role, StampedStream& stream, TeardownHandler&& handler) {
+    beast::websocket::async_teardown(role, static_cast<beast::tcp_stream&>(stream).socket(),
+                                     std::forward<TeardownHandler>(handler));
+}
+
+using WsStream = websocket::stream<StampedStream>;
+#else
 using WsStream = websocket::stream<beast::tcp_stream>;
+#endif
 
 /// Largest HTTP upgrade request header accepted
 constexpr uint32_t UPGRADE_HEADER_LIMIT = 8192;
@@ -499,6 +614,15 @@ public:
     std::array<BatchFrame, WRITE_BATCH_MESSAGES> batch_frames_{};
     /// The frames of the write being built or in flight; the batch is cleared once it completes
     size_t batch_count_{0};
+    // TEMPORARY DEBUG: the server/time in the batch being built, and its frame index
+    std::optional<TimeReplyTrace> debug_trace_;
+
+    // TEMPORARY DEBUG
+    void deliver_time_reply_sent(int64_t stamp_us, int64_t sent_us) {
+        if (!this->closed_ && this->handler_ != nullptr) {
+            this->handler_->on_time_reply_sent(stamp_us, sent_us);
+        }
+    }
 
 protected:
     void deliver_message(MessageKind kind, std::span<const uint8_t> payload,
@@ -590,6 +714,12 @@ namespace {
 /// the receive stamps, the write stall and the closing handshake, all on the network thread
 class NetConnection : public std::enable_shared_from_this<NetConnection> {
 public:
+    // TEMPORARY DEBUG: the server/time in the write in flight, and one written whose send stamps
+    // are being collected
+    std::optional<TimeReplyTrace> debug_trace_;
+    std::optional<TimeReplyTrace> debug_polled_;
+
+public:
     NetConnection(NetworkService& service, beast::tcp_stream stream,
                   const TransportSettings& settings)
         : service_(service),
@@ -623,6 +753,13 @@ public:
     }
 
     void start() {
+#ifdef __linux__
+        const int flags = RX_TS_FLAGS;
+        if (::setsockopt(beast::get_lowest_layer(this->ws_).socket().native_handle(), SOL_SOCKET,
+                         SO_TIMESTAMPING, &flags, sizeof(flags)) != 0) {
+            std::fprintf(stderr, "[time-reply] SO_TIMESTAMPING failed: %d\n", errno);
+        }
+#endif
         if (!this->closed_) {
             this->read_next();
         }
@@ -712,7 +849,7 @@ private:
         });
     }
 
-    void on_read(const error_code& ec, int64_t rx_us) {
+    void on_read(const error_code& ec, int64_t rx_us) {  // NOLINT: rx_us replaced when debugging
         this->read_in_flight_ = false;
         if (this->closed_) {
             return;
@@ -721,6 +858,23 @@ private:
             this->fail(reason_for(ec));
             return;
         }
+#ifdef __linux__
+        {
+            const StampedStream& stream = this->ws_.next_layer();
+            DebugRx& rx = this->debug_rx_[this->debug_rx_next_++ % this->debug_rx_.size()];
+            rx = {rx_us, 0, 0, stream.reads == this->debug_rx_reads_};
+            if (!rx.buffered) {
+                rx.sw_us = stream.rx_sw_ns != 0 ? debug_realtime_to_now_us(stream.rx_sw_ns) : 0;
+                rx.hw_us = stream.rx_hw_ns != 0 ? debug_realtime_to_now_us(stream.rx_hw_ns) : 0;
+            }
+            this->debug_rx_reads_ = stream.reads;
+            static const bool kernel_rx = std::getenv("SENDSPIN_DEBUG_APP_RX") == nullptr;
+            if (kernel_rx && (rx.hw_us != 0 || rx.sw_us != 0)) {
+                rx_us = rx.hw_us != 0 ? rx.hw_us : rx.sw_us;
+            }
+            rx.pushed_us = rx_us;
+        }
+#endif
         const auto data = this->read_buffer_.cdata();
         const MessageKind kind = this->ws_.got_text() ? MessageKind::TEXT : MessageKind::BINARY;
         if (!this->service_.inbound().push(
@@ -758,13 +912,56 @@ private:
         if (index == 0) {
             this->start_io();
         }
+        const bool debug = this->debug_trace_ && this->debug_trace_->frame_index == index;
+        if (debug) {
+#ifdef __linux__
+            const int fd = beast::get_lowest_layer(this->ws_).socket().native_handle();
+            int outq = 0;
+            ::ioctl(fd, SIOCOUTQ, &outq);
+            const size_t payload = frame.bytes;
+            const size_t header = payload < 126 ? 2 : (payload < 65536 ? 4 : 10);
+#ifdef SOF_TIMESTAMPING_OPT_ID_TCP
+            this->debug_tx_key_ = static_cast<uint32_t>(header + payload - 1);
+#else
+            this->debug_tx_key_ = static_cast<uint32_t>(outq + header + payload - 1);
+#endif
+            const int flags = TX_TS_FLAGS;
+            ::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING, &flags, sizeof(flags));
+#endif
+            this->debug_trace_->issue_us = now_us();
+        }
         this->ws_.async_write(
             asio::buffer(this->core_->write_buffer_.data() + offset, frame.bytes),
             [self = this->shared_from_this(), next = index + 1, end = offset + frame.bytes, frames](
                 const error_code& ec, size_t) { self->on_write(ec, next, end, frames); });
+        if (debug) {
+            this->debug_trace_->issued_us = now_us();
+#ifdef __linux__
+            const int flags = RX_TS_FLAGS;
+            ::setsockopt(beast::get_lowest_layer(this->ws_).socket().native_handle(), SOL_SOCKET,
+                         SO_TIMESTAMPING, &flags, sizeof(flags));
+#endif
+        }
     }
 
     void on_write(const error_code& ec, size_t next, size_t offset, size_t frames) {
+        if (!ec && this->debug_trace_ && this->debug_trace_->frame_index + 1 == next) {
+            this->debug_trace_->done_us = now_us();
+#ifdef SO_NWRITE
+            int unsent = 0;
+            socklen_t len = sizeof(unsent);
+            if (::getsockopt(beast::get_lowest_layer(this->ws_).socket().native_handle(),
+                             SOL_SOCKET, SO_NWRITE, &unsent, &len) == 0) {
+                this->debug_trace_->unsent_bytes = unsent;
+            }
+#endif
+            if (this->debug_polled_) {
+                this->debug_timer_.cancel();
+                this->debug_finish_or_poll(1000);
+            }
+            this->debug_polled_ = std::exchange(this->debug_trace_, std::nullopt);
+            this->debug_finish_or_poll(0);
+        }
         if (this->closed_) {
             this->write_in_flight_ = false;
             return;
@@ -854,9 +1051,110 @@ private:
         this->timer_.cancel();
     }
 
+    // TEMPORARY DEBUG: collects the reply's send stamps from the error queue, every 500 us for up
+    // to 10 ms, then records the trace
+    void debug_finish_or_poll(int attempt) {
+        if (!this->debug_polled_) {
+            return;
+        }
+        TimeReplyTrace& t = *this->debug_polled_;
+#ifdef __linux__
+        const int fd = beast::get_lowest_layer(this->ws_).socket().native_handle();
+        // attempt 1000: closed out by the next reply's write, whose stamps carry the same key
+        for (; attempt < 1000;) {
+            alignas(cmsghdr) std::array<char, 512> control{};
+            msghdr msg{};
+            msg.msg_control = control.data();
+            msg.msg_controllen = control.size();
+            if (::recvmsg(fd, &msg, MSG_ERRQUEUE | MSG_DONTWAIT) < 0) {
+                break;
+            }
+            scm_timestamping ts{};
+            bool have_ts = false;
+            const sock_extended_err* err = nullptr;
+            for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c != nullptr; c = CMSG_NXTHDR(&msg, c)) {
+                if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_TIMESTAMPING) {
+                    std::memcpy(&ts, CMSG_DATA(c), sizeof(ts));
+                    have_ts = true;
+                } else if ((c->cmsg_level == SOL_IP && c->cmsg_type == IP_RECVERR) ||
+                           (c->cmsg_level == SOL_IPV6 && c->cmsg_type == IPV6_RECVERR)) {
+                    err = reinterpret_cast<const sock_extended_err*>(CMSG_DATA(c));
+                }
+            }
+            if (!have_ts || err == nullptr || err->ee_origin != SO_EE_ORIGIN_TIMESTAMPING) {
+                continue;
+            }
+            // A dialed connection's frames carry a 4-byte mask
+            if (err->ee_data != this->debug_tx_key_ && err->ee_data != this->debug_tx_key_ + 4) {
+                t.key_mismatch = true;
+                static int shown = 0;
+                if (shown++ < 6) {
+                    std::fprintf(stderr, "[time-reply] key %u, expected %u (info %u)\n",
+                                 err->ee_data, this->debug_tx_key_, err->ee_info);
+                }
+            }
+            if (err->ee_info == SCM_TSTAMP_SCHED && ts_ns(ts.ts[0]) != 0) {
+                t.sched_us = debug_realtime_to_now_us(ts_ns(ts.ts[0]));
+            } else if (err->ee_info == SCM_TSTAMP_SND) {
+                if (ts_ns(ts.ts[0]) != 0) {
+                    t.sw_tx_us = debug_realtime_to_now_us(ts_ns(ts.ts[0]));
+                }
+                if (ts_ns(ts.ts[2]) != 0) {
+                    t.hw_tx_us = debug_realtime_to_now_us(ts_ns(ts.ts[2]));
+                }
+            }
+        }
+        const bool want_hw = t.rx_hw_us != 0 || std::getenv("SENDSPIN_DEBUG_WANT_HW") != nullptr;
+        const bool complete = t.sched_us != 0 && t.sw_tx_us != 0 && (!want_hw || t.hw_tx_us != 0);
+        if (attempt == 0) {
+            for (const DebugRx& rx : this->debug_rx_) {
+                if (rx.pushed_us == t.request_rx_us && rx.pushed_us != 0) {
+                    t.rx_app_us = rx.app_us;
+                    t.rx_sw_us = rx.sw_us;
+                    t.rx_hw_us = rx.hw_us;
+                    t.rx_buffered = rx.buffered;
+                }
+            }
+        }
+        if (!complete && attempt < 20) {
+            this->debug_timer_.expires_after(std::chrono::microseconds(500));
+            this->debug_timer_.async_wait(
+                [self = this->shared_from_this(), attempt](const error_code& ec) {
+                    if (!ec) {
+                        self->debug_finish_or_poll(attempt + 1);
+                    }
+                });
+            return;
+        }
+#else
+        (void)attempt;
+#endif
+        asio::post(this->service_.core_io(),
+                   [core = this->core_, stamp = t.stamp_us, sent = debug_best_tx_us(t)] {
+                       core->deliver_time_reply_sent(stamp, sent);
+                   });
+        debug_time_reply_record(t);
+        this->debug_polled_.reset();
+    }
+
+    struct DebugRx {
+        int64_t app_us{0};
+        int64_t sw_us{0};
+        int64_t hw_us{0};
+        bool buffered{false};
+        int64_t pushed_us{0};
+    };
+    std::array<DebugRx, 32> debug_rx_{};
+#ifdef __linux__
+    size_t debug_rx_next_{0};
+    uint64_t debug_rx_reads_{0};
+    uint32_t debug_tx_key_{0};
+#endif
+
     NetworkService& service_;
     WsStream ws_;
     asio::steady_timer timer_;
+    asio::steady_timer debug_timer_{ws_.get_executor()};
     beast::flat_buffer read_buffer_;
     std::shared_ptr<Connection::Impl> core_;
     int64_t write_stall_us_;
@@ -928,6 +1226,14 @@ bool Connection::Impl::write(MessageKind kind, std::span<const uint8_t> payload)
     return true;
 }
 
+void Connection::debug_time_reply(const TimeReplyTrace& trace) {
+    Impl& impl = *this->impl_;
+    impl.debug_trace_ = trace;
+    impl.debug_trace_->frame_index = impl.batch_count_ - 1;
+    impl.debug_trace_->bytes_before =
+        impl.write_buffer_.size() - impl.batch_frames_[impl.batch_count_ - 1].bytes;
+}
+
 void Connection::Impl::start_write() {
     if (this->batch_count_ == 0) {
         return;
@@ -940,7 +1246,17 @@ void Connection::Impl::start_write() {
     }
     this->small_write_ = this->write_buffer_.size() <= ROOM_AFTER_WRITE_MAX_BYTES;
     this->write_in_flight_ = true;
-    this->to_network([frames = this->batch_count_](NetConnection& net) { net.write(frames); });
+    std::optional<TimeReplyTrace> debug = std::exchange(this->debug_trace_, std::nullopt);
+    if (debug) {
+        debug->posted_us = now_us();
+    }
+    this->to_network([frames = this->batch_count_, debug](NetConnection& net) {
+        net.debug_trace_ = debug;
+        if (debug) {
+            net.debug_trace_->net_start_us = now_us();
+        }
+        net.write(frames);
+    });
 }
 
 void Connection::Impl::close(uint16_t code) {
