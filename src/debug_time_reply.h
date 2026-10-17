@@ -51,7 +51,8 @@ struct TimeReplyTrace {
 /// @brief A CLOCK_REALTIME instant (a kernel stamp) on now_us()'s clock
 int64_t debug_realtime_to_now_us(int64_t realtime_ns);
 
-/// @brief The best send time known: hardware, else software, else sched, else issued_us
+/// @brief The send time the next interleaved reply reports: software, else sched, else
+/// issued_us; hardware first with SENDSPIN_DEBUG_PROTOCOL_HW=1
 int64_t debug_best_tx_us(const TimeReplyTrace& trace);
 
 /// @brief Accumulates a trace and prints a summary to stderr every SENDSPIN_DEBUG_TIME_EVERY

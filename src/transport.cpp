@@ -80,18 +80,25 @@ using boost::system::error_code;
 #ifdef __linux__
 // TEMPORARY DEBUG: SO_TIMESTAMPING. The receive stamps come as control messages, which Beast's
 // reads drop, so this stream reads with recvmsg() itself and keeps the last read's stamps.
-constexpr int RX_TS_FLAGS = SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_RX_HARDWARE |
-                            SOF_TIMESTAMPING_SOFTWARE | SOF_TIMESTAMPING_RAW_HARDWARE;
-constexpr int TX_TS_FLAGS = RX_TS_FLAGS | SOF_TIMESTAMPING_TX_SCHED | SOF_TIMESTAMPING_TX_SOFTWARE |
-                            SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_OPT_ID |
-                            SOF_TIMESTAMPING_OPT_TSONLY
-#ifdef SOF_TIMESTAMPING_OPT_TX_SWHW
-                            | SOF_TIMESTAMPING_OPT_TX_SWHW
-#endif
-#ifdef SOF_TIMESTAMPING_OPT_ID_TCP
-                            | SOF_TIMESTAMPING_OPT_ID_TCP
-#endif
-    ;
+// The options stay set for the socket's life: a NIC's send stamp can come back after the send,
+// and is reported by them as they are then (with OPT_ID cleared, its key reads 0, and without
+// OPT_TSONLY its software slot holds the packet's pacing time). Only the send stamps' generation
+// bits are set around a server/time's send.
+constexpr int BASE_TS_FLAGS = SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_RX_HARDWARE |
+                              SOF_TIMESTAMPING_SOFTWARE | SOF_TIMESTAMPING_RAW_HARDWARE |
+                              SOF_TIMESTAMPING_OPT_ID | SOF_TIMESTAMPING_OPT_TSONLY;
+// The header declares these as enumerators, not macros, and older headers lack them: their bits
+// (Linux 4.13 and 6.2), which a kernel without them refuses
+constexpr int TS_OPT_TX_SWHW = 1 << 14;
+constexpr int TS_OPT_ID_TCP = 1 << 16;
+constexpr int OPTIONAL_TS_FLAGS = TS_OPT_TX_SWHW | TS_OPT_ID_TCP;
+constexpr int TX_GEN_TS_FLAGS =
+    SOF_TIMESTAMPING_TX_SCHED | SOF_TIMESTAMPING_TX_SOFTWARE | SOF_TIMESTAMPING_TX_HARDWARE;
+
+bool debug_env(const char* name) {
+    const char* v = std::getenv(name);
+    return v != nullptr && v[0] == '1';
+}
 
 int64_t ts_ns(const timespec& ts) {
     return static_cast<int64_t>(ts.tv_sec) * 1000000000 + ts.tv_nsec;
@@ -109,10 +116,25 @@ public:
             handler, buffers);
     }
 
+    template <class ConstBuffers, class WriteHandler>
+    auto async_write_some(const ConstBuffers& buffers, WriteHandler&& handler) {
+        return asio::async_initiate<WriteHandler, void(error_code, size_t)>(
+            [this](auto h, const ConstBuffers& b) {
+                beast::tcp_stream::async_write_some(
+                    b, [this, h = std::move(h)](const error_code& ec, size_t n) mutable {
+                        this->written += n;
+                        std::move(h)(ec, n);
+                    });
+            },
+            handler, buffers);
+    }
+
     /// The last read's kernel stamps (CLOCK_REALTIME ns, the NIC's raw clock ns), 0 for none
     int64_t rx_sw_ns{0};
     int64_t rx_hw_ns{0};
     uint64_t reads{0};
+    /// Bytes the kernel took, the send stamps' keys count from
+    uint64_t written{0};
 
 private:
     template <class MutableBuffers, class Handler>
@@ -754,10 +776,34 @@ public:
 
     void start() {
 #ifdef __linux__
-        const int flags = RX_TS_FLAGS;
-        if (::setsockopt(beast::get_lowest_layer(this->ws_).socket().native_handle(), SOL_SOCKET,
-                         SO_TIMESTAMPING, &flags, sizeof(flags)) != 0) {
-            std::fprintf(stderr, "[time-reply] SO_TIMESTAMPING failed: %d\n", errno);
+        {
+            const int fd = beast::get_lowest_layer(this->ws_).socket().native_handle();
+            // The key's base is snd_una without OPT_ID_TCP, write_seq with it
+            int outq = 0;
+            ::ioctl(fd, SIOCOUTQ, &outq);
+            this->debug_ts_flags_ = BASE_TS_FLAGS | OPTIONAL_TS_FLAGS;
+            int first_errno = 0;
+            if (::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING, &this->debug_ts_flags_,
+                             sizeof(this->debug_ts_flags_)) != 0) {
+                first_errno = errno;
+                // A kernel older than the headers refuses the bits it does not know
+                this->debug_ts_flags_ = BASE_TS_FLAGS;
+                if (::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING, &this->debug_ts_flags_,
+                                 sizeof(this->debug_ts_flags_)) != 0) {
+                    std::fprintf(stderr, "[time-reply] SO_TIMESTAMPING failed: %d\n", errno);
+                    this->debug_ts_flags_ = 0;
+                }
+            }
+            const bool id_tcp = (this->debug_ts_flags_ & TS_OPT_ID_TCP) != 0;
+            this->debug_key_base_ =
+                static_cast<int64_t>(this->ws_.next_layer().written) - (id_tcp ? 0 : outq);
+            static int shown = 0;
+            if (shown++ < 3) {
+                std::fprintf(stderr,
+                             "[time-reply] SO_TIMESTAMPING flags 0x%x (OPT_ID_TCP %s, first "
+                             "attempt errno %d)\n",
+                             this->debug_ts_flags_, id_tcp ? "on" : "off", first_errno);
+            }
         }
 #endif
         if (!this->closed_) {
@@ -864,13 +910,23 @@ private:
             DebugRx& rx = this->debug_rx_[this->debug_rx_next_++ % this->debug_rx_.size()];
             rx = {rx_us, 0, 0, stream.reads == this->debug_rx_reads_};
             if (!rx.buffered) {
+                if (stream.rx_sw_ns != 0 && stream.rx_hw_ns != 0) {
+                    this->debug_note_phc_offset(stream.rx_sw_ns - stream.rx_hw_ns);
+                }
                 rx.sw_us = stream.rx_sw_ns != 0 ? debug_realtime_to_now_us(stream.rx_sw_ns) : 0;
-                rx.hw_us = stream.rx_hw_ns != 0 ? debug_realtime_to_now_us(stream.rx_hw_ns) : 0;
+                rx.hw_us = this->debug_hw_to_now_us(stream.rx_hw_ns);
             }
             this->debug_rx_reads_ = stream.reads;
-            static const bool kernel_rx = std::getenv("SENDSPIN_DEBUG_APP_RX") == nullptr;
-            if (kernel_rx && (rx.hw_us != 0 || rx.sw_us != 0)) {
-                rx_us = rx.hw_us != 0 ? rx.hw_us : rx.sw_us;
+            // server_received: the kernel's software stamp, which is on the system clock; the
+            // NIC's only when asked for, its clock then as well converted as the stats'
+            static const bool app_rx = debug_env("SENDSPIN_DEBUG_APP_RX");
+            static const bool protocol_hw = debug_env("SENDSPIN_DEBUG_PROTOCOL_HW");
+            if (!app_rx) {
+                if (protocol_hw && rx.hw_us != 0) {
+                    rx_us = rx.hw_us;
+                } else if (rx.sw_us != 0) {
+                    rx_us = rx.sw_us;
+                }
             }
             rx.pushed_us = rx_us;
         }
@@ -915,18 +971,11 @@ private:
         const bool debug = this->debug_trace_ && this->debug_trace_->frame_index == index;
         if (debug) {
 #ifdef __linux__
-            const int fd = beast::get_lowest_layer(this->ws_).socket().native_handle();
-            int outq = 0;
-            ::ioctl(fd, SIOCOUTQ, &outq);
-            const size_t payload = frame.bytes;
-            const size_t header = payload < 126 ? 2 : (payload < 65536 ? 4 : 10);
-#ifdef SOF_TIMESTAMPING_OPT_ID_TCP
-            this->debug_tx_key_ = static_cast<uint32_t>(header + payload - 1);
-#else
-            this->debug_tx_key_ = static_cast<uint32_t>(outq + header + payload - 1);
-#endif
-            const int flags = TX_TS_FLAGS;
-            ::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING, &flags, sizeof(flags));
+            if (this->debug_ts_flags_ != 0) {
+                const int flags = this->debug_ts_flags_ | TX_GEN_TS_FLAGS;
+                ::setsockopt(beast::get_lowest_layer(this->ws_).socket().native_handle(),
+                             SOL_SOCKET, SO_TIMESTAMPING, &flags, sizeof(flags));
+            }
 #endif
             this->debug_trace_->issue_us = now_us();
         }
@@ -937,9 +986,11 @@ private:
         if (debug) {
             this->debug_trace_->issued_us = now_us();
 #ifdef __linux__
-            const int flags = RX_TS_FLAGS;
-            ::setsockopt(beast::get_lowest_layer(this->ws_).socket().native_handle(), SOL_SOCKET,
-                         SO_TIMESTAMPING, &flags, sizeof(flags));
+            if (this->debug_ts_flags_ != 0) {
+                ::setsockopt(beast::get_lowest_layer(this->ws_).socket().native_handle(),
+                             SOL_SOCKET, SO_TIMESTAMPING, &this->debug_ts_flags_,
+                             sizeof(this->debug_ts_flags_));
+            }
 #endif
         }
     }
@@ -960,6 +1011,11 @@ private:
                 this->debug_finish_or_poll(1000);
             }
             this->debug_polled_ = std::exchange(this->debug_trace_, std::nullopt);
+            this->debug_posted_ = false;
+#ifdef __linux__
+            this->debug_tx_key_ = static_cast<uint32_t>(
+                static_cast<int64_t>(this->ws_.next_layer().written) - this->debug_key_base_ - 1);
+#endif
             this->debug_finish_or_poll(0);
         }
         if (this->closed_) {
@@ -1084,14 +1140,15 @@ private:
             if (!have_ts || err == nullptr || err->ee_origin != SO_EE_ORIGIN_TIMESTAMPING) {
                 continue;
             }
-            // A dialed connection's frames carry a 4-byte mask
-            if (err->ee_data != this->debug_tx_key_ && err->ee_data != this->debug_tx_key_ + 4) {
+            // Another reply's stamp, one that came back after its trace was closed out
+            if (err->ee_data != this->debug_tx_key_) {
                 t.key_mismatch = true;
                 static int shown = 0;
                 if (shown++ < 6) {
                     std::fprintf(stderr, "[time-reply] key %u, expected %u (info %u)\n",
                                  err->ee_data, this->debug_tx_key_, err->ee_info);
                 }
+                continue;
             }
             if (err->ee_info == SCM_TSTAMP_SCHED && ts_ns(ts.ts[0]) != 0) {
                 t.sched_us = debug_realtime_to_now_us(ts_ns(ts.ts[0]));
@@ -1100,12 +1157,10 @@ private:
                     t.sw_tx_us = debug_realtime_to_now_us(ts_ns(ts.ts[0]));
                 }
                 if (ts_ns(ts.ts[2]) != 0) {
-                    t.hw_tx_us = debug_realtime_to_now_us(ts_ns(ts.ts[2]));
+                    t.hw_tx_us = this->debug_hw_to_now_us(ts_ns(ts.ts[2]));
                 }
             }
         }
-        const bool want_hw = t.rx_hw_us != 0 || std::getenv("SENDSPIN_DEBUG_WANT_HW") != nullptr;
-        const bool complete = t.sched_us != 0 && t.sw_tx_us != 0 && (!want_hw || t.hw_tx_us != 0);
         if (attempt == 0) {
             for (const DebugRx& rx : this->debug_rx_) {
                 if (rx.pushed_us == t.request_rx_us && rx.pushed_us != 0) {
@@ -1115,6 +1170,13 @@ private:
                     t.rx_buffered = rx.buffered;
                 }
             }
+        }
+        const bool want_hw = t.rx_hw_us != 0 || debug_env("SENDSPIN_DEBUG_WANT_HW");
+        const bool complete = t.sched_us != 0 && t.sw_tx_us != 0 && (!want_hw || t.hw_tx_us != 0);
+        // The session's value goes as soon as it is known, ahead of the client's next request
+        static const bool protocol_hw = debug_env("SENDSPIN_DEBUG_PROTOCOL_HW");
+        if (!this->debug_posted_ && (protocol_hw ? t.hw_tx_us != 0 : t.sw_tx_us != 0)) {
+            this->debug_post_sent(t);
         }
         if (!complete && attempt < 20) {
             this->debug_timer_.expires_after(std::chrono::microseconds(500));
@@ -1129,13 +1191,50 @@ private:
 #else
         (void)attempt;
 #endif
+        if (!this->debug_posted_) {
+            this->debug_post_sent(t);
+        }
+        debug_time_reply_record(t);
+        this->debug_polled_.reset();
+    }
+
+    void debug_post_sent(const TimeReplyTrace& t) {
+        this->debug_posted_ = true;
         asio::post(this->service_.core_io(),
                    [core = this->core_, stamp = t.stamp_us, sent = debug_best_tx_us(t)] {
                        core->deliver_time_reply_sent(stamp, sent);
                    });
-        debug_time_reply_record(t);
-        this->debug_polled_.reset();
     }
+
+#ifdef __linux__
+    // The NIC's clock against the system clock: the least software-minus-hardware receive stamp
+    // of the last 64 segments that carried both, the NIC's stamp being the earlier by the driver's
+    // least latency. SENDSPIN_DEBUG_HW_SYNCED=1 takes the NIC's clock as the system clock
+    // (phc2sys -s CLOCK_REALTIME -c <if> -O 0).
+    void debug_note_phc_offset(int64_t sw_minus_hw_ns) {
+        this->debug_phc_diffs_[this->debug_phc_next_++ % this->debug_phc_diffs_.size()] =
+            sw_minus_hw_ns;
+        this->debug_phc_count_ =
+            std::min(this->debug_phc_count_ + 1, this->debug_phc_diffs_.size());
+    }
+
+    int64_t debug_hw_to_now_us(int64_t hw_ns) const {
+        if (hw_ns == 0) {
+            return 0;
+        }
+        static const bool synced = debug_env("SENDSPIN_DEBUG_HW_SYNCED");
+        if (synced) {
+            return debug_realtime_to_now_us(hw_ns);
+        }
+        if (this->debug_phc_count_ == 0) {
+            return 0;
+        }
+        const int64_t offset = *std::min_element(
+            this->debug_phc_diffs_.begin(),
+            this->debug_phc_diffs_.begin() + static_cast<std::ptrdiff_t>(this->debug_phc_count_));
+        return debug_realtime_to_now_us(hw_ns + offset);
+    }
+#endif
 
     struct DebugRx {
         int64_t app_us{0};
@@ -1145,10 +1244,16 @@ private:
         int64_t pushed_us{0};
     };
     std::array<DebugRx, 32> debug_rx_{};
+    bool debug_posted_{false};
 #ifdef __linux__
     size_t debug_rx_next_{0};
     uint64_t debug_rx_reads_{0};
     uint32_t debug_tx_key_{0};
+    int debug_ts_flags_{0};
+    int64_t debug_key_base_{0};
+    std::array<int64_t, 64> debug_phc_diffs_{};
+    size_t debug_phc_next_{0};
+    size_t debug_phc_count_{0};
 #endif
 
     NetworkService& service_;

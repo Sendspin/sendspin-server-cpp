@@ -95,7 +95,8 @@ int64_t debug_realtime_to_now_us(int64_t realtime_ns) {
 }
 
 int64_t debug_best_tx_us(const TimeReplyTrace& t) {
-    if (t.hw_tx_us != 0) {
+    static const bool protocol_hw = env_size("SENDSPIN_DEBUG_PROTOCOL_HW", 0) != 0;
+    if (protocol_hw && t.hw_tx_us != 0) {
         return t.hw_tx_us;
     }
     if (t.sw_tx_us != 0) {

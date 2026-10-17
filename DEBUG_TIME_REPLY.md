@@ -24,13 +24,16 @@ The macOS build has the application segments only.
 
 - **Request:** `client/time` with `"interleaved": true`.
 - **Reply:** `server/time` then adds `"previous": {"client_transmitted", "server_transmitted"}`.
-  This is the previous reply's actual send time: hardware, else software, else sched, else when
-  `send()` returned.
+  This is the previous reply's actual send time: the kernel's software stamp, else sched, else
+  when `send()` returned. The server sends it as soon as the software stamp is in, ahead of the
+  client's next request.
 - **Client:** recomputes that exchange with it. A burst sends one extra request, and only refined
   samples compete for the burst's best. If no reply carries `previous`, it falls back to the basic
-  samples.
-- **Receive side:** on Linux the server reports `server_received` as the kernel's receive stamp
-  (the NIC's when it has one). Fixing only the send side would leave the offset off by r/2.
+  samples. It drops a refinement that moves the send by less than 0 or 100 ms or more.
+- **Receive side:** on Linux the server reports `server_received` as the kernel's software
+  receive stamp. Fixing only the send side would leave the offset off by r/2.
+- **NIC stamps:** they go on the wire only with `SENDSPIN_DEBUG_PROTOCOL_HW=1`, since they are on
+  the NIC's clock (see Hardware stamps).
 
 ## Environment
 
@@ -40,6 +43,8 @@ The macOS build has the application segments only.
 | `SENDSPIN_DEBUG_TIME_EACH=1` | server | also one line per reply (`sN` = segment N of the table) |
 | `SENDSPIN_DEBUG_APP_RX=1` | server | keep the network thread's receive stamp as `server_received` |
 | `SENDSPIN_DEBUG_WANT_HW=1` | server | wait up to 10 ms for a hardware send stamp even when receives have none |
+| `SENDSPIN_DEBUG_HW_SYNCED=1` | server | take the NIC's clock as the system clock (phc2sys runs) instead of estimating the offset |
+| `SENDSPIN_DEBUG_PROTOCOL_HW=1` | server | put NIC stamps, converted, in `server_received` and `previous` |
 | `SENDSPIN_TIME_INTERLEAVED=1` | client | ask for interleaved replies (or `SendspinClientConfig::time_interleaved`) |
 
 ## Running on a Linux box
@@ -70,7 +75,10 @@ SENDSPIN_TIME_INTERLEAVED=1 build-ts/tests/sendspin_server_cpp_tests --gtest_fil
   `all` receive filter. Many NICs filter receive stamps to PTP packets only, so TCP gets none.
 - **Turn them on:** `sudo hwstamp_ctl -i <if> -t 1 -r 1` (linuxptp); `-r 1` asks for every
   packet.
-- **Clock domain:** the stamps are in the NIC's clock. The server converts them as if they were
-  CLOCK_REALTIME, so the NIC's clock has to follow it: `sudo phc2sys -s CLOCK_REALTIME -c <if> -O 0`.
+- **Clock domain:** the stamps are in the NIC's clock, which can be anywhere (117.8 s off on one
+  box). The server converts them with an estimate: the least software-minus-hardware receive
+  stamp over the last 64 segments that carried both. That makes NIC times late by the driver's
+  least receive latency, a few us. For exact values, run
+  `sudo phc2sys -s CLOCK_REALTIME -c <if> -O 0` and set `SENDSPIN_DEBUG_HW_SYNCED=1`.
 - **Wi-Fi:** drivers rarely stamp in hardware. The software send stamp is when the driver took
   the frame, before the air queue, so it misses the queueing at the access point and on the air.
