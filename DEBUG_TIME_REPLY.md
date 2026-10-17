@@ -45,6 +45,7 @@ The macOS build has the application segments only.
 | `SENDSPIN_DEBUG_WANT_HW=1` | server | wait up to 10 ms for a hardware send stamp even when receives have none |
 | `SENDSPIN_DEBUG_HW_SYNCED=1` | server | take the NIC's clock as the system clock (phc2sys runs) instead of estimating the offset |
 | `SENDSPIN_DEBUG_PROTOCOL_HW=1` | server | put NIC stamps, converted, in `server_received` and `previous` |
+| `SENDSPIN_DEBUG_NO_ID_TCP=1` | server | skip `OPT_ID_TCP`, as a kernel before 6.2 does |
 | `SENDSPIN_TIME_INTERLEAVED=1` | client | ask for interleaved replies (or `SendspinClientConfig::time_interleaved`) |
 
 ## Running on a Linux box

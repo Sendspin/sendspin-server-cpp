@@ -736,10 +736,8 @@ namespace {
 /// the receive stamps, the write stall and the closing handshake, all on the network thread
 class NetConnection : public std::enable_shared_from_this<NetConnection> {
 public:
-    // TEMPORARY DEBUG: the server/time in the write in flight, and one written whose send stamps
-    // are being collected
+    // TEMPORARY DEBUG: the server/time in the write in flight
     std::optional<TimeReplyTrace> debug_trace_;
-    std::optional<TimeReplyTrace> debug_polled_;
 
 public:
     NetConnection(NetworkService& service, beast::tcp_stream stream,
@@ -781,28 +779,37 @@ public:
             // The key's base is snd_una without OPT_ID_TCP, write_seq with it
             int outq = 0;
             ::ioctl(fd, SIOCOUTQ, &outq);
-            this->debug_ts_flags_ = BASE_TS_FLAGS | OPTIONAL_TS_FLAGS;
-            int first_errno = 0;
-            if (::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING, &this->debug_ts_flags_,
-                             sizeof(this->debug_ts_flags_)) != 0) {
-                first_errno = errno;
-                // A kernel older than the headers refuses the bits it does not know
-                this->debug_ts_flags_ = BASE_TS_FLAGS;
-                if (::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING, &this->debug_ts_flags_,
-                                 sizeof(this->debug_ts_flags_)) != 0) {
-                    std::fprintf(stderr, "[time-reply] SO_TIMESTAMPING failed: %d\n", errno);
-                    this->debug_ts_flags_ = 0;
+            // A kernel refuses the bits it does not know (OPT_ID_TCP before 6.2), so each
+            // optional bit is tried on its own
+            this->debug_ts_flags_ = 0;
+            for (const int flags :
+                 {BASE_TS_FLAGS | OPTIONAL_TS_FLAGS, BASE_TS_FLAGS | TS_OPT_TX_SWHW,
+                  BASE_TS_FLAGS | TS_OPT_ID_TCP, BASE_TS_FLAGS}) {
+                // SENDSPIN_DEBUG_NO_ID_TCP=1 acts as a kernel before 6.2
+                static const bool no_id_tcp = debug_env("SENDSPIN_DEBUG_NO_ID_TCP");
+                if (no_id_tcp && (flags & TS_OPT_ID_TCP) != 0) {
+                    continue;
+                }
+                if (::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING, &flags, sizeof(flags)) == 0) {
+                    this->debug_ts_flags_ = flags;
+                    break;
                 }
             }
+            if (this->debug_ts_flags_ == 0) {
+                std::fprintf(stderr, "[time-reply] SO_TIMESTAMPING failed: %d\n", errno);
+            }
+            const int first_errno = 0;
             const bool id_tcp = (this->debug_ts_flags_ & TS_OPT_ID_TCP) != 0;
             this->debug_key_base_ =
                 static_cast<int64_t>(this->ws_.next_layer().written) - (id_tcp ? 0 : outq);
             static int shown = 0;
             if (shown++ < 3) {
                 std::fprintf(stderr,
-                             "[time-reply] SO_TIMESTAMPING flags 0x%x (OPT_ID_TCP %s, first "
-                             "attempt errno %d)\n",
-                             this->debug_ts_flags_, id_tcp ? "on" : "off", first_errno);
+                             "[time-reply] SO_TIMESTAMPING flags 0x%x (OPT_ID_TCP %s, "
+                             "OPT_TX_SWHW %s)\n",
+                             this->debug_ts_flags_, id_tcp ? "on" : "off",
+                             (this->debug_ts_flags_ & TS_OPT_TX_SWHW) != 0 ? "on" : "off");
+                (void)first_errno;
             }
         }
 #endif
@@ -1006,17 +1013,12 @@ private:
                 this->debug_trace_->unsent_bytes = unsent;
             }
 #endif
-            if (this->debug_polled_) {
-                this->debug_timer_.cancel();
-                this->debug_finish_or_poll(1000);
-            }
-            this->debug_polled_ = std::exchange(this->debug_trace_, std::nullopt);
-            this->debug_posted_ = false;
+            DebugPending pending{*std::exchange(this->debug_trace_, std::nullopt)};
 #ifdef __linux__
-            this->debug_tx_key_ = static_cast<uint32_t>(
+            pending.key = static_cast<uint32_t>(
                 static_cast<int64_t>(this->ws_.next_layer().written) - this->debug_key_base_ - 1);
 #endif
-            this->debug_finish_or_poll(0);
+            this->debug_add_pending(std::move(pending));
         }
         if (this->closed_) {
             this->write_in_flight_ = false;
@@ -1107,23 +1109,107 @@ private:
         this->timer_.cancel();
     }
 
-    // TEMPORARY DEBUG: collects the reply's send stamps from the error queue, every 500 us for up
-    // to 10 ms, then records the trace
-    void debug_finish_or_poll(int attempt) {
-        if (!this->debug_polled_) {
-            return;
+    // TEMPORARY DEBUG: the replies written whose send stamps are being collected, each matched by
+    // its key (the offset of its last byte), polled every 500 us for up to 10 ms
+    struct DebugPending {
+        TimeReplyTrace t;
+        uint32_t key{0};
+        bool posted{false};
+        bool rx_found{false};
+        int polls{0};
+    };
+
+    void debug_add_pending(DebugPending pending) {
+        auto free = std::find_if(this->debug_pending_.begin(), this->debug_pending_.end(),
+                                 [](const auto& p) { return !p; });
+        if (free == this->debug_pending_.end()) {
+            // The oldest is closed out with what it has
+            free = std::min_element(
+                this->debug_pending_.begin(), this->debug_pending_.end(),
+                [](const auto& a, const auto& b) { return a->t.stamp_us < b->t.stamp_us; });
+            this->debug_finish(**free);
+            free->reset();
         }
-        TimeReplyTrace& t = *this->debug_polled_;
+        *free = std::move(pending);
+        this->debug_poll();
+    }
+
+    void debug_poll() {
 #ifdef __linux__
+        this->debug_drain();
+#endif
+        bool waiting = false;
+        for (auto& slot : this->debug_pending_) {
+            if (!slot) {
+                continue;
+            }
+            DebugPending& p = *slot;
+#ifdef __linux__
+            TimeReplyTrace& t = p.t;
+            if (!p.rx_found) {
+                p.rx_found = true;
+                for (const DebugRx& rx : this->debug_rx_) {
+                    if (rx.pushed_us == t.request_rx_us && rx.pushed_us != 0) {
+                        t.rx_app_us = rx.app_us;
+                        t.rx_sw_us = rx.sw_us;
+                        t.rx_hw_us = rx.hw_us;
+                        t.rx_buffered = rx.buffered;
+                    }
+                }
+            }
+            // Without OPT_TX_SWHW a NIC's stamp replaces the driver's software one
+            const bool swhw = (this->debug_ts_flags_ & TS_OPT_TX_SWHW) != 0;
+            const bool want_hw = t.rx_hw_us != 0 || debug_env("SENDSPIN_DEBUG_WANT_HW");
+            const bool want_sw = swhw || !want_hw;
+            const bool complete =
+                t.sched_us != 0 && (!want_sw || t.sw_tx_us != 0) && (!want_hw || t.hw_tx_us != 0);
+            // The session's value goes as soon as it is known, ahead of the client's next
+            // request: the software stamp, or the qdisc's once a poll has passed without one
+            static const bool protocol_hw = debug_env("SENDSPIN_DEBUG_PROTOCOL_HW");
+            const bool ready = protocol_hw ? t.hw_tx_us != 0
+                                           : (t.sw_tx_us != 0 || (t.sched_us != 0 && p.polls > 0));
+            if (!p.posted && ready) {
+                this->debug_post_sent(p);
+            }
+            if (!complete && p.polls < 20) {
+                ++p.polls;
+                waiting = true;
+                continue;
+            }
+#endif
+            this->debug_finish(p);
+            slot.reset();
+        }
+        if (waiting && !this->debug_timer_armed_) {
+            this->debug_timer_armed_ = true;
+            this->debug_timer_.expires_after(std::chrono::microseconds(500));
+            this->debug_timer_.async_wait([self = this->shared_from_this()](const error_code& ec) {
+                self->debug_timer_armed_ = false;
+                if (!ec) {
+                    self->debug_poll();
+                }
+            });
+        }
+    }
+
+    void debug_finish(DebugPending& p) {
+        if (!p.posted) {
+            this->debug_post_sent(p);
+        }
+        debug_time_reply_record(p.t);
+    }
+
+#ifdef __linux__
+    // Every stamp in the error queue, to the pending reply its key names
+    void debug_drain() {
         const int fd = beast::get_lowest_layer(this->ws_).socket().native_handle();
-        // attempt 1000: closed out by the next reply's write, whose stamps carry the same key
-        for (; attempt < 1000;) {
+        for (;;) {
             alignas(cmsghdr) std::array<char, 512> control{};
             msghdr msg{};
             msg.msg_control = control.data();
             msg.msg_controllen = control.size();
             if (::recvmsg(fd, &msg, MSG_ERRQUEUE | MSG_DONTWAIT) < 0) {
-                break;
+                return;
             }
             scm_timestamping ts{};
             bool have_ts = false;
@@ -1140,16 +1226,25 @@ private:
             if (!have_ts || err == nullptr || err->ee_origin != SO_EE_ORIGIN_TIMESTAMPING) {
                 continue;
             }
-            // Another reply's stamp, one that came back after its trace was closed out
-            if (err->ee_data != this->debug_tx_key_) {
-                t.key_mismatch = true;
+            auto slot = std::find_if(this->debug_pending_.begin(), this->debug_pending_.end(),
+                                     [&](const auto& p) { return p && p->key == err->ee_data; });
+            if (slot == this->debug_pending_.end()) {
+                // A reply already closed out, or a key this connection's base got wrong
                 static int shown = 0;
                 if (shown++ < 6) {
-                    std::fprintf(stderr, "[time-reply] key %u, expected %u (info %u)\n",
-                                 err->ee_data, this->debug_tx_key_, err->ee_info);
+                    std::fprintf(
+                        stderr,
+                        "[time-reply] stamp for key %u matches no pending reply (info %u)\n",
+                        err->ee_data, err->ee_info);
+                }
+                for (auto& p : this->debug_pending_) {
+                    if (p) {
+                        p->t.key_mismatch = true;
+                    }
                 }
                 continue;
             }
+            TimeReplyTrace& t = (*slot)->t;
             if (err->ee_info == SCM_TSTAMP_SCHED && ts_ns(ts.ts[0]) != 0) {
                 t.sched_us = debug_realtime_to_now_us(ts_ns(ts.ts[0]));
             } else if (err->ee_info == SCM_TSTAMP_SND) {
@@ -1161,47 +1256,13 @@ private:
                 }
             }
         }
-        if (attempt == 0) {
-            for (const DebugRx& rx : this->debug_rx_) {
-                if (rx.pushed_us == t.request_rx_us && rx.pushed_us != 0) {
-                    t.rx_app_us = rx.app_us;
-                    t.rx_sw_us = rx.sw_us;
-                    t.rx_hw_us = rx.hw_us;
-                    t.rx_buffered = rx.buffered;
-                }
-            }
-        }
-        const bool want_hw = t.rx_hw_us != 0 || debug_env("SENDSPIN_DEBUG_WANT_HW");
-        const bool complete = t.sched_us != 0 && t.sw_tx_us != 0 && (!want_hw || t.hw_tx_us != 0);
-        // The session's value goes as soon as it is known, ahead of the client's next request
-        static const bool protocol_hw = debug_env("SENDSPIN_DEBUG_PROTOCOL_HW");
-        if (!this->debug_posted_ && (protocol_hw ? t.hw_tx_us != 0 : t.sw_tx_us != 0)) {
-            this->debug_post_sent(t);
-        }
-        if (!complete && attempt < 20) {
-            this->debug_timer_.expires_after(std::chrono::microseconds(500));
-            this->debug_timer_.async_wait(
-                [self = this->shared_from_this(), attempt](const error_code& ec) {
-                    if (!ec) {
-                        self->debug_finish_or_poll(attempt + 1);
-                    }
-                });
-            return;
-        }
-#else
-        (void)attempt;
-#endif
-        if (!this->debug_posted_) {
-            this->debug_post_sent(t);
-        }
-        debug_time_reply_record(t);
-        this->debug_polled_.reset();
     }
+#endif
 
-    void debug_post_sent(const TimeReplyTrace& t) {
-        this->debug_posted_ = true;
+    void debug_post_sent(DebugPending& p) {
+        p.posted = true;
         asio::post(this->service_.core_io(),
-                   [core = this->core_, stamp = t.stamp_us, sent = debug_best_tx_us(t)] {
+                   [core = this->core_, stamp = p.t.stamp_us, sent = debug_best_tx_us(p.t)] {
                        core->deliver_time_reply_sent(stamp, sent);
                    });
     }
@@ -1244,11 +1305,11 @@ private:
         int64_t pushed_us{0};
     };
     std::array<DebugRx, 32> debug_rx_{};
-    bool debug_posted_{false};
+    std::array<std::optional<DebugPending>, 8> debug_pending_{};
+    bool debug_timer_armed_{false};
 #ifdef __linux__
     size_t debug_rx_next_{0};
     uint64_t debug_rx_reads_{0};
-    uint32_t debug_tx_key_{0};
     int debug_ts_flags_{0};
     int64_t debug_key_base_{0};
     std::array<int64_t, 64> debug_phc_diffs_{};
