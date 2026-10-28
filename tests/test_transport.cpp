@@ -976,7 +976,7 @@ TEST_F(TransportTest, HeldBackConnectionsResumeInTheOrderTheyWereHeld) {
     }
     // A probe that sends nothing and reads until the server has closed it
     Gate probe_ended;
-    const Peer probe(this->io, [&] {
+    Peer probe(this->io, [&] {
         const OpenOnExit open_ended(probe_ended);
         asio::io_context peer_io;
         PeerSocket ws(peer_io);
