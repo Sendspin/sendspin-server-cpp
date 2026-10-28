@@ -412,7 +412,7 @@ private:
     /// instance's last address can come with it set and another operation's reply end the batch.
     void report_updated() {
         pollfd fd{DNSServiceRefSockFD(this->connection_), POLLIN, 0};
-        if (poll(&fd, 1, 0) != 0) {
+        if (poll(&fd, 1, 0) > 0) {
             return;
         }
         for (Instance* instance : this->updated_) {
