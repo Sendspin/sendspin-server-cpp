@@ -974,6 +974,18 @@ TEST_F(TransportTest, HeldBackConnectionsResumeInTheOrderTheyWereHeld) {
         open_sends.push_back(std::make_unique<OpenOnExit>(*send[n]));
         this->run_until([&] { return this->accepted.size() == n + 2; });
     }
+    // A probe that sends nothing and reads until the server has closed it
+    Gate probe_ended;
+    const Peer probe(this->io, [&] {
+        const OpenOnExit open_ended(probe_ended);
+        asio::io_context peer_io;
+        PeerSocket ws(peer_io);
+        connect_peer(ws, port);
+        beast::flat_buffer buffer;
+        error_code ec;
+        ws.read(buffer, ec);
+    });
+    this->run_until([&] { return this->accepted.size() == LATER + 2; });
     std::vector<std::string> order;
     std::vector<std::unique_ptr<TestHandler>> handlers;
     for (size_t c = 0; c < this->accepted.size(); ++c) {
@@ -996,23 +1008,33 @@ TEST_F(TransportTest, HeldBackConnectionsResumeInTheOrderTheyWereHeld) {
         written[n]->wait();
         wait_taken(server_fd, later_fds[n]);
     }
+    // The network thread ends the probe's closing handshake only after it pushed the last later
+    // message it took, so that message was refused before core drains the ring
+    this->accepted[LATER + 1].close(close_code::NORMAL);
+    probe_ended.wait();
+    std::vector<std::string> expected(held, "first");
+    for (size_t n = 0; n < LATER; ++n) {
+        expected.push_back("later " + std::to_string(n));
+    }
     first_close.open();
-    this->run_until([&] { return first.done() && !handlers[0]->closes.empty(); });
+    // The first's close is not held for room in the ring, so it can reach core while later
+    // connections still wait to push: those are closed only once every message arrived
+    this->run_until([&] {
+        return first.done() && !handlers[0]->closes.empty() && order.size() == expected.size();
+    });
     for (size_t n = 0; n < LATER; ++n) {
         this->accepted[n + 1].close(close_code::NORMAL);
     }
     this->run_until([&] {
-        return std::all_of(later.begin(), later.end(),
+        return probe.done() &&
+               std::all_of(later.begin(), later.end(),
                            [](const std::unique_ptr<Peer>& peer) { return peer->done(); });
     });
 
     ASSERT_EQ(first.error(), "");
+    ASSERT_EQ(probe.error(), "");
     for (const std::unique_ptr<Peer>& peer : later) {
         ASSERT_EQ(peer->error(), "");
-    }
-    std::vector<std::string> expected(held, "first");
-    for (size_t n = 0; n < LATER; ++n) {
-        expected.push_back("later " + std::to_string(n));
     }
     EXPECT_EQ(order, expected);
 }
