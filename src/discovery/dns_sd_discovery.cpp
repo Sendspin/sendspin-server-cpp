@@ -200,6 +200,7 @@ private:
             }
         }
         this->instances_.clear();
+        this->updated_.clear();
     }
 
     void run() {
@@ -241,12 +242,15 @@ private:
             }
             // The socket is invalid or mDNSResponder went away (kDNSServiceErr_ServiceNotRunning):
             // connect again
-            if (count == 2 && fds[1].revents != 0 &&
-                ((fds[1].revents & POLLNVAL) != 0 ||
-                 DNSServiceProcessResult(this->connection_) != kDNSServiceErr_NoError)) {
-                this->disconnect();
-                reported_unavailable = true;
-                this->sink_->on_unavailable();
+            if (count == 2 && fds[1].revents != 0) {
+                if ((fds[1].revents & POLLNVAL) != 0 ||
+                    DNSServiceProcessResult(this->connection_) != kDNSServiceErr_NoError) {
+                    this->disconnect();
+                    reported_unavailable = true;
+                    this->sink_->on_unavailable();
+                } else {
+                    this->report_updated();
+                }
             }
         }
     }
@@ -269,6 +273,7 @@ private:
             this->connection_ = nullptr;
         }
         this->instances_.clear();
+        this->updated_.clear();
         for (int& fd : this->wake_) {
             if (fd >= 0) {
                 close(fd);
@@ -336,6 +341,7 @@ private:
         }
         const bool reported = instance.reported;
         const std::string lost = instance.name;
+        this->updated_.erase(&instance);
         stop_operation(instance.resolve);
         stop_operation(instance.lookup);
         this->instances_.erase(it);
@@ -398,9 +404,21 @@ private:
                 addresses.erase(it);
             }
         }
-        if ((flags & kDNSServiceFlagsMoreComing) == 0) {
-            instance->owner->report(*instance);
+        instance->owner->updated_.insert(instance);
+    }
+
+    /// Reports the instances whose addresses changed once no reply is left to read. On the
+    /// shared connection kDNSServiceFlagsMoreComing covers every operation's replies, so an
+    /// instance's last address can come with it set and another operation's reply end the batch.
+    void report_updated() {
+        pollfd fd{DNSServiceRefSockFD(this->connection_), POLLIN, 0};
+        if (poll(&fd, 1, 0) > 0) {
+            return;
         }
+        for (Instance* instance : this->updated_) {
+            this->report(*instance);
+        }
+        this->updated_.clear();
     }
 
     /// Reports instance once it has a path and an address: IPv4 first, then IPv6, link-local
@@ -436,6 +454,8 @@ private:
     /// Set by stop() before it writes to the wake pipe
     std::atomic<bool> stopping_{false};
     std::map<std::string, std::unique_ptr<Instance>> instances_;
+    /// Instances whose addresses changed since report_updated() last reported
+    std::set<Instance*> updated_;
     std::thread thread_;
 };
 
