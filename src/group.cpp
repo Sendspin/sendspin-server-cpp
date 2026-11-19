@@ -15,6 +15,8 @@
 #include "group.h"
 
 #include "clock.h"
+#include "crypto/base64url.h"
+#include "crypto/crypto.h"
 #include "log.h"
 #include "messages.h"
 #include "playback_policy.h"
@@ -22,6 +24,7 @@
 #include "stream_source.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <set>
 #include <type_traits>
 #include <utility>
@@ -121,7 +124,18 @@ Group::Group(EventLoop& loop, AudioWorkers& workers, GroupId id, std::string nam
       artwork_cache_(artwork),
       album_(ArtworkImage{artwork.next_image_id(), now_us(), nullptr}),
       artist_(ArtworkImage{artwork.next_image_id(), now_us(), nullptr}),
-      alive_(std::make_shared<bool>(true)) {}
+      alive_(std::make_shared<bool>(true)) {
+    // messaging.md "group/update": 32 bytes encoded as unpadded base64url, stable for the group.
+    const std::string handle = std::to_string(id.value);
+    Sha256 hash;
+    hash.update(reinterpret_cast<const uint8_t*>(handle.data()), handle.size());
+    const auto digest = hash.finalize();
+    // A failed hash must not give different groups the same zero digest.
+    if (!hash.ok()) {
+        abort();
+    }
+    this->wire_id_ = b64url_encode(digest.data(), digest.size());
+}
 
 Group::~Group() {
     if (this->input_) {
@@ -199,7 +213,7 @@ void Group::on_client_state(GroupMember& /*member*/) {
 }
 
 std::optional<std::string> Group::group_update() const {
-    return build_group_update({this->playing_, std::to_string(this->id_.value), this->name_});
+    return build_group_update({this->playing_, this->wire_id_, this->name_});
 }
 
 void Group::send_group_update(GroupMember& member) {

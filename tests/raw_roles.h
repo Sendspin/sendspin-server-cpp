@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include "crypto/base64url.h"
+#include "crypto/crypto.h"
 #include "raw_client.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
@@ -137,6 +139,15 @@ inline std::string client_id_of(const RawClient& client) {
 
 inline std::string group_id(const GroupId& id) {
     return std::to_string(id.value);
+}
+
+inline std::string wire_group_id(const GroupId& id) {
+    const std::string handle = group_id(id);
+    Sha256 hash;
+    hash.update(reinterpret_cast<const uint8_t*>(handle.data()), handle.size());
+    const auto digest = hash.finalize();
+    EXPECT_TRUE(hash.ok());
+    return b64url_encode(digest.data(), digest.size());
 }
 
 }  // namespace sendspin::server::test

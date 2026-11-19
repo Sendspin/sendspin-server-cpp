@@ -289,6 +289,7 @@ private:
     EventLoop& loop_;
     AudioWorkers& workers_;
     GroupId id_;
+    std::string wire_id_;
     std::string name_;
     uint64_t& next_instance_;
     ResamplerQuality quality_;
