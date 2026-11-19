@@ -16,6 +16,7 @@
 /// @brief The soak's wire checker (tests/soak_wire_checker.h) over synthetic traces, so that each
 /// of its checks is shown to fire where the soak relies on it
 
+#include "raw_roles.h"
 #include "soak_wire_checker.h"
 #include <gtest/gtest.h>
 
@@ -75,8 +76,9 @@ std::vector<TracedMessage> session(const std::string& client, uint32_t capacity)
              R"({"type":"client/hello","payload":{"player@v1_support":{"buffer_capacity":)" +
                  std::to_string(capacity) + "}}}"),
         state(client, 1, 0),
-        json(client, TraceDirection::OUTBOUND, 2,
-             R"({"type":"group/update","payload":{"group_id":"1"}})"),
+        json(
+            client, TraceDirection::OUTBOUND, 2,
+            R"({"type":"group/update","payload":{"group_id":"a4ayc_80_OGda4BO_1o_V0etpOqiLx1JwB5S3beHW0s"}})"),
         json(client, TraceDirection::OUTBOUND, 10 * MS,
              R"({"type":"stream/start","payload":{"player":{"codec":"pcm","sample_rate":48000,)"
              R"("channels":2,"bit_depth":16}}})"),
@@ -167,6 +169,27 @@ TEST(SoakWireChecker, FlagsEachBrokenRule) {
             EXPECT_NE(anomalies.front().find(row.anomaly), std::string::npos) << anomalies.front();
         }
         EXPECT_EQ(checker.stats()["a"].late_starts, row.late_starts);
+    }
+}
+
+TEST(SoakWireChecker, MatchesLiveIntervalsToWireGroupIdentifiers) {
+    for (const uint64_t handle : {1U, 2U}) {
+        SCOPED_TRACE(handle);
+        WireChecker checker;
+        checker.set_live(sendspin::server::test::wire_group_id({handle}), true, 15 * MS);
+        for (const TracedMessage& message : session("a", ROOMY)) {
+            checker.on_message(message);
+        }
+        checker.on_message(chunk("a", 1000 * MS, 10 * MS));
+        checker.on_message(chunk("a", 1060 * MS, 20 * MS));
+        EXPECT_EQ(checker.stats()["a"].live_gaps, handle == 1 ? 1U : 0U);
+        const auto anomalies = checker.anomalies();
+        if (handle == 1) {
+            EXPECT_TRUE(anomalies.empty());
+        } else {
+            ASSERT_EQ(anomalies.size(), 1U);
+            EXPECT_NE(anomalies.front().find("buffered stream"), std::string::npos);
+        }
     }
 }
 

@@ -25,6 +25,7 @@
 #include "peer.h"
 #include "player_sink.h"
 #include "raw_client.h"
+#include "raw_roles.h"
 #include "soak_wire_checker.h"
 #include "test_ports.h"
 #include "test_recorder.h"
@@ -952,7 +953,7 @@ public:
 // ==============================================================================
 
 std::string group_key(GroupId group) {
-    return std::to_string(group.value);
+    return sendspin::server::test::wire_group_id(group);
 }
 
 /// The script's state on its thread
