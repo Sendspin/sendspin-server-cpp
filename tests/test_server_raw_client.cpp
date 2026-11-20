@@ -187,7 +187,15 @@ TEST_P(ServerRawClientSuites, CompletesTheHandshakeActivationAndTimeSync) {
     EXPECT_EQ(update["payload"]["group_name"], "Raw client");
     const std::vector<sendspin::server::GroupInfo> groups = s.server.groups();
     ASSERT_EQ(groups.size(), 2U);
-    EXPECT_EQ(update["payload"]["group_id"], std::to_string(groups[1].id.value));
+    const std::string group_id = update["payload"]["group_id"].as<std::string>();
+    EXPECT_EQ(group_id.size(), 43U);
+    EXPECT_EQ(group_id.find_first_not_of(
+                  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"),
+              std::string::npos);
+    const auto group_bytes = sendspin::server::b64url_decode(group_id);
+    ASSERT_TRUE(group_bytes);
+    EXPECT_EQ(group_bytes->size(), 32U);
+    EXPECT_EQ(group_id, sendspin::server::test::wire_group_id(groups[1].id));
     const std::string id = client.noise.identity().peer_id();
     s.recorder.wait_for(connected(id));
     const std::vector<sendspin::server::ClientInfo> clients = s.server.clients();

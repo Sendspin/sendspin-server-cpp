@@ -61,6 +61,7 @@ using sendspin::server::test::payload;
 using sendspin::server::test::player_state;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::type;
+using sendspin::server::test::wire_group_id;
 namespace wire = sendspin::server::test::wire;
 
 // ==============================================================================
@@ -84,7 +85,7 @@ TEST(ServerGroups, AClientBackWithinTheGraceRejoinsItsGroup) {
             config.timing.group_rejoin_grace_us = 1;
         }
         ASSERT_EQ(s.start(config), StartResult::OK);
-        const std::string default_group = group_id(*s.server.default_group());
+        const std::string default_group = wire_group_id(*s.server.default_group());
         RawClient a;
         RawClient b;
         const std::string hello_json = hello("A", {"player@v1"}, true);
@@ -108,8 +109,9 @@ TEST(ServerGroups, AClientBackWithinTheGraceRejoinsItsGroup) {
         s.recorder.wait_for_disconnects(1);
         const auto has_solo = [&] {
             const std::vector<GroupInfo> groups = s.server.groups();
-            return std::any_of(groups.begin(), groups.end(),
-                               [&](const GroupInfo& group) { return group_id(group.id) == solo; });
+            return std::any_of(groups.begin(), groups.end(), [&](const GroupInfo& group) {
+                return wire_group_id(group.id) == solo;
+            });
         };
         if (leaves == Leaves::PAST) {
             while (has_solo()) {
@@ -277,8 +279,10 @@ TEST(ServerGroups, MovesAClientIntoAGroupTheHostCreatesAndBack) {
     const GroupId living = *s.server.default_group();
     RawClient a;
     RawClient b;
-    EXPECT_EQ(s.join(a, "A"), group_id(living));
-    EXPECT_EQ(s.join(b, "B"), group_id(living));
+    // SHA-256 of "1", independently encoded as base64url: the client's legacy-ID normalization.
+    ASSERT_EQ(living.value, 1U);
+    EXPECT_EQ(s.join(a, "A"), "a4ayc_80_OGda4BO_1o_V0etpOqiLx1JwB5S3beHW0s");
+    EXPECT_EQ(s.join(b, "B"), wire_group_id(living));
     const std::string b_id = client_id_of(b);
     Metadata metadata;
     metadata.title = "Living room's";
@@ -288,8 +292,8 @@ TEST(ServerGroups, MovesAClientIntoAGroupTheHostCreatesAndBack) {
 
     const std::optional<GroupId> kitchen = s.server.create_group("Kitchen", b_id);
     ASSERT_TRUE(kitchen);
-    EXPECT_EQ(payload(next(b)), R"({"playback_state":"stopped","group_id":")" + group_id(*kitchen) +
-                                    R"(","group_name":"Kitchen"})");
+    EXPECT_EQ(payload(next(b)), R"({"playback_state":"stopped","group_id":")" +
+                                    wire_group_id(*kitchen) + R"(","group_name":"Kitchen"})");
     JsonDocument state = next(b);
     ASSERT_EQ(type(state), "server/state");
     EXPECT_EQ(state["payload"]["controller"]["volume"], 50);
@@ -306,12 +310,12 @@ TEST(ServerGroups, MovesAClientIntoAGroupTheHostCreatesAndBack) {
     expect_nothing_queued(s, a, living);
 
     ASSERT_TRUE(s.server.rename_group(*kitchen, "Den"));
-    EXPECT_EQ(payload(next(b)), R"({"playback_state":"stopped","group_id":")" + group_id(*kitchen) +
-                                    R"(","group_name":"Den"})");
+    EXPECT_EQ(payload(next(b)), R"({"playback_state":"stopped","group_id":")" +
+                                    wire_group_id(*kitchen) + R"(","group_name":"Den"})");
     expect_nothing_queued(s, a, living);
 
     ASSERT_TRUE(s.server.move_client(b_id, living));
-    EXPECT_EQ(next(b)["payload"]["group_id"].as<std::string>(), group_id(living));
+    EXPECT_EQ(next(b)["payload"]["group_id"].as<std::string>(), wire_group_id(living));
     state = next(b);
     ASSERT_EQ(type(state), "server/state");
     EXPECT_EQ(state["payload"]["metadata"]["title"], "Living room's");
@@ -390,15 +394,19 @@ TEST(ServerGroups, LeavesAClientHeldWithNoRolesInItsOwnGroup) {
     // before it were taken
     const std::optional<GroupId> taken = s.server.create_group("Taken", client_id_of(a));
     ASSERT_TRUE(taken);
-    EXPECT_EQ(next(a, "group/update")["payload"]["group_id"].as<std::string>(), group_id(*taken));
+    EXPECT_EQ(next(a, "group/update")["payload"]["group_id"].as<std::string>(),
+              wire_group_id(*taken));
     ASSERT_TRUE(s.wait_until(*taken, true));
+    std::optional<GroupId> own_group;
     for (const GroupInfo& group : s.server.groups()) {
         EXPECT_NE(group.id, *refused);
-        if (group_id(group.id) == own) {
+        if (wire_group_id(group.id) == own) {
+            own_group = group.id;
             EXPECT_EQ(group.client_ids, std::vector<std::string>{held_id});
         }
     }
-    expect_nothing_queued(s, held, GroupId{std::stoull(own)});
+    ASSERT_TRUE(own_group);
+    expect_nothing_queued(s, held, *own_group);
 }
 
 // controller/v1.md: a controller acts on its own group: its volume command sets its group's
@@ -472,7 +480,8 @@ TEST(ServerGroups, MovesThePlaceKeptForADisconnectedClient) {
         const GroupId kitchen = *s.server.create_group("Kitchen", client_id_of(b));
         next(b, "group/update");
         const GroupId solo = *s.server.create_group("Solo", a_id);
-        EXPECT_EQ(next(a, "group/update")["payload"]["group_id"].as<std::string>(), group_id(solo));
+        EXPECT_EQ(next(a, "group/update")["payload"]["group_id"].as<std::string>(),
+                  wire_group_id(solo));
         std::optional<Silence> playing;
         if (row.into == Into::PLAYING) {
             playing.emplace(s, kitchen);
@@ -493,7 +502,7 @@ TEST(ServerGroups, MovesThePlaceKeptForADisconnectedClient) {
         a.send_json(player_state(true, {}, std::nullopt, std::nullopt));
         const JsonDocument update =
             row.into == Into::PLAYING ? next_join(a) : next_json(a, "group/update");
-        EXPECT_EQ(update["payload"]["group_id"].as<std::string>(), group_id(joined));
+        EXPECT_EQ(update["payload"]["group_id"].as<std::string>(), wire_group_id(joined));
         if (row.into == Into::PLAYING) {
             EXPECT_EQ(update["payload"]["playback_state"], "playing");
         }
@@ -569,7 +578,7 @@ TEST(ServerGroups, StartsAClientMovedWhileUnavailableOnceAvailable) {
         next(a, "group/update");
         ASSERT_TRUE(s.server.move_client(client_id_of(a), kitchen));
         const JsonDocument update = available ? next_join(a) : next_json(a, "group/update");
-        EXPECT_EQ(update["payload"]["group_id"].as<std::string>(), group_id(kitchen));
+        EXPECT_EQ(update["payload"]["group_id"].as<std::string>(), wire_group_id(kitchen));
         EXPECT_EQ(update["payload"]["playback_state"], "playing");
         if (!available) {
             next(a, "server/state");
@@ -585,7 +594,7 @@ TEST(ServerGroups, StartsAClientMovedWhileUnavailableOnceAvailable) {
 // it left first, and the next switch, with no group playing, to a new group of its own
 TEST(ServerGroups, SwitchesBackToTheGroupItLeft) {
     GroupsServer s;
-    const std::string living = group_id(*s.server.default_group());
+    const std::string living = wire_group_id(*s.server.default_group());
     RawClient a;
     RawClient b;
     s.join(a, "A");

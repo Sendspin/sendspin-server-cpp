@@ -20,6 +20,7 @@
 
 #include "flac_reader.h"
 #include "raw_client.h"
+#include "raw_roles.h"
 #include "test_recorder.h"
 #include "wire_messages.h"
 #include <ArduinoJson.h>
@@ -1277,7 +1278,8 @@ TEST(ServerPlayback, MovesAPlayerThatTurnsUnavailableToAStoppedGroupOfItsOwn) {
     ASSERT_EQ(deserializeJson(doc, update->json), DeserializationError::Ok);
     EXPECT_EQ(doc["payload"]["playback_state"], "stopped");
     EXPECT_EQ(doc["payload"]["group_name"], "Leaves");
-    EXPECT_NE(doc["payload"]["group_id"].as<std::string>(), std::to_string(input->group().value));
+    EXPECT_NE(doc["payload"]["group_id"].as<std::string>(),
+              sendspin::server::test::wire_group_id(input->group()));
 
     // The other player is not stopped: its stream runs to the drain's end
     ASSERT_TRUE(stays.read_until_type("stream/end"));
@@ -1332,7 +1334,8 @@ TEST(ServerPlayback, StartsAPlayerThatTurnsAvailableAndMovesOneThatLeaves) {
     JsonDocument doc;
     ASSERT_EQ(deserializeJson(doc, update->json), DeserializationError::Ok);
     EXPECT_EQ(doc["payload"]["playback_state"], "stopped");
-    EXPECT_NE(doc["payload"]["group_id"].as<std::string>(), std::to_string(input->group().value));
+    EXPECT_NE(doc["payload"]["group_id"].as<std::string>(),
+              sendspin::server::test::wire_group_id(input->group()));
     ASSERT_TRUE(stays.read_until_type("stream/end"));
     host.join();
     s.recorder.wait_for(Recorder::drained(input->id(), DrainOutcome::PLAYED));

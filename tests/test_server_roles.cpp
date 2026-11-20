@@ -71,6 +71,7 @@ using sendspin::server::test::player_state;
 using sendspin::server::test::RawClient;
 using sendspin::server::test::Recorder;
 using sendspin::server::test::type;
+using sendspin::server::test::wire_group_id;
 namespace persistence_keys = sendspin::server::persistence_keys;
 
 constexpr const char* ALL_ROLES = R"(["player@v1","controller@v1","metadata@v1"])";
@@ -90,7 +91,7 @@ TEST(ServerApproval, ApprovesAndRevokesAClientOverTheWire) {
     ServerConfig config = sendspin::server::test::local_config();
     config.name = "Roles";
     ASSERT_EQ(s.start(config), StartResult::OK);
-    const std::string default_group = group_id(*s.server.default_group());
+    const std::string default_group = wire_group_id(*s.server.default_group());
     RawClient client;
     const std::string id = client_id_of(client);
     const std::string hello_json =
@@ -151,7 +152,8 @@ TEST(ServerApproval, ApprovesAndRevokesAClientOverTheWire) {
     ASSERT_TRUE(s.server.revoke_approval(id));
     EXPECT_EQ(payload(next(client, "server/activate")), R"({"activities":[],"active_roles":[]})");
     update = next(client, "group/update");
-    EXPECT_NE(update["payload"]["group_id"].as<std::string>(), group_id(*s.server.default_group()));
+    EXPECT_NE(update["payload"]["group_id"].as<std::string>(),
+              wire_group_id(*s.server.default_group()));
     s.recorder.wait_for_count("approval needed " + id, 2);
     // Saved through the provider, which the event after it shows is done: the server key, then
     // the approval and its revocation
