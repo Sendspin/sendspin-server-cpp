@@ -76,6 +76,22 @@ void ServerCore::route_source(const std::string& client_id, const std::shared_pt
     this->refresh_source(client_id);
 }
 
+bool ServerCore::source_bound(const Client& client) const {
+    const auto found = this->routes_.find(client.info.client_id);
+    return found != this->routes_.end() && found->second->connection == client.id;
+}
+
+void ServerCore::refresh_source_playback(uint64_t connection) {
+    const auto found = this->clients_.find(connection);
+    if (found == this->clients_.end()) {
+        return;
+    }
+    Client& client = *found->second;
+    if (!client.closed && client.active() && client.group != nullptr) {
+        this->refresh_playback(client, client.group->playing());
+    }
+}
+
 void ServerCore::refresh_source(const std::string& client_id, const Client* caller) {
     const auto found = this->routes_.find(client_id);
     Route* route = found != this->routes_.end() ? found->second.get() : nullptr;
@@ -87,8 +103,11 @@ void ServerCore::refresh_source(const std::string& client_id, const Client* call
         }
     });
     if (route != nullptr && route->connection != (chosen != nullptr ? chosen->id : 0)) {
+        const uint64_t unbound = route->connection;
         this->unbind(*route);
         route->connection = chosen != nullptr ? chosen->id : 0;
+        this->refresh_source_playback(unbound);
+        this->refresh_source_playback(route->connection);
     }
     this->for_each_connection(client_id, [route, chosen, caller](Client& client) {
         if (client.closed) {
@@ -236,7 +255,9 @@ void ServerCore::drop_gone_routes() {
         }
         std::unique_ptr<Route> route = std::move(it->second);
         it = this->routes_.erase(it);
+        const uint64_t connection = route->connection;
         this->end_route(std::move(route));
+        this->refresh_source_playback(connection);
     }
 }
 

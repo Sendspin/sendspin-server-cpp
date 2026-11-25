@@ -115,7 +115,9 @@ public:
     /// that the client does not need, because the role is not active or the client is
     /// unavailable, which each clear its start authorization, is recorded without a message.
     /// @param role_ahead whether the source role is in the activation the marker evaluates against
-    std::optional<SourceCommand> take_command(bool role_ahead);
+    /// @param playback whether that activation and the one last written declare `playback`; a
+    /// start sent is stopped ahead of the activation that drops it
+    std::optional<SourceCommand> take_command(bool role_ahead, bool playback);
 
     /// @brief The open stream's client-stream/start; nullopt with none open
     const std::optional<ClientStreamStart>& stream() const {

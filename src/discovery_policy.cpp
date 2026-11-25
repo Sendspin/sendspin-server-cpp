@@ -37,8 +37,8 @@ bool first_activation_playback(ConnectionOrigin origin, DialIntent intent, bool 
     return intent == DialIntent::PLAYBACK;
 }
 
-bool later_activation_playback(bool group_playing) {
-    return group_playing;
+bool later_activation_playback(bool group_playing, bool source_bound) {
+    return group_playing || source_bound;
 }
 
 Reconnect reconnect_after(const ConnectionEnd& end) {

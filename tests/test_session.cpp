@@ -1286,6 +1286,39 @@ TEST_P(SessionTest, StartsARoutedSourceAndFeedsItsStream) {
     EXPECT_EQ(h.session.phase(), SessionPhase::ACTIVE);
 }
 
+// roles/source/v1.md "Source command semantics": a routed source is sent start only once an
+// activation with `playback` is written, after it; an activation dropping `playback` is preceded by
+// a stop, and one adding it back starts the source again
+TEST_P(SessionTest, StartsARoutedSourceOnlyWithPlayback) {
+    using sendspin::server::SourceCommand;
+    Harness h(GetParam(), source_settings());
+    ASSERT_NO_FATAL_FAILURE(activate_source(h));
+    sendspin::server::SourceFeed feed(4096, 16);
+    const ServerActivate without{false, std::nullopt, std::nullopt};
+    const ServerActivate with{true, std::nullopt, std::nullopt};
+    const std::string start = sendspin::server::build_source_command(SourceCommand::START);
+    const auto expect_sent = [&](const std::vector<std::string>& expected) {
+        const std::vector<OutboundMessage> sent = h.take_all();
+        ASSERT_EQ(sent.size(), expected.size());
+        for (size_t i = 0; i < sent.size(); ++i) {
+            EXPECT_NE(h.decrypt_json(sent[i]).find(expected[i]), std::string::npos)
+                << "message " << i;
+        }
+    };
+
+    h.session.activate(without);
+    ASSERT_NO_FATAL_FAILURE(expect_sent({R"("activities":[])"}));
+    h.session.set_source_route(&feed, 7);
+    ASSERT_NO_FATAL_FAILURE(expect_sent({}));
+    h.session.activate(with);
+    ASSERT_NO_FATAL_FAILURE(expect_sent({R"("activities":["playback"])", start}));
+    h.session.activate(without);
+    ASSERT_NO_FATAL_FAILURE(expect_sent(
+        {sendspin::server::build_source_command(SourceCommand::STOP), R"("activities":[])"}));
+    h.session.activate(with);
+    ASSERT_NO_FATAL_FAILURE(expect_sent({R"("activities":["playback"])", start}));
+}
+
 // roles/source/v1.md "Default streaming behavior" and "Source Audio Chunks (Binary)": the
 // connection closes on an unsolicited client-stream/start, a codec server/hello does not list, a
 // chunk with no stream open or while the client is unavailable, a chunk with no audio, and a

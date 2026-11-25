@@ -575,7 +575,8 @@ std::optional<OutboundPlaintext> Session::prepare_activation(const ServerActivat
         roles = roles.with(sched::StreamRole::VISUALIZER);
     }
     OutboundPlaintext message = json_plaintext(*json);
-    this->queued_.push({std::move(active_roles), activation.pairing.has_value()});
+    this->queued_.push(
+        {std::move(active_roles), activation.pairing.has_value(), activation.playback});
     return message;
 }
 
@@ -737,7 +738,12 @@ std::optional<OutboundPlaintext> Session::take_control(int64_t now_us, int64_t& 
 }
 
 std::optional<OutboundPlaintext> Session::take_marker(int64_t now_us, int64_t& stamp_us) {
-    const sched::RoleSet ahead = this->queues_.roles_ahead(this->roles_written_);
+    // messaging.md "stream/start" and roles/source/v1.md "Source command semantics": the player,
+    // visualizer and source streams run only while the activations written and ahead both declare
+    // `playback`; one that drops it is preceded by their ends and the source's stop
+    const bool playback = this->playback_written_ && this->playback_ahead();
+    const sched::RoleSet ahead =
+        playback ? this->queues_.roles_ahead(this->roles_written_) : sched::RoleSet{};
     const sched::Want player = this->player_.want(this->source_, ahead, now_us);
     const sched::Want visualizer = this->visualizer_.want(this->source_, ahead, now_us);
     const sched::MarkerEmission emission =
@@ -753,14 +759,17 @@ std::optional<OutboundPlaintext> Session::take_marker(int64_t now_us, int64_t& s
         // roles/source/v1.md "Source command semantics": built here, its preconditions checked
         // as it is written
         if (const std::optional<SourceCommand> command =
-                this->source_role_.take_command(this->role_ahead(SOURCE_ROLE))) {
+                this->source_role_.take_command(this->role_ahead(SOURCE_ROLE), playback)) {
             stamp_us = ::sendspin::server::now_us();
             return json_plaintext(build_source_command(*command));
         }
-        // The pending trigger kind is cleared when a marker pops
+        // The pending trigger kind is cleared when a marker pops, except one held for the
+        // activation ahead that declares `playback`
         this->queues_.pop_marker();
-        this->player_.clear_pending_kind();
-        this->visualizer_.clear_pending_kind();
+        if (this->playback_written_ || !this->playback_ahead()) {
+            this->player_.clear_pending_kind();
+            this->visualizer_.clear_pending_kind();
+        }
         return std::nullopt;
     }
     // A marker stays at the head until it has nothing left to emit; its one message lists every
@@ -815,6 +824,8 @@ void Session::on_activation_taken(sched::RoleSet roles) {
     }
     this->roles_written_ = roles;
     this->active_roles_ = std::move(this->queued_.front().active_roles);
+    const bool playback_added = this->queued_.front().playback && !this->playback_written_;
+    this->playback_written_ = this->queued_.front().playback;
     if (this->queued_.front().pairing) {
         ++this->pairing_written_;
     }
@@ -825,8 +836,14 @@ void Session::on_activation_taken(sched::RoleSet roles) {
         this->player_.on_activation_written(roles.contains(sched::StreamRole::PLAYER));
     const std::optional<sched::TriggerKind> visualizer =
         this->visualizer_.on_activation_written(roles.contains(sched::StreamRole::VISUALIZER));
+    std::optional<sched::TriggerKind> kind = player ? player : visualizer;
+    // Declaring `playback` lets the streams of a playing group start: a join, unless a trigger
+    // waits for it
+    if (!kind && playback_added && !this->player_.preconditions().trigger_pending) {
+        kind = sched::TriggerKind::JOIN;
+    }
     // A marker follows
-    this->queue_marker(player ? player : visualizer);
+    this->queue_marker(kind);
 }
 
 // connection.md "Re-handshake": message 1 travels as an encrypted noise/handshake under the

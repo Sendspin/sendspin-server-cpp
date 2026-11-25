@@ -135,11 +135,11 @@ void SourceStream::fail() {
     this->held_ = true;
 }
 
-std::optional<SourceCommand> SourceStream::take_command(bool role_ahead) {
+std::optional<SourceCommand> SourceStream::take_command(bool role_ahead, bool playback) {
     const bool active = this->role_written_ && role_ahead;
-    // roles/source/v1.md "Source command semantics": a start only while the role is active, its
-    // client/state source object received and the client available
-    const bool wanted = this->routed_ && !this->held_ && active && this->ready();
+    // roles/source/v1.md "Source command semantics": a start only while the role is active,
+    // `playback` declared, its client/state source object received and the client available
+    const bool wanted = this->routed_ && !this->held_ && active && playback && this->ready();
     if (wanted && this->sent_ != SourceCommand::START) {
         this->sent_ = SourceCommand::START;
         ++this->unanswered_starts_;

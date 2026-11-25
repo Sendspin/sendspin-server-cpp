@@ -666,6 +666,12 @@ private:
     /// rule asks for in a group whose playback is group_playing, keeping the roles. Queued only:
     /// the caller pumps.
     void refresh_playback(Client& client, bool group_playing);
+    /// @brief Whether client's connection is the one its client's route is bound to
+    bool source_bound(const Client& client) const;
+    /// @brief refresh_playback() for connection, when it is an active one, as a route binds to it
+    /// or leaves it (spec messaging.md "server/activate": `playback` while the server wants the
+    /// client's source to stream)
+    void refresh_source_playback(uint64_t connection);
     /// @brief After group's playback started or stopped: refresh_playback() for every member,
     /// and a dial for each client held for it whose target is due
     void on_playback_changed(Group& group);

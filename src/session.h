@@ -379,6 +379,7 @@ private:
     struct QueuedActivation {
         std::vector<std::string> active_roles;
         bool pairing{false};
+        bool playback{false};
     };
 
     void on_client_init(MessageKind kind, std::span<const uint8_t> payload, int64_t rx_us);
@@ -435,6 +436,10 @@ private:
     /// @brief Whether role is in the activation a marker at the head evaluates against: the first
     /// queued, else the one last written
     bool role_ahead(std::string_view role) const;
+    /// @brief Whether that activation declares `playback`
+    bool playback_ahead() const {
+        return this->queued_.empty() ? this->playback_written_ : this->queued_.front().playback;
+    }
 
     const Identity& identity_;
     const SessionSettings& settings_;
@@ -479,6 +484,8 @@ private:
     sched::RoleSet roles_written_;
     /// The active_roles of the activation last written
     std::vector<std::string> active_roles_;
+    /// The activation last written declares `playback`
+    bool playback_written_{false};
     /// Each activation queued behind it, oldest first: one per activation or rekey in the control
     /// FIFO, whose entry cap bounds them, and a rekey's frozen activation in its handshake; room
     /// for two at first

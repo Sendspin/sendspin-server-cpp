@@ -53,8 +53,9 @@ enum class ConnectionOrigin : uint8_t {
 bool first_activation_playback(ConnectionOrigin origin, DialIntent intent, bool group_playing);
 
 /// @brief Whether a later activation of a client that may play declares `playback`: while its
-/// group plays (spec messaging.md "server/activate": the minimal set of activities)
-bool later_activation_playback(bool group_playing);
+/// group plays or a routed source is bound to the connection (spec messaging.md "server/activate":
+/// the minimal set of activities)
+bool later_activation_playback(bool group_playing, bool source_bound);
 
 /// @brief A client found by browsing
 struct DiscoveryEntry {

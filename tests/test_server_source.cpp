@@ -664,6 +664,42 @@ TEST(ServerSources, ActivateTheSourceRoleOnlyWithItsApproval) {
     raw.close();
 }
 
+// roles/source/v1.md "Source command semantics": `start` goes only to a connection with `playback`,
+// so a source that connected to an idle group is told `playback` once routed, before its start
+TEST(ServerSources, DeclarePlaybackBeforeStartingARoutedSource) {
+    const Signal signal(16);
+    Rig s(signal);
+    RawClient raw;
+    const std::string id = raw.noise.identity().peer_id();
+    ASSERT_TRUE(s.server.approve(id, ApprovalScope::PLAYBACK_AND_SOURCE));
+    ASSERT_EQ(raw.dial(s.server.listen_port()), 101U);
+    ASSERT_NO_FATAL_FAILURE(raw.complete_handshake());
+    raw.send_json(sendspin::server::test::source_hello_json("Turntable"));
+    EXPECT_EQ(raw.receive_until("server/activate"),
+              R"({"type":"server/activate","payload":{"activities":[],)"
+              R"("active_roles":["source@v1"]}})");
+    raw.send_json(AVAILABLE);
+    s.recorder.wait_for("connected " + id);
+
+    const sendspin::server::RoutedSource routed = s.server.route_source(id, s.group());
+    ASSERT_EQ(routed.result, RouteSourceResult::OK);
+    std::vector<std::string> received;
+    while (received.empty() || received.back().find("server/command") == std::string::npos) {
+        const std::optional<Bytes> plaintext = raw.receive_plaintext();
+        ASSERT_TRUE(plaintext) << "the connection closed before the start";
+        if (!plaintext->empty() && plaintext->front() == wire::JSON_ID) {
+            received.emplace_back(plaintext->begin() + 1, plaintext->end());
+        }
+    }
+    EXPECT_NE(received.back().find("start"), std::string::npos) << received.back();
+    const bool declared =
+        std::find(received.begin(), received.end(),
+                  R"({"type":"server/activate","payload":{"activities":["playback"]}})") !=
+        received.end();
+    EXPECT_TRUE(declared) << "start before playback: " << received.back();
+    raw.close();
+}
+
 // A route's least latency holds its source's audio back at least that long after its capture,
 // however little the group's players need (about 300 ms here): the first sample of a chunk
 // captured now plays a second or more from now. A least latency out of range refuses the route.
