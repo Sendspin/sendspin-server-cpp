@@ -69,6 +69,11 @@ public:
     /// on_error() instead. A second connection of a connected client is not reported.
     virtual void on_client_connected(const ClientInfo& /*client*/) {}
 
+    /// @brief A connected client's player volume, mute or volume commands changed
+    /// (ClientInfo::player): it set them on the device, or carried out a volume or mute command.
+    /// Not called for the client/state that on_client_connected() follows.
+    virtual void on_player_changed(const ClientInfo& /*client*/) {}
+
     /// @brief A client reported by on_client_connected() went away
     virtual void on_client_disconnected(const ClientInfo& /*client*/,
                                         const ClientDisconnect& /*disconnect*/) {}

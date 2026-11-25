@@ -187,6 +187,11 @@ sched::PlayerTiming player_timing(const PlayerState& state) {
     return {state.min_buffer_ms, state.required_lead_time_ms, state.output_delay_ms};
 }
 
+PlayerVolume player_volume(const PlayerState& state) {
+    return {state.volume, state.muted, (state.supported_commands & player_command::VOLUME) != 0,
+            (state.supported_commands & player_command::MUTE) != 0};
+}
+
 int64_t pcm_bytes_per_second(const sched::AudioFormat& format) {
     if (format.codec == sched::Codec::OPUS) {
         return (OPUS_MAX_PACKET_BYTES + sched::CHUNK_HEADER_BYTES) * sched::CELLS_PER_SECOND;

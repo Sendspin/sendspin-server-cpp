@@ -104,6 +104,17 @@ public:
         }
     }
 
+    /// "player <client_id> <volume or -> <muted or -> <volume command> <mute command>"
+    void on_player_changed(const ClientInfo& client) override {
+        const auto text = [](const auto& value) {
+            return value ? std::to_string(static_cast<uint32_t>(*value)) : std::string("-");
+        };
+        const PlayerVolume player = client.player.value_or(PlayerVolume{});
+        this->add("player " + client.client_id + " " + text(player.volume) + " " +
+                  text(player.muted) + " " + std::to_string(int{player.volume_command}) + " " +
+                  std::to_string(int{player.mute_command}));
+    }
+
     void on_client_disconnected(const ClientInfo& client,
                                 const ClientDisconnect& disconnect) override {
         // Widens the window in which a destructor that does not wait would return first
