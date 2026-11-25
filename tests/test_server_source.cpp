@@ -52,6 +52,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -456,6 +457,25 @@ void sleep_until_us(int64_t at_us) {
     }
 }
 
+/// The JSON messages raw receives through the first that contains text, in order
+std::vector<std::string> receive_json_through(RawClient& raw, std::string_view text) {
+    std::vector<std::string> received;
+    while (received.empty() || received.back().find(text) == std::string::npos) {
+        const std::optional<Bytes> plaintext = raw.receive_plaintext();
+        if (!plaintext) {
+            ADD_FAILURE() << "the connection closed before " << text;
+            break;
+        }
+        if (!plaintext->empty() && plaintext->front() == wire::JSON_ID) {
+            received.emplace_back(plaintext->begin() + 1, plaintext->end());
+        }
+    }
+    return received;
+}
+
+/// group/update follows, in order, whatever the server queued for its members before the rename
+constexpr const char* RENAMED = R"("group_name":"Renamed")";
+
 // roles/source/v1.md "Codec framing": a source's FLAC frames, after the codec_header its
 // client-stream/start carries, reach the players bit for bit. "Source Audio Chunks (Binary)": after
 // a stall, a backlog sent at once is dropped beyond the input's write jitter rather than burst (it
@@ -698,6 +718,54 @@ TEST(ServerSources, DeclarePlaybackBeforeStartingARoutedSource) {
         received.end();
     EXPECT_TRUE(declared) << "start before playback: " << received.back();
     raw.close();
+}
+
+// A route binds the connection whose activation last carried the source role, and `playback` is
+// declared while it is bound (messaging.md "server/activate"), so a connection that loses the role
+// is unbound and drops `playback`: also from a source that reports itself unavailable, and so was
+// never ready
+TEST(ServerSources, DropPlaybackWithTheSourceRole) {
+    const Signal signal(16);
+    struct Row {
+        const char* name;
+        bool available;
+    };
+    const Row rows[] = {
+        {"unavailable", false},
+        {"Control: available", true},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        Rig s(signal);
+        RawClient raw;
+        const std::string id = raw.noise.identity().peer_id();
+        ASSERT_TRUE(s.server.approve(id, ApprovalScope::PLAYBACK_AND_SOURCE));
+        // Accepted, not dialed: a dial declares `playback` in its first activation
+        ASSERT_EQ(raw.dial(s.server.listen_port()), 101U);
+        ASSERT_NO_FATAL_FAILURE(raw.complete_handshake());
+        raw.send_json(sendspin::server::test::source_hello_json("Turntable"));
+        EXPECT_EQ(raw.receive_until("server/activate"),
+                  R"({"type":"server/activate","payload":{"activities":[],)"
+                  R"("active_roles":["source@v1"]}})");
+        raw.send_json(std::string(R"({"type":"client/state","payload":{"available":)") +
+                      (row.available ? "true" : "false") + R"(,"source":{}}})");
+        s.recorder.wait_for("connected " + id);
+        const sendspin::server::RoutedSource routed = s.server.route_source(id, s.group());
+        ASSERT_EQ(routed.result, RouteSourceResult::OK);
+        EXPECT_EQ(raw.receive_until("server/activate"),
+                  R"({"type":"server/activate","payload":{"activities":["playback"]}})");
+
+        ASSERT_TRUE(s.server.approve(id, ApprovalScope::PLAYBACK));
+        EXPECT_NE(raw.receive_until("server/activate").find(R"("active_roles":[])"),
+                  std::string::npos);
+        ASSERT_TRUE(s.server.rename_group(s.group(), "Renamed"));
+        const std::vector<std::string> received = receive_json_through(raw, RENAMED);
+        EXPECT_NE(std::find(received.begin(), received.end(),
+                            R"({"type":"server/activate","payload":{"activities":[]}})"),
+                  received.end())
+            << "playback kept without the source role";
+        raw.close();
+    }
 }
 
 // A route's least latency holds its source's audio back at least that long after its capture,

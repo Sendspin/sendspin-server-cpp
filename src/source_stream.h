@@ -36,7 +36,7 @@ struct SourceEvent {
         /// The source may be started: its role is active, the client/state source object the
         /// activation asks for arrived, and the client is available
         READY,
-        /// It cannot be started
+        /// It cannot be started: it was ready, or its role was removed
         UNREADY,
         /// An input stream opened, or one open took a new format in place; `format` is its format
         OPENED,

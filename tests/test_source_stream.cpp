@@ -288,4 +288,19 @@ TEST(SourceStreamEvents, ReportReadinessAndSignal) {
     EXPECT_EQ(events[3].kind, SourceEvent::Kind::UNREADY);
 }
 
+// A route binds by the role written, so its owner hears the role's removal as UNREADY also from
+// a source that was not ready; an activation without the role it never had reports nothing
+TEST(SourceStreamEvents, ReportTheRolesRemovalFromAnUnreadySource) {
+    SourceStream source;
+    source.on_activation_written(false);
+    EXPECT_TRUE(source.take_events().empty());
+    source.on_activation_written(true);
+    source.on_client_state(state(false));
+    EXPECT_TRUE(source.take_events().empty()) << "never ready";
+    source.on_activation_written(false);
+    const std::vector<SourceEvent> events = source.take_events();
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(events[0].kind, SourceEvent::Kind::UNREADY);
+}
+
 }  // namespace
