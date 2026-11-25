@@ -53,6 +53,9 @@ void ServerCore::route_source(const std::string& client_id, const std::shared_pt
     if (auto old = this->routes_.find(client_id); old != this->routes_.end()) {
         std::unique_ptr<Route> replaced = std::move(old->second);
         this->routes_.erase(old);
+        // An open stream moves with the route (route_source()), so its connection keeps `playback`
+        // while the close below ends the run of a group it is a member of
+        this->rerouted_connection_ = replaced->connection;
         // Its input closes as a release would end it; the detach this runs finds no route of it
         Group* group = this->find_group(replaced->view->group());
         if (group == nullptr || !group->close_input_of(*replaced->view)) {
@@ -74,9 +77,14 @@ void ServerCore::route_source(const std::string& client_id, const std::shared_pt
     route->feed->attach(route->task);
     this->routes_.emplace(client_id, std::move(route));
     this->refresh_source(client_id);
+    // The new route bound the connection again, or another, which leaves this one unbound
+    this->refresh_source_playback(std::exchange(this->rerouted_connection_, 0));
 }
 
 bool ServerCore::source_bound(const Client& client) const {
+    if (client.id == this->rerouted_connection_) {
+        return true;
+    }
     const auto found = this->routes_.find(client.info.client_id);
     return found != this->routes_.end() && found->second->connection == client.id;
 }

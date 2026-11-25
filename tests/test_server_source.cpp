@@ -768,6 +768,46 @@ TEST(ServerSources, DropPlaybackWithTheSourceRole) {
     }
 }
 
+// SendspinServer::route_source(): routed into another group, an open stream moves with the route,
+// also out of a group its client is a member of: the input closing ends that group's run, but the
+// source's connection stays bound, so it keeps `playback` and is neither stopped nor started
+TEST(ServerSources, MoveAnOpenStreamOutOfItsClientsPlayingGroup) {
+    const Signal signal(16);
+    Rig s(signal);
+    Peer& player = s.add(true, std::nullopt, 16);
+    const std::optional<sendspin::server::GroupId> second =
+        s.server.create_group("Second", s.client_id(player));
+    ASSERT_TRUE(second);
+    RawClient raw;
+    const std::string id = raw.noise.identity().peer_id();
+    const sendspin::server::RoutedSource first = s.server.route_source(id, s.group());
+    ASSERT_EQ(first.result, RouteSourceResult::OK);
+    ASSERT_NO_FATAL_FAILURE(connect_raw_source(s, raw));
+    EXPECT_NE(raw.receive_until("server/command").find("start"), std::string::npos);
+    raw.send_json(
+        R"({"type":"client-stream/start","payload":{"source":{"codec":"pcm","channels":2,)"
+        R"("sample_rate":48000,"bit_depth":16}}})");
+    // Audio captured from now on starts the group's run, which no gap ends
+    const int64_t base = sendspin::server::now_us();
+    const Bytes silence(CHUNK * signal.frame_bytes());
+    for (int k = 0; k < 5; ++k) {
+        send_chunk(raw, base + (int64_t{k} * 20000), silence);
+    }
+    const std::string playing = "group " + std::to_string(s.group().value) + " playing";
+    s.run_until([&] { return s.recorder.contains(playing); });
+
+    const sendspin::server::RoutedSource moved = s.server.route_source(id, *second);
+    ASSERT_EQ(moved.result, RouteSourceResult::OK);
+    ASSERT_TRUE(s.server.rename_group(s.group(), "Renamed"));
+    const std::vector<std::string> received = receive_json_through(raw, RENAMED);
+    for (const std::string& message : received) {
+        EXPECT_EQ(message.find("server/command"), std::string::npos) << message;
+        EXPECT_EQ(message.find("server/activate"), std::string::npos) << message;
+    }
+    EXPECT_EQ(first.input->state(), sendspin::server::InputState::CLOSED);
+    raw.close();
+}
+
 // A route's least latency holds its source's audio back at least that long after its capture,
 // however little the group's players need (about 300 ms here): the first sample of a chunk
 // captured now plays a second or more from now. A least latency out of range refuses the route.

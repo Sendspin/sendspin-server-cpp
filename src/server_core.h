@@ -666,7 +666,8 @@ private:
     /// rule asks for in a group whose playback is group_playing, keeping the roles. Queued only:
     /// the caller pumps.
     void refresh_playback(Client& client, bool group_playing);
-    /// @brief Whether client's connection is the one its client's route is bound to
+    /// @brief Whether client's connection is the one its client's route is bound to, or the one
+    /// a route being replaced was bound to
     bool source_bound(const Client& client) const;
     /// @brief refresh_playback() for connection, when it is an active one, as a route binds to it
     /// or leaves it (spec messaging.md "server/activate": `playback` while the server wants the
@@ -748,6 +749,10 @@ private:
     /// The routed sources, by client_id: one per client, bounded by the groups, each of which
     /// holds at most one input
     std::map<std::string, std::unique_ptr<Route>, std::less<>> routes_;
+    /// While route_source() replaces a route, the connection the replaced route was bound to,
+    /// which counts as bound (source_bound()) so the replaced input's close keeps its `playback`;
+    /// 0 otherwise
+    uint64_t rerouted_connection_{0};
     /// The operator's player format per client_id (set_player_format()): one entry per client the
     /// host names, cleared at its call, so the host bounds it
     std::map<std::string, AudioFormat, std::less<>> format_overrides_;
