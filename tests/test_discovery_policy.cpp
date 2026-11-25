@@ -65,8 +65,9 @@ TEST(DialPolicy, FirstAndLaterActivationsFollowTheTable) {
         EXPECT_EQ(sendspin::server::first_activation_playback(row.origin, row.intent, row.playing),
                   row.playback);
     }
-    EXPECT_TRUE(sendspin::server::later_activation_playback(true));
-    EXPECT_FALSE(sendspin::server::later_activation_playback(false));
+    EXPECT_TRUE(sendspin::server::later_activation_playback(true, false));
+    EXPECT_TRUE(sendspin::server::later_activation_playback(false, true));
+    EXPECT_FALSE(sendspin::server::later_activation_playback(false, false));
 }
 
 // From spec messaging.md "client/goodbye": every reason, a goodbye before activation, a drop by the

@@ -21,14 +21,18 @@
 #include "raw_client.h"
 #include "silence_feeder.h"
 #include "test_recorder.h"
+#include "wire_messages.h"
 #include <gtest/gtest.h>
 
 #include <sendspin/server/server.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -161,6 +165,56 @@ TEST(ServerAccept, ActivatesAClientThatConnectedByItsGroupsPlayback) {
     const std::vector<ClientInfo> clients = s.server.clients();
     ASSERT_EQ(clients.size(), 1U);
     EXPECT_EQ(clients[0].client_id, early_id);
+}
+
+/// The JSON messages client receives through the first of type, in order
+std::vector<std::string> receive_through(RawClient& client, std::string_view type) {
+    const std::string marker = R"("type":")" + std::string(type) + R"(")";
+    std::vector<std::string> received;
+    while (received.empty() || received.back().find(marker) == std::string::npos) {
+        const std::optional<std::vector<uint8_t>> plaintext = client.receive_plaintext();
+        if (!plaintext) {
+            ADD_FAILURE() << "the connection closed before " << type;
+            break;
+        }
+        if (!plaintext->empty() && plaintext->front() == sendspin::server::test::wire::JSON_ID) {
+            received.emplace_back(plaintext->begin() + 1, plaintext->end());
+        }
+    }
+    return received;
+}
+
+// messaging.md "stream/start": the player object goes only to a connection with `playback`, so a
+// client that connected to an idle group is told `playback` before its stream/start when the group
+// first plays, and again when it plays after a stop dropped `playback`
+TEST(ServerAccept, DeclaresPlaybackBeforeEachStreamStart) {
+    ServerConfig config = sendspin::server::test::local_config();
+    config.approve_all_clients = true;
+    LocalServer s;
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    RawClient client;
+    EXPECT_EQ(connect_to(s.server, client, PLAYER_HELLO), activation("[]", R"(["player@v1"])"));
+    s.recorder.wait_for("connected " + client.noise.identity().peer_id());
+    const sendspin::server::OpenedInput opened = s.server.open_input(
+        *s.server.default_group(), InputOptions{InputFormat{48000, 2, SampleFormat::S16}});
+    ASSERT_TRUE(opened.input);
+
+    for (const char* run : {"first run", "run after a stop"}) {
+        SCOPED_TRACE(run);
+        std::vector<std::string> received;
+        {
+            const sendspin::server::test::SilenceFeeder feeder(opened.input);
+            received = receive_through(client, "stream/start");
+        }
+        ASSERT_FALSE(received.empty()) << "the connection closed before any message";
+        const bool declared =
+            std::find(received.begin(), received.end(),
+                      R"({"type":"server/activate","payload":{"activities":["playback"]}})") !=
+            received.end();
+        EXPECT_TRUE(declared) << "stream/start before playback: " << received.back();
+        EXPECT_EQ(client.receive_until("server/activate"),
+                  R"({"type":"server/activate","payload":{"activities":[]}})");
+    }
 }
 
 // A client connected twice, such as one whose earlier connection the server has not seen drop, is

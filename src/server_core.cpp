@@ -1207,7 +1207,8 @@ void ServerCore::reactivate(Client& client, const std::optional<HandshakePsk>& r
     const bool to_solo =
         changed && !playable && (&group == &server_group || group.member_count() > 1);
     const bool playing = to_server ? server_group.playing() : !to_solo && group.playing();
-    ActivationDecision decision = this->decide(client, psk, later_activation_playback(playing));
+    ActivationDecision decision =
+        this->decide(client, psk, later_activation_playback(playing, this->source_bound(client)));
     decision.activation.pairing = pairing;
     client.playable = decision.playable;
     client.playback = decision.activation.playback;
@@ -1239,7 +1240,7 @@ void ServerCore::reactivate(Client& client, const std::optional<HandshakePsk>& r
 }
 
 void ServerCore::refresh_playback(Client& client, bool group_playing) {
-    const bool playback = later_activation_playback(group_playing);
+    const bool playback = later_activation_playback(group_playing, this->source_bound(client));
     // An activation would end a pairing attempt; the attempt's end decides it
     if (!client.playable || client.playback == playback || this->pairing_running(client)) {
         return;

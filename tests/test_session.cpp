@@ -20,16 +20,22 @@
 #include "clock.h"
 #include "crypto/keys.h"
 #include "fragmentation.h"
+#include "frame_payloads.h"
 #include "messages.h"
 #include "raw_client.h"
+#include "sched/constants.h"
+#include "sched/frames.h"
+#include "sched/timeline.h"
 #include "session.h"
 #include "session_harness.h"
+#include "stream_source.h"
 #include "trust_fixtures.h"
 #include "wire_messages.h"
 #include <ArduinoJson.h>
 #include <gtest/gtest.h>
 #include <noise/protocol.h>
 
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -62,6 +68,7 @@ using sendspin::server::test::START_US;
 using sendspin::server::test::test_settings;
 using sendspin::server::test::text_of;
 using sendspin::server::test::TIMEOUT_US;
+namespace sched = sendspin::server::sched;
 namespace wire = sendspin::server::test::wire;
 
 /// A CredentialSource that references one PSK
@@ -1174,6 +1181,151 @@ TEST_P(SessionTest, MakesATurnToAvailableAJoin) {
 }
 
 // ==============================================================================
+// Playback
+// ==============================================================================
+
+/// A group playing a buffered input in 16-bit PCM, its epoch's frames written from the moment
+/// it is built, as a group a player joins mid-epoch has them
+class PlayingGroup : public sendspin::server::StreamSource {
+public:
+    PlayingGroup()
+        : anchor_(sched::make_anchor(sendspin::server::now_us(), 0, 48000, 2)),
+          ring_(sched::InstanceId{1}, 1) {
+        this->ring_.restart(EPOCH, 0);
+        // Past every startup lead below, within the staging ring of either profile
+        constexpr int64_t FRAMES = 125;
+        static_assert(FRAMES < static_cast<int64_t>(sched::ring_frames(1)));
+        for (int64_t k = 0; k < FRAMES; ++k) {
+            sched::Frame frame;
+            frame.epoch = EPOCH;
+            frame.index = k;
+            frame.ts_us = this->anchor_.t0_us + (k * sched::CELL_US);
+            frame.duration_us = sched::CELL_US;
+            frame.samples = 960;
+            frame.payload = sendspin::server::test::zero_payload(100);
+            EXPECT_TRUE(this->ring_.append(std::move(frame), this->anchor_.t0_us - 1));
+        }
+    }
+
+    Playback playback() const override {
+        Playback playback;
+        playback.playing = true;
+        playback.run = sched::RunId{1};
+        playback.epoch = EPOCH;
+        playback.anchor = &this->anchor_;
+        playback.input =
+            sendspin::server::InputFormat{48000, 2, sendspin::server::SampleFormat::S16};
+        return playback;
+    }
+
+    const sched::FrameRing* ring_for(const sched::AudioFormat& format) const override {
+        return format == sched::AudioFormat{sched::Codec::PCM, 48000, 2, 16} ? &this->ring_
+                                                                             : nullptr;
+    }
+
+    const sched::FrameRing* visualizer_ring(uint64_t /*key*/) const override {
+        return nullptr;
+    }
+
+    void on_stream_changed() override {}
+
+private:
+    static constexpr sched::EpochId EPOCH{1};
+    sched::Anchor anchor_;
+    sched::FrameRing ring_;
+};
+
+/// The startup lead a player's stream took: its first audio chunk's timestamp less its
+/// stream/start's server_transmitted; nullopt without both
+std::optional<int64_t> startup_lead(Harness& h, const std::vector<OutboundMessage>& sent) {
+    std::optional<int64_t> transmitted;
+    for (const OutboundMessage& message : sent) {
+        // Each is decrypted, so the client's nonce follows the server's
+        const std::optional<Bytes> plaintext = h.client.decrypt(message.bytes);
+        if (!plaintext || plaintext->empty()) {
+            ADD_FAILURE() << "not an encrypted message";
+            return std::nullopt;
+        }
+        if (plaintext->front() == wire::AUDIO_CHUNK_ID && transmitted) {
+            return wire::timestamp_at(*plaintext) - *transmitted;
+        }
+        if (plaintext->front() != wire::JSON_ID) {
+            continue;
+        }
+        JsonDocument doc;
+        EXPECT_FALSE(deserializeJson(doc, std::string(plaintext->begin() + 1, plaintext->end())));
+        if (doc["type"] == "stream/start" && doc["payload"]["player"].is<JsonObject>()) {
+            transmitted = doc["payload"]["server_transmitted"].as<int64_t>();
+        }
+    }
+    return std::nullopt;
+}
+
+// An activation that adds `playback` lets a playing group's player stream start, timed by the
+// trigger waiting for it: a group trigger queued behind it, as a group's start queues one, keeps
+// the group's startup lead (`max(floor_i, J_min)`); with none waiting it is a join, which takes
+// the player's own lead (`max(lead_i, J_min)`). A stop and a restart queued before either
+// activation is written keep the restart's group trigger past the marker ahead of the stop's. The
+// player's lead_i (its required_lead_time_ms) is well above its floor_i and J_min, so the two
+// leads differ by many frames.
+TEST_P(SessionTest, StartsAPlayerGainingPlaybackOnItsPendingTriggerElseAsAJoin) {
+    constexpr int64_t LEAD_US = 1000000;
+    struct Row {
+        const char* name;
+        /// `playback` is written first, then dropped and added back in two queued activations
+        bool restart;
+        bool group_trigger;
+        int64_t lead_us;
+    };
+    const Row rows[] = {
+        {"a group trigger queued behind the activation", false, true,
+         sched::timing_defaults::JOIN_MIN_US},
+        {"a restart's group trigger queued behind the stop's activation and its own", true, true,
+         sched::timing_defaults::JOIN_MIN_US},
+        {"Control: no trigger pending, a join", false, false, LEAD_US},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        Harness h(GetParam());
+        ASSERT_NO_FATAL_FAILURE(h.complete_handshake());
+        h.send(h.client.encrypt_json(sendspin::server::test::player_hello_json(
+            "Speaker", R"([{"codec":"pcm","channels":2,"sample_rate":48000,"bit_depth":16}])",
+            1000000)));
+        ASSERT_EQ(h.session.phase(), SessionPhase::READY_FOR_ACTIVATION);
+        PlayingGroup group;
+        h.session.set_stream_source(&group);
+        h.session.activate(
+            ServerActivate{false, std::vector<std::string>{"player@v1"}, std::nullopt});
+        const std::vector<OutboundMessage> activation = h.take_all();
+        ASSERT_EQ(activation.size(), 1U) << "the activation alone, with no playback";
+        EXPECT_NE(h.decrypt_json(activation[0]).find(R"("activities":[])"), std::string::npos);
+        send_state(h, R"({"available":true,"player":)" +
+                          sendspin::server::test::player_state_json(
+                              0, static_cast<uint32_t>(LEAD_US / sched::US_PER_MS), 0) +
+                          "}");
+        ASSERT_TRUE(h.take_all().empty()) << "no stream/start without playback";
+        ASSERT_FALSE(h.session.player().preconditions().trigger_pending);
+
+        if (row.restart) {
+            h.session.activate(ServerActivate{true, std::nullopt, std::nullopt});
+            for (const OutboundMessage& message : h.take_all()) {
+                // Each is decrypted, so the client's nonce follows the server's
+                ASSERT_TRUE(h.client.decrypt(message.bytes));
+            }
+            h.session.activate(ServerActivate{false, std::nullopt, std::nullopt});
+        }
+        h.session.activate(ServerActivate{true, std::nullopt, std::nullopt});
+        if (row.group_trigger) {
+            h.session.queue_marker(sched::TriggerKind::GROUP);
+        }
+        const std::optional<int64_t> lead = startup_lead(h, h.take_all());
+        ASSERT_TRUE(lead) << "no stream/start followed by a chunk";
+        EXPECT_GE(*lead, row.lead_us);
+        EXPECT_LT(*lead, row.lead_us + sched::CELL_US);
+    }
+}
+
+// ==============================================================================
 // The source role
 // ==============================================================================
 
@@ -1284,6 +1436,39 @@ TEST_P(SessionTest, StartsARoutedSourceAndFeedsItsStream) {
     h.send(source_chunk(h, 1, {1, 2, 3, 4}));
     EXPECT_EQ(drain(feed).size(), 1U) << "the second stream's start alone";
     EXPECT_EQ(h.session.phase(), SessionPhase::ACTIVE);
+}
+
+// roles/source/v1.md "Source command semantics": a routed source is sent start only once an
+// activation with `playback` is written, after it; an activation dropping `playback` is preceded by
+// a stop, and one adding it back starts the source again
+TEST_P(SessionTest, StartsARoutedSourceOnlyWithPlayback) {
+    using sendspin::server::SourceCommand;
+    Harness h(GetParam(), source_settings());
+    ASSERT_NO_FATAL_FAILURE(activate_source(h));
+    sendspin::server::SourceFeed feed(4096, 16);
+    const ServerActivate without{false, std::nullopt, std::nullopt};
+    const ServerActivate with{true, std::nullopt, std::nullopt};
+    const std::string start = sendspin::server::build_source_command(SourceCommand::START);
+    const auto expect_sent = [&](const std::vector<std::string>& expected) {
+        const std::vector<OutboundMessage> sent = h.take_all();
+        ASSERT_EQ(sent.size(), expected.size());
+        for (size_t i = 0; i < sent.size(); ++i) {
+            EXPECT_NE(h.decrypt_json(sent[i]).find(expected[i]), std::string::npos)
+                << "message " << i;
+        }
+    };
+
+    h.session.activate(without);
+    ASSERT_NO_FATAL_FAILURE(expect_sent({R"("activities":[])"}));
+    h.session.set_source_route(&feed, 7);
+    ASSERT_NO_FATAL_FAILURE(expect_sent({}));
+    h.session.activate(with);
+    ASSERT_NO_FATAL_FAILURE(expect_sent({R"("activities":["playback"])", start}));
+    h.session.activate(without);
+    ASSERT_NO_FATAL_FAILURE(expect_sent(
+        {sendspin::server::build_source_command(SourceCommand::STOP), R"("activities":[])"}));
+    h.session.activate(with);
+    ASSERT_NO_FATAL_FAILURE(expect_sent({R"("activities":["playback"])", start}));
 }
 
 // roles/source/v1.md "Default streaming behavior" and "Source Audio Chunks (Binary)": the

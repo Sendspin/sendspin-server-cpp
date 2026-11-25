@@ -38,6 +38,7 @@ bool SourceStream::set_routed(bool routed) {
 
 void SourceStream::on_activation_written(bool role) {
     const bool was = this->ready();
+    const bool removed = this->role_written_ && !role;
     if (role && !this->role_written_) {
         // messaging.md "client/state": the role's object follows the activation that adds it
         this->state_received_ = false;
@@ -49,6 +50,12 @@ void SourceStream::on_activation_written(bool role) {
         this->sent_.reset();
     }
     this->role_written_ = role;
+    if (removed && !was) {
+        // A route binds by the role written, so its removal is reported from a source that was
+        // not ready too
+        this->events_.push_back({SourceEvent::Kind::UNREADY, {}, {}});
+        return;
+    }
     this->note_ready(was);
 }
 
@@ -135,11 +142,11 @@ void SourceStream::fail() {
     this->held_ = true;
 }
 
-std::optional<SourceCommand> SourceStream::take_command(bool role_ahead) {
+std::optional<SourceCommand> SourceStream::take_command(bool role_ahead, bool playback) {
     const bool active = this->role_written_ && role_ahead;
-    // roles/source/v1.md "Source command semantics": a start only while the role is active, its
-    // client/state source object received and the client available
-    const bool wanted = this->routed_ && !this->held_ && active && this->ready();
+    // roles/source/v1.md "Source command semantics": a start only while the role is active,
+    // `playback` declared, its client/state source object received and the client available
+    const bool wanted = this->routed_ && !this->held_ && active && playback && this->ready();
     if (wanted && this->sent_ != SourceCommand::START) {
         this->sent_ = SourceCommand::START;
         ++this->unanswered_starts_;

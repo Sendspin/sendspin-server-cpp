@@ -52,6 +52,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -456,6 +457,25 @@ void sleep_until_us(int64_t at_us) {
     }
 }
 
+/// The JSON messages raw receives through the first that contains text, in order
+std::vector<std::string> receive_json_through(RawClient& raw, std::string_view text) {
+    std::vector<std::string> received;
+    while (received.empty() || received.back().find(text) == std::string::npos) {
+        const std::optional<Bytes> plaintext = raw.receive_plaintext();
+        if (!plaintext) {
+            ADD_FAILURE() << "the connection closed before " << text;
+            break;
+        }
+        if (!plaintext->empty() && plaintext->front() == wire::JSON_ID) {
+            received.emplace_back(plaintext->begin() + 1, plaintext->end());
+        }
+    }
+    return received;
+}
+
+/// group/update follows, in order, whatever the server queued for its members before the rename
+constexpr const char* RENAMED = R"("group_name":"Renamed")";
+
 // roles/source/v1.md "Codec framing": a source's FLAC frames, after the codec_header its
 // client-stream/start carries, reach the players bit for bit. "Source Audio Chunks (Binary)": after
 // a stall, a backlog sent at once is dropped beyond the input's write jitter rather than burst (it
@@ -661,6 +681,130 @@ TEST(ServerSources, ActivateTheSourceRoleOnlyWithItsApproval) {
               std::string::npos);
     ASSERT_TRUE(s.server.revoke_approval(id));
     EXPECT_NE(raw.receive_until("server/activate").find(R"("active_roles":[])"), std::string::npos);
+    raw.close();
+}
+
+// roles/source/v1.md "Source command semantics": `start` goes only to a connection with `playback`,
+// so a source that connected to an idle group is told `playback` once routed, before its start
+TEST(ServerSources, DeclarePlaybackBeforeStartingARoutedSource) {
+    const Signal signal(16);
+    Rig s(signal);
+    RawClient raw;
+    const std::string id = raw.noise.identity().peer_id();
+    ASSERT_TRUE(s.server.approve(id, ApprovalScope::PLAYBACK_AND_SOURCE));
+    ASSERT_EQ(raw.dial(s.server.listen_port()), 101U);
+    ASSERT_NO_FATAL_FAILURE(raw.complete_handshake());
+    raw.send_json(sendspin::server::test::source_hello_json("Turntable"));
+    EXPECT_EQ(raw.receive_until("server/activate"),
+              R"({"type":"server/activate","payload":{"activities":[],)"
+              R"("active_roles":["source@v1"]}})");
+    raw.send_json(AVAILABLE);
+    s.recorder.wait_for("connected " + id);
+
+    const sendspin::server::RoutedSource routed = s.server.route_source(id, s.group());
+    ASSERT_EQ(routed.result, RouteSourceResult::OK);
+    std::vector<std::string> received;
+    while (received.empty() || received.back().find("server/command") == std::string::npos) {
+        const std::optional<Bytes> plaintext = raw.receive_plaintext();
+        ASSERT_TRUE(plaintext) << "the connection closed before the start";
+        if (!plaintext->empty() && plaintext->front() == wire::JSON_ID) {
+            received.emplace_back(plaintext->begin() + 1, plaintext->end());
+        }
+    }
+    EXPECT_NE(received.back().find("start"), std::string::npos) << received.back();
+    const bool declared =
+        std::find(received.begin(), received.end(),
+                  R"({"type":"server/activate","payload":{"activities":["playback"]}})") !=
+        received.end();
+    EXPECT_TRUE(declared) << "start before playback: " << received.back();
+    raw.close();
+}
+
+// A route binds the connection whose activation last carried the source role, and `playback` is
+// declared while it is bound (messaging.md "server/activate"), so a connection that loses the role
+// is unbound and drops `playback`: also from a source that reports itself unavailable, and so was
+// never ready
+TEST(ServerSources, DropPlaybackWithTheSourceRole) {
+    const Signal signal(16);
+    struct Row {
+        const char* name;
+        bool available;
+    };
+    const Row rows[] = {
+        {"unavailable", false},
+        {"Control: available", true},
+    };
+    for (const Row& row : rows) {
+        SCOPED_TRACE(row.name);
+        Rig s(signal);
+        RawClient raw;
+        const std::string id = raw.noise.identity().peer_id();
+        ASSERT_TRUE(s.server.approve(id, ApprovalScope::PLAYBACK_AND_SOURCE));
+        // Accepted, not dialed: a dial declares `playback` in its first activation
+        ASSERT_EQ(raw.dial(s.server.listen_port()), 101U);
+        ASSERT_NO_FATAL_FAILURE(raw.complete_handshake());
+        raw.send_json(sendspin::server::test::source_hello_json("Turntable"));
+        EXPECT_EQ(raw.receive_until("server/activate"),
+                  R"({"type":"server/activate","payload":{"activities":[],)"
+                  R"("active_roles":["source@v1"]}})");
+        raw.send_json(std::string(R"({"type":"client/state","payload":{"available":)") +
+                      (row.available ? "true" : "false") + R"(,"source":{}}})");
+        s.recorder.wait_for("connected " + id);
+        const sendspin::server::RoutedSource routed = s.server.route_source(id, s.group());
+        ASSERT_EQ(routed.result, RouteSourceResult::OK);
+        EXPECT_EQ(raw.receive_until("server/activate"),
+                  R"({"type":"server/activate","payload":{"activities":["playback"]}})");
+
+        ASSERT_TRUE(s.server.approve(id, ApprovalScope::PLAYBACK));
+        EXPECT_NE(raw.receive_until("server/activate").find(R"("active_roles":[])"),
+                  std::string::npos);
+        ASSERT_TRUE(s.server.rename_group(s.group(), "Renamed"));
+        const std::vector<std::string> received = receive_json_through(raw, RENAMED);
+        EXPECT_NE(std::find(received.begin(), received.end(),
+                            R"({"type":"server/activate","payload":{"activities":[]}})"),
+                  received.end())
+            << "playback kept without the source role";
+        raw.close();
+    }
+}
+
+// SendspinServer::route_source(): routed into another group, an open stream moves with the route,
+// also out of a group its client is a member of: the input closing ends that group's run, but the
+// source's connection stays bound, so it keeps `playback` and is neither stopped nor started
+TEST(ServerSources, MoveAnOpenStreamOutOfItsClientsPlayingGroup) {
+    const Signal signal(16);
+    Rig s(signal);
+    Peer& player = s.add(true, std::nullopt, 16);
+    const std::optional<sendspin::server::GroupId> second =
+        s.server.create_group("Second", s.client_id(player));
+    ASSERT_TRUE(second);
+    RawClient raw;
+    const std::string id = raw.noise.identity().peer_id();
+    const sendspin::server::RoutedSource first = s.server.route_source(id, s.group());
+    ASSERT_EQ(first.result, RouteSourceResult::OK);
+    ASSERT_NO_FATAL_FAILURE(connect_raw_source(s, raw));
+    EXPECT_NE(raw.receive_until("server/command").find("start"), std::string::npos);
+    raw.send_json(
+        R"({"type":"client-stream/start","payload":{"source":{"codec":"pcm","channels":2,)"
+        R"("sample_rate":48000,"bit_depth":16}}})");
+    // Audio captured from now on starts the group's run, which no gap ends
+    const int64_t base = sendspin::server::now_us();
+    const Bytes silence(CHUNK * signal.frame_bytes());
+    for (int k = 0; k < 5; ++k) {
+        send_chunk(raw, base + (int64_t{k} * 20000), silence);
+    }
+    const std::string playing = "group " + std::to_string(s.group().value) + " playing";
+    s.run_until([&] { return s.recorder.contains(playing); });
+
+    const sendspin::server::RoutedSource moved = s.server.route_source(id, *second);
+    ASSERT_EQ(moved.result, RouteSourceResult::OK);
+    ASSERT_TRUE(s.server.rename_group(s.group(), "Renamed"));
+    const std::vector<std::string> received = receive_json_through(raw, RENAMED);
+    for (const std::string& message : received) {
+        EXPECT_EQ(message.find("server/command"), std::string::npos) << message;
+        EXPECT_EQ(message.find("server/activate"), std::string::npos) << message;
+    }
+    EXPECT_EQ(first.input->state(), sendspin::server::InputState::CLOSED);
     raw.close();
 }
 

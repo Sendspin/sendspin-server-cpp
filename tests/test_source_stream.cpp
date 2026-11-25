@@ -70,9 +70,9 @@ std::vector<SourceEvent::Kind> kinds(SourceStream& source) {
 }
 
 // roles/source/v1.md "Source command semantics": the server MUST NOT send start unless the role is
-// active (in the activation written and the one ahead), it received the source object in the
-// client/state that activation asks for, and the latest client/state reports available; the
-// server sends start only for a routed source, and once
+// active (in the activation written and the one ahead), `playback` is declared, it received the
+// source object in the client/state that activation asks for, and the latest client/state reports
+// available; the server sends start only for a routed source, and once
 TEST(SourceStreamCommands, StartOnlyWhenEveryPreconditionHolds) {
     struct Row {
         const char* name;
@@ -81,15 +81,17 @@ TEST(SourceStreamCommands, StartOnlyWhenEveryPreconditionHolds) {
         bool available;
         bool routed;
         bool role_ahead;
+        bool playback;
         bool start;
     };
     const Row rows[] = {
-        {"Control: everything holds", true, true, true, true, true, true},
-        {"the role not active", false, true, true, true, true, false},
-        {"the activation ahead removes it", true, true, true, true, false, false},
-        {"no source object since the activation", true, false, true, true, true, false},
-        {"unavailable", true, true, false, true, true, false},
-        {"not routed", true, true, true, false, true, false},
+        {"Control: everything holds", true, true, true, true, true, true, true},
+        {"the role not active", false, true, true, true, true, true, false},
+        {"the activation ahead removes it", true, true, true, true, false, true, false},
+        {"no playback", true, true, true, true, true, false, false},
+        {"no source object since the activation", true, false, true, true, true, true, false},
+        {"unavailable", true, true, false, true, true, true, false},
+        {"not routed", true, true, true, false, true, true, false},
     };
     for (const Row& row : rows) {
         SCOPED_TRACE(row.name);
@@ -97,10 +99,11 @@ TEST(SourceStreamCommands, StartOnlyWhenEveryPreconditionHolds) {
         source.on_activation_written(row.role);
         source.on_client_state(state(row.available, row.state_object));
         source.set_routed(row.routed);
-        const std::optional<SourceCommand> command = source.take_command(row.role_ahead);
+        const std::optional<SourceCommand> command =
+            source.take_command(row.role_ahead, row.playback);
         EXPECT_EQ(command, row.start ? std::optional(SourceCommand::START) : std::nullopt);
         // Never twice
-        EXPECT_EQ(source.take_command(row.role_ahead), std::nullopt);
+        EXPECT_EQ(source.take_command(row.role_ahead, row.playback), std::nullopt);
     }
 }
 
@@ -111,38 +114,45 @@ TEST(SourceStreamCommands, WaitForTheSourceObjectAfterTheActivationAddingTheRole
     source.on_client_state(state(true));
     source.set_routed(true);
     source.on_activation_written(true);
-    EXPECT_EQ(source.take_command(true), std::nullopt);
+    EXPECT_EQ(source.take_command(true, true), std::nullopt);
     source.on_client_state(state(true));
-    EXPECT_EQ(source.take_command(true), SourceCommand::START);
+    EXPECT_EQ(source.take_command(true, true), SourceCommand::START);
 }
 
-// roles/source/v1.md "Source command semantics": unrouting sends stop; unavailability and role
-// removal are implicit stops, so no stop goes out for them, and a start goes out again only after
-// the client is available or its role active again
+// roles/source/v1.md "Source command semantics": unrouting sends stop, as does the end of
+// `playback`; unavailability and role removal are implicit stops, so no stop goes out for them, and
+// a start goes out again only after the client is available or its role active again
 TEST(SourceStreamCommands, StopExplicitlyOnlyWhileTheClientNeedsIt) {
     SourceStream unrouted = ready_source();
-    ASSERT_EQ(unrouted.take_command(true), SourceCommand::START);
+    ASSERT_EQ(unrouted.take_command(true, true), SourceCommand::START);
     unrouted.set_routed(false);
-    EXPECT_EQ(unrouted.take_command(true), SourceCommand::STOP);
-    EXPECT_EQ(unrouted.take_command(true), std::nullopt);
+    EXPECT_EQ(unrouted.take_command(true, true), SourceCommand::STOP);
+    EXPECT_EQ(unrouted.take_command(true, true), std::nullopt);
     unrouted.set_routed(true);
-    EXPECT_EQ(unrouted.take_command(true), SourceCommand::START);
+    EXPECT_EQ(unrouted.take_command(true, true), SourceCommand::START);
 
     SourceStream unavailable = ready_source();
-    ASSERT_EQ(unavailable.take_command(true), SourceCommand::START);
+    ASSERT_EQ(unavailable.take_command(true, true), SourceCommand::START);
     unavailable.on_client_state(state(false));
-    EXPECT_EQ(unavailable.take_command(true), std::nullopt);
+    EXPECT_EQ(unavailable.take_command(true, true), std::nullopt);
     unavailable.on_client_state(state(true));
-    EXPECT_EQ(unavailable.take_command(true), SourceCommand::START);
+    EXPECT_EQ(unavailable.take_command(true, true), SourceCommand::START);
+
+    // Sent ahead of the activation that drops `playback`, while the client still has it
+    SourceStream dropped = ready_source();
+    ASSERT_EQ(dropped.take_command(true, true), SourceCommand::START);
+    EXPECT_EQ(dropped.take_command(true, false), SourceCommand::STOP);
+    EXPECT_EQ(dropped.take_command(true, false), std::nullopt);
+    EXPECT_EQ(dropped.take_command(true, true), SourceCommand::START);
 
     SourceStream removed = ready_source();
-    ASSERT_EQ(removed.take_command(true), SourceCommand::START);
-    EXPECT_EQ(removed.take_command(false), std::nullopt);
+    ASSERT_EQ(removed.take_command(true, true), SourceCommand::START);
+    EXPECT_EQ(removed.take_command(false, true), std::nullopt);
     removed.on_activation_written(false);
     removed.on_activation_written(true);
-    EXPECT_EQ(removed.take_command(true), std::nullopt) << "waits for the source object";
+    EXPECT_EQ(removed.take_command(true, true), std::nullopt) << "waits for the source object";
     removed.on_client_state(state(true));
-    EXPECT_EQ(removed.take_command(true), SourceCommand::START);
+    EXPECT_EQ(removed.take_command(true, true), SourceCommand::START);
 }
 
 // roles/source/v1.md "Default streaming behavior": a client-stream/start that opens a stream with
@@ -154,15 +164,15 @@ TEST(SourceStreamInput, OpenOnlyAnswersToAStart) {
     EXPECT_EQ(unsolicited.on_stream_start(pcm_start(), ACCEPTED, true), Verdict::PROTOCOL_ERROR);
 
     SourceStream unlisted = ready_source();
-    ASSERT_EQ(unlisted.take_command(true), SourceCommand::START);
+    ASSERT_EQ(unlisted.take_command(true, true), SourceCommand::START);
     EXPECT_EQ(
         unlisted.on_stream_start({AudioFormat{Codec::OPUS, 2, 48000, 0}, {}, 0}, ACCEPTED, true),
         Verdict::PROTOCOL_ERROR);
 
     SourceStream source = ready_source();
-    ASSERT_EQ(source.take_command(true), SourceCommand::START);
+    ASSERT_EQ(source.take_command(true, true), SourceCommand::START);
     source.set_routed(false);
-    ASSERT_EQ(source.take_command(true), SourceCommand::STOP);
+    ASSERT_EQ(source.take_command(true, true), SourceCommand::STOP);
     // Control: the start's answer, in flight past the stop, opens the stream
     EXPECT_EQ(source.on_stream_start(pcm_start(), ACCEPTED, true), Verdict::TAKE);
     EXPECT_EQ(source.stream_number(), 1U);
@@ -185,7 +195,7 @@ TEST(SourceStreamInput, OpenOnlyAnswersToAStart) {
 TEST(SourceStreamInput, TakeChunksOnlyOfAnOpenStream) {
     SourceStream source = ready_source();
     EXPECT_EQ(source.on_chunk(), Verdict::PROTOCOL_ERROR) << "no stream";
-    ASSERT_EQ(source.take_command(true), SourceCommand::START);
+    ASSERT_EQ(source.take_command(true, true), SourceCommand::START);
     ASSERT_EQ(source.on_stream_start(pcm_start(), ACCEPTED, true), Verdict::TAKE);
     EXPECT_EQ(source.on_chunk(), Verdict::TAKE);
     source.set_routed(false);
@@ -202,36 +212,36 @@ TEST(SourceStreamInput, TakeChunksOnlyOfAnOpenStream) {
 // (a start sent since still unanswered) is not
 TEST(SourceStreamCommands, HoldBackAStartAfterAFailureOrTheSourcesOwnEnd) {
     SourceStream failed = ready_source();
-    ASSERT_EQ(failed.take_command(true), SourceCommand::START);
+    ASSERT_EQ(failed.take_command(true, true), SourceCommand::START);
     ASSERT_EQ(failed.on_stream_start(pcm_start(), ACCEPTED, true), Verdict::TAKE);
     failed.fail();
-    EXPECT_EQ(failed.take_command(true), SourceCommand::STOP);
+    EXPECT_EQ(failed.take_command(true, true), SourceCommand::STOP);
     failed.on_stream_end();
-    EXPECT_EQ(failed.take_command(true), std::nullopt);
+    EXPECT_EQ(failed.take_command(true, true), std::nullopt);
     failed.set_routed(false);
     failed.set_routed(true);
-    EXPECT_EQ(failed.take_command(true), SourceCommand::START) << "routed again";
+    EXPECT_EQ(failed.take_command(true, true), SourceCommand::START) << "routed again";
 
     SourceStream ended = ready_source();
-    ASSERT_EQ(ended.take_command(true), SourceCommand::START);
+    ASSERT_EQ(ended.take_command(true, true), SourceCommand::START);
     ASSERT_EQ(ended.on_stream_start(pcm_start(), ACCEPTED, true), Verdict::TAKE);
     ended.on_stream_end();
-    EXPECT_EQ(ended.take_command(true), SourceCommand::STOP);
-    EXPECT_EQ(ended.take_command(true), std::nullopt);
+    EXPECT_EQ(ended.take_command(true, true), SourceCommand::STOP);
+    EXPECT_EQ(ended.take_command(true, true), std::nullopt);
     ended.on_client_state(state(false));
     ended.on_client_state(state(true));
-    EXPECT_EQ(ended.take_command(true), SourceCommand::START) << "available again";
+    EXPECT_EQ(ended.take_command(true, true), SourceCommand::START) << "available again";
 
     // Control: stop, then start again before the stop's end arrives
     SourceStream restarted = ready_source();
-    ASSERT_EQ(restarted.take_command(true), SourceCommand::START);
+    ASSERT_EQ(restarted.take_command(true, true), SourceCommand::START);
     ASSERT_EQ(restarted.on_stream_start(pcm_start(), ACCEPTED, true), Verdict::TAKE);
     restarted.set_routed(false);
-    ASSERT_EQ(restarted.take_command(true), SourceCommand::STOP);
+    ASSERT_EQ(restarted.take_command(true, true), SourceCommand::STOP);
     restarted.set_routed(true);
-    ASSERT_EQ(restarted.take_command(true), SourceCommand::START);
+    ASSERT_EQ(restarted.take_command(true, true), SourceCommand::START);
     restarted.on_stream_end();
-    EXPECT_EQ(restarted.take_command(true), std::nullopt);
+    EXPECT_EQ(restarted.take_command(true, true), std::nullopt);
     EXPECT_EQ(restarted.on_stream_start(pcm_start(), ACCEPTED, true), Verdict::TAKE);
 }
 
@@ -239,7 +249,7 @@ TEST(SourceStreamCommands, HoldBackAStartAfterAFailureOrTheSourcesOwnEnd) {
 // to another route is reported as opened there, unless it failed or ended
 TEST(SourceStreamEvents, ReportAStreamOpenedWhereverItGoes) {
     SourceStream refused = ready_source();
-    ASSERT_EQ(refused.take_command(true), SourceCommand::START);
+    ASSERT_EQ(refused.take_command(true, true), SourceCommand::START);
     (void)refused.take_events();
     ASSERT_EQ(refused.on_stream_start(pcm_start(), ACCEPTED, false), Verdict::TAKE);
     EXPECT_TRUE(refused.failed());
@@ -248,7 +258,7 @@ TEST(SourceStreamEvents, ReportAStreamOpenedWhereverItGoes) {
     EXPECT_TRUE(kinds(refused).empty());
 
     SourceStream moved = ready_source();
-    ASSERT_EQ(moved.take_command(true), SourceCommand::START);
+    ASSERT_EQ(moved.take_command(true, true), SourceCommand::START);
     ASSERT_EQ(moved.on_stream_start(pcm_start(), ACCEPTED, true), Verdict::TAKE);
     EXPECT_EQ(kinds(moved), (std::vector{SourceEvent::Kind::READY, SourceEvent::Kind::OPENED}))
         << "Control";
@@ -276,6 +286,21 @@ TEST(SourceStreamEvents, ReportReadinessAndSignal) {
     EXPECT_EQ(events[2].kind, SourceEvent::Kind::SIGNAL);
     EXPECT_EQ(events[2].signal, std::nullopt);
     EXPECT_EQ(events[3].kind, SourceEvent::Kind::UNREADY);
+}
+
+// A route binds by the role written, so its owner hears the role's removal as UNREADY also from
+// a source that was not ready; an activation without the role it never had reports nothing
+TEST(SourceStreamEvents, ReportTheRolesRemovalFromAnUnreadySource) {
+    SourceStream source;
+    source.on_activation_written(false);
+    EXPECT_TRUE(source.take_events().empty());
+    source.on_activation_written(true);
+    source.on_client_state(state(false));
+    EXPECT_TRUE(source.take_events().empty()) << "never ready";
+    source.on_activation_written(false);
+    const std::vector<SourceEvent> events = source.take_events();
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(events[0].kind, SourceEvent::Kind::UNREADY);
 }
 
 }  // namespace
