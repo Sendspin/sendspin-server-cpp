@@ -1264,18 +1264,25 @@ std::optional<int64_t> startup_lead(Harness& h, const std::vector<OutboundMessag
 // An activation that adds `playback` lets a playing group's player stream start, timed by the
 // trigger waiting for it: a group trigger queued behind it, as a group's start queues one, keeps
 // the group's startup lead (`max(floor_i, J_min)`); with none waiting it is a join, which takes
-// the player's own lead (`max(lead_i, J_min)`). The player's lead_i (its required_lead_time_ms)
-// is well above its floor_i and J_min, so the two leads differ by many frames.
+// the player's own lead (`max(lead_i, J_min)`). A stop and a restart queued before either
+// activation is written keep the restart's group trigger past the marker ahead of the stop's. The
+// player's lead_i (its required_lead_time_ms) is well above its floor_i and J_min, so the two
+// leads differ by many frames.
 TEST_P(SessionTest, StartsAPlayerGainingPlaybackOnItsPendingTriggerElseAsAJoin) {
     constexpr int64_t LEAD_US = 1000000;
     struct Row {
         const char* name;
+        /// `playback` is written first, then dropped and added back in two queued activations
+        bool restart;
         bool group_trigger;
         int64_t lead_us;
     };
     const Row rows[] = {
-        {"a group trigger queued behind the activation", true, sched::timing_defaults::JOIN_MIN_US},
-        {"Control: no trigger pending, a join", false, LEAD_US},
+        {"a group trigger queued behind the activation", false, true,
+         sched::timing_defaults::JOIN_MIN_US},
+        {"a restart's group trigger queued behind the stop's activation and its own", true, true,
+         sched::timing_defaults::JOIN_MIN_US},
+        {"Control: no trigger pending, a join", false, false, LEAD_US},
     };
     for (const Row& row : rows) {
         SCOPED_TRACE(row.name);
@@ -1299,6 +1306,14 @@ TEST_P(SessionTest, StartsAPlayerGainingPlaybackOnItsPendingTriggerElseAsAJoin) 
         ASSERT_TRUE(h.take_all().empty()) << "no stream/start without playback";
         ASSERT_FALSE(h.session.player().preconditions().trigger_pending);
 
+        if (row.restart) {
+            h.session.activate(ServerActivate{true, std::nullopt, std::nullopt});
+            for (const OutboundMessage& message : h.take_all()) {
+                // Each is decrypted, so the client's nonce follows the server's
+                ASSERT_TRUE(h.client.decrypt(message.bytes));
+            }
+            h.session.activate(ServerActivate{false, std::nullopt, std::nullopt});
+        }
         h.session.activate(ServerActivate{true, std::nullopt, std::nullopt});
         if (row.group_trigger) {
             h.session.queue_marker(sched::TriggerKind::GROUP);

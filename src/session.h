@@ -440,6 +440,17 @@ private:
     bool playback_ahead() const {
         return this->queued_.empty() ? this->playback_written_ : this->queued_.front().playback;
     }
+    /// @brief Whether an activation queued adds `playback` to the one before it
+    bool playback_added_ahead() const {
+        bool before = this->playback_written_;
+        for (size_t i = 0; i < this->queued_.size(); ++i) {
+            if (this->queued_[i].playback && !before) {
+                return true;
+            }
+            before = this->queued_[i].playback;
+        }
+        return false;
+    }
 
     const Identity& identity_;
     const SessionSettings& settings_;

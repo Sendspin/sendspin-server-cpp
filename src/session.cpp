@@ -763,10 +763,10 @@ std::optional<OutboundPlaintext> Session::take_marker(int64_t now_us, int64_t& s
             stamp_us = ::sendspin::server::now_us();
             return json_plaintext(build_source_command(*command));
         }
-        // The pending trigger kind is cleared when a marker pops, except one held for the
-        // activation ahead that declares `playback`
+        // The pending trigger kind is cleared when a marker pops, except one held for an
+        // activation queued that adds `playback`, such as a restart's behind a stop's
         this->queues_.pop_marker();
-        if (this->playback_written_ || !this->playback_ahead()) {
+        if (!this->playback_added_ahead()) {
             this->player_.clear_pending_kind();
             this->visualizer_.clear_pending_kind();
         }
