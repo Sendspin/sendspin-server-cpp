@@ -121,6 +121,10 @@ std::optional<sched::AudioFormat> select_player_format(
 /// @brief A player's timing values from its client/state, as the send path takes them
 sched::PlayerTiming player_timing(const PlayerState& state);
 
+/// @brief A player's volume, mute and volume commands from its client/state, as ClientInfo
+/// reports them
+PlayerVolume player_volume(const PlayerState& state);
+
 /// @brief A PCM stream's bytes per second at format's rate, channels and depth, counting a chunk
 /// header per frame: `B_i` for PCM, and for FLAC the PCM rate of the same format, which bounds
 /// FLAC's from above and so keeps `W` conservative; for Opus, its largest packet per frame

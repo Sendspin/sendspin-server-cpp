@@ -704,8 +704,19 @@ void ServerCore::on_rekeyed(Client& client) {
 }
 
 void ServerCore::on_client_state(Client& client) {
+    // Ahead of admit(), so that on_client_connected() carries the first one
+    const std::optional<PlayerState>& state = client.driver->session().player().player_state();
+    const std::optional<PlayerVolume> player =
+        state ? std::optional(player_volume(*state)) : std::nullopt;
+    const bool player_changed = player != client.info.player;
+    client.info.player = player;
     if (!client.admitted()) {
         this->admit(client);
+    } else if (player_changed && client.reported()) {
+        // Published first, so that a listener sees the change in clients()
+        this->publish_snapshot();
+        this->post_event(
+            [info = client.info](ServerListener& listener) { listener.on_player_changed(info); });
     }
     if (client.group == nullptr) {
         return;

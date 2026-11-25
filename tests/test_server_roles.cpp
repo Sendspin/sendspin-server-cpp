@@ -350,6 +350,47 @@ TEST(ServerController, SetsGroupVolumeAndMuteOnThePlayers) {
     EXPECT_EQ(type(next(fixed)), "server/time");
 }
 
+// roles/player/v1.md "client/state player object": the host sees each player's volume, mute and
+// volume commands, the first with the connection and each later change once
+TEST(ServerController, ReportsEachPlayersVolumeAndMute) {
+    LocalServer s;
+    ServerConfig config = sendspin::server::test::local_config();
+    config.approve_all_clients = true;
+    ASSERT_EQ(s.start(config), StartResult::OK);
+    RawClient client;
+    const std::string id = client_id_of(client);
+    ASSERT_NO_FATAL_FAILURE(connect(s.server, client, hello("A", {"player@v1"}, true)));
+    next(client, "group/update");
+    client.send_json(player_state(true, {"volume"}, 40, std::nullopt));
+    s.recorder.wait_for("connected " + id);
+    ASSERT_EQ(s.server.clients().size(), 1U);
+    ASSERT_TRUE(s.server.clients()[0].player);
+    EXPECT_EQ(s.server.clients()[0].player->volume, 40U);
+    EXPECT_FALSE(s.server.clients()[0].player->muted);
+    EXPECT_TRUE(s.server.clients()[0].player->volume_command);
+    EXPECT_FALSE(s.server.clients()[0].player->mute_command);
+
+    // Control: the same state again reports nothing, so the next entry is the change after it
+    client.send_json(player_state(true, {"volume"}, 40, std::nullopt));
+    client.send_json(player_state(true, {"volume", "mute"}, 25, true));
+    s.recorder.wait_for_match(
+        [](const std::string& entry) { return entry.starts_with("player "); });
+    const auto changes = [&s] {
+        std::vector<std::string> found;
+        for (const auto& entry : s.recorder.entries()) {
+            if (entry.what.starts_with("player ")) {
+                found.push_back(entry.what);
+            }
+        }
+        return found;
+    };
+    EXPECT_EQ(changes(), std::vector<std::string>{"player " + id + " 25 1 1 1"});
+    EXPECT_EQ(s.server.clients()[0].player->volume, 25U);
+    client.send_json(player_state(true, {}, std::nullopt, std::nullopt));
+    s.recorder.wait_for("player " + id + " - - 0 0");
+    EXPECT_EQ(changes().size(), 2U);
+}
+
 // ==============================================================================
 // Metadata (metadata/v1.md)
 // ==============================================================================

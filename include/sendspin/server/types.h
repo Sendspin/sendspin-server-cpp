@@ -136,6 +136,21 @@ enum class PairingResult : uint8_t {
     SERVER_STOPPED,
 };
 
+/// @brief A player's volume and mute, from its latest client/state player object (spec
+/// roles/player/v1.md "client/state player object")
+struct PlayerVolume {
+    /// From 0 to MAX_VOLUME; nullopt when the player does not report it
+    std::optional<uint32_t> volume;
+    /// nullopt when the player does not report it
+    std::optional<bool> muted;
+    /// Its `supported_commands` lists `volume`, so SendspinServer::set_group_volume() reaches it
+    bool volume_command{false};
+    /// Its `supported_commands` lists `mute`, so SendspinServer::set_group_mute() reaches it
+    bool mute_command{false};
+
+    bool operator==(const PlayerVolume&) const = default;
+};
+
 /// @brief A client, connected or one the server can dial. A client not connected keeps the
 /// values of its last connection.
 struct ClientInfo {
@@ -183,6 +198,9 @@ struct ClientInfo {
     /// order: the roles it may be activated with ("player@v1", "visualizer@v1", ...); empty before
     /// its first connection
     std::vector<std::string> roles;
+    /// From the first client/state with a player object while its player role is active;
+    /// nullopt before that (ServerListener::on_player_changed())
+    std::optional<PlayerVolume> player;
 };
 
 /// @brief Why a connected client went away
