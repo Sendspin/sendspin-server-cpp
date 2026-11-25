@@ -206,6 +206,7 @@ TEST(ServerAccept, DeclaresPlaybackBeforeEachStreamStart) {
             const sendspin::server::test::SilenceFeeder feeder(opened.input);
             received = receive_through(client, "stream/start");
         }
+        ASSERT_FALSE(received.empty()) << "the connection closed before any message";
         const bool declared =
             std::find(received.begin(), received.end(),
                       R"({"type":"server/activate","payload":{"activities":["playback"]}})") !=
