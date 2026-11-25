@@ -484,8 +484,6 @@ private:
     sched::RoleSet roles_written_;
     /// The active_roles of the activation last written
     std::vector<std::string> active_roles_;
-    /// The activation last written declares `playback`
-    bool playback_written_{false};
     /// Each activation queued behind it, oldest first: one per activation or rekey in the control
     /// FIFO, whose entry cap bounds them, and a rekey's frozen activation in its handshake; room
     /// for two at first
@@ -501,6 +499,8 @@ private:
     bool rekeyed_{false};
     bool state_changed_{false};
     bool available_{false};
+    /// The activation last written declares `playback`
+    bool playback_written_{false};
     std::optional<sched::TriggerKind> state_marker_kind_;
     SessionPhase phase_{SessionPhase::AWAIT_CLIENT_INIT};
 };
